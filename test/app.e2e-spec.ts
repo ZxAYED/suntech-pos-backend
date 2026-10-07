@@ -20,7 +20,15 @@ describe('AppController (e2e)', () => {
     return request(app.getHttpServer())
       .get('/')
       .expect(200)
-      .expect('Hello World!');
+      .expect((response) => {
+        expect(response.body).toEqual(
+          expect.objectContaining({
+            success: true,
+            message: 'Service is running',
+            data: 'Hello World!',
+          }),
+        );
+      });
   });
 
   afterEach(async () => {
