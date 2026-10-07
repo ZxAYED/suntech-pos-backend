@@ -1,0 +1,76 @@
+enum AdvanceStatus {
+  PENDING
+  DEDUCTED
+}
+
+enum PayrollStatus {
+  DUE
+  PAID
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+model EmployeeAdvance {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  cashierId  String
+  cashier    User     @relation(fields: [cashierId], references: [id], onDelete: Cascade)
+
+  amount  Int
+  takenAt DateTime      @default(now())
+  reason  String?
+  status  AdvanceStatus @default(PENDING)
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([businessId])
+  @@index([cashierId])
+}
+
+model PayrollRecord {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  cashierId  String
+  cashier    User     @relation(fields: [cashierId], references: [id])
+
+  month Int
+  year  Int
+
+  baseSalary            Int
+  totalAdvancesDeducted Int
+  netPaid               Int
+  status                PayrollStatus @default(PAID)
+
+  createdAt DateTime @default(now())
+
+  @@unique([cashierId, month, year])
+  @@index([businessId])
+}
+
+model ShiftSession {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  cashierId  String
+  cashier    User     @relation(fields: [cashierId], references: [id])
+
+  startingAmount Int
+  closingAmount  Int?
+  status         ShiftStatus @default(OPEN)
+
+  openedAt DateTime  @default(now())
+  closedAt DateTime?
+
+  @@index([businessId])
+  @@index([locationId])
+  @@index([cashierId, status])
+}

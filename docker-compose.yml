@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: suntech-pos-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: suntech_pos
+    volumes:
+      - suntech_pos_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d suntech_pos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  suntech_pos_pgdata:

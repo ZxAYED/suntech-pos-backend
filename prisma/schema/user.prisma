@@ -1,0 +1,53 @@
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  CASHIER
+}
+
+enum AccountStatus {
+  PENDING_APPROVAL
+  ACTIVE
+  REJECTED
+  SUSPENDED
+}
+
+model User {
+  id           String        @id @default(cuid())
+  publicId     String?       @unique
+  fullName     String
+  email        String        @unique
+  phoneNumber  String?       @unique
+  password     String
+  role         Role          @default(CASHIER)
+  status       AccountStatus @default(PENDING_APPROVAL)
+  statusReason String?
+
+  // Multi-Tenancy Relations
+  ownedBusiness Business? @relation("BusinessOwner")
+  businessId    String?
+  business      Business? @relation("BusinessStaff", fields: [businessId], references: [id])
+  locationId    String?
+  location      Location? @relation("LocationStaff", fields: [locationId], references: [id])
+
+  // Sensitive Payroll Data (Hidden from Cashiers)
+  monthlySalary Int?
+
+  // Recovery & OTP
+  resetOtpHash String?
+  otpExpiry    DateTime?
+
+  // Domain Relations
+  advances         EmployeeAdvance[]
+  shifts           ShiftSession[]
+  payrolls         PayrollRecord[]
+  orders           Order[]           @relation("CashierOrders")
+  refundsProcessed Refund[]          @relation("RefundAuditor")
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([publicId])
+  @@index([businessId])
+  @@index([locationId])
+}

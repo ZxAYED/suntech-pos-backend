@@ -1,0 +1,130 @@
+enum PaymentMethod {
+  COD
+}
+
+enum StockTransactionType {
+  SALE
+  REFUND
+  RESTOCK
+  MANUAL_ADJUSTMENT
+}
+
+model Category {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  description String?
+  products    Product[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Product {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  description String?
+  categoryId  String?
+  category    Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  variants    Variant[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Variant {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name      String
+  sku       String  @unique
+  barcode   String? @unique
+
+  sellingPrice Int
+  costPrice    Int?
+  stock        Int  @default(0)
+
+  orderItems        OrderItem[]
+  stockTransactions StockTransaction[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Order {
+  id            String @id @default(cuid())
+  receiptNumber String @unique
+  cashierId     String
+  cashier       User   @relation("CashierOrders", fields: [cashierId], references: [id])
+
+  customerNumber String?
+  totalAmount    Int
+  paymentMethod  PaymentMethod @default(COD)
+
+  items   OrderItem[]
+  refunds Refund[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([cashierId])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  variantId String?
+  variant   Variant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  customItemName String?
+  price          Int
+  quantity       Int
+  subtotal       Int
+
+  refundItems RefundItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Refund {
+  id            String @id @default(cuid())
+  orderId       String
+  order         Order  @relation(fields: [orderId], references: [id])
+  processedById String
+  processedBy   User   @relation("RefundAuditor", fields: [processedById], references: [id])
+
+  totalRefund Int
+  reason      String?
+  items       RefundItem[]
+
+  createdAt DateTime @default(now())
+}
+
+model RefundItem {
+  id          String    @id @default(cuid())
+  refundId    String
+  refund      Refund    @relation(fields: [refundId], references: [id], onDelete: Cascade)
+  orderItemId String
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id])
+
+  quantity     Int
+  refundAmount Int
+
+  createdAt DateTime @default(now())
+}
+
+model StockTransaction {
+  id        String               @id @default(cuid())
+  variantId String
+  variant   Variant              @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  type      StockTransactionType
+  quantity  Int
+  notes     String?
+  createdAt DateTime             @default(now())
+}

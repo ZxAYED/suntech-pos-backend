@@ -1,0 +1,47 @@
+model Business {
+  id      String @id @default(cuid())
+  name    String
+  ownerId String @unique
+  owner   User   @relation("BusinessOwner", fields: [ownerId], references: [id])
+
+  locations Location[]
+  users     User[]            @relation("BusinessStaff")
+  advances  EmployeeAdvance[]
+  shifts    ShiftSession[]
+  payroll   PayrollRecord[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Location {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  address    String?
+
+  users  User[]         @relation("LocationStaff")
+  shifts ShiftSession[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([businessId])
+}
+
+model IdempotencyRecord {
+  id           String   @id @default(cuid())
+  key          String
+  scopeId      String
+  path         String
+  statusCode   Int
+  responseBody Json
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+
+  @@unique([scopeId, key])
+  @@index([expiresAt])
+}
