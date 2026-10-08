@@ -12,15 +12,17 @@ enum AccountStatus {
 }
 
 model User {
-  id           String        @id @default(cuid())
-  publicId     String?       @unique
-  fullName     String
-  email        String        @unique
-  phoneNumber  String?       @unique
-  password     String
-  role         Role          @default(CASHIER)
-  status       AccountStatus @default(PENDING_APPROVAL)
-  statusReason String?
+  id                   String        @id @default(cuid())
+  publicId             String?       @unique
+  fullName             String
+  email                String        @unique
+  phoneNumber          String?       @unique
+  password             String
+  profileImageUrl      String?
+  profileImagePublicId String?
+  role                 Role          @default(CASHIER)
+  status               AccountStatus @default(PENDING_APPROVAL)
+  statusReason         String?
 
   // Multi-Tenancy Relations
   ownedBusiness Business? @relation("BusinessOwner")

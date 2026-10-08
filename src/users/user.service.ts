@@ -2,13 +2,16 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { AccountStatus, Role } from '@prisma/client';
+import { AccountStatus, Prisma, Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { IdGeneratorService } from '../identity/id-generator.service';
+import { CloudinaryService } from '../media/cloudinary.service';
+import { UploadedImage } from '../media/uploaded-image';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCashierDto } from './dto/create-cashier.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
@@ -23,9 +26,12 @@ const BCRYPT_ROUNDS = 10;
 
 @Injectable()
 export class UserService {
+  private readonly logger = new Logger(UserService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly idGenerator: IdGeneratorService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   async getMe(userId: string): Promise<PresentedProfile> {
@@ -117,6 +123,105 @@ export class UserService {
     }
 
     return this.getMe(userId);
+  }
+
+  setOwnProfileImage(
+    userId: string,
+    file: UploadedImage,
+  ): Promise<PresentedProfile> {
+    return this.replaceProfileImage({ id: userId }, file);
+  }
+
+  clearOwnProfileImage(userId: string): Promise<PresentedProfile> {
+    return this.clearProfileImage({ id: userId });
+  }
+
+  setStaffProfileImage(
+    admin: AccessTokenPayload,
+    userId: string,
+    file: UploadedImage,
+  ): Promise<PresentedProfile> {
+    return this.replaceProfileImage(
+      { id: userId, businessId: this.requireBusinessId(admin) },
+      file,
+    );
+  }
+
+  clearStaffProfileImage(
+    admin: AccessTokenPayload,
+    userId: string,
+  ): Promise<PresentedProfile> {
+    return this.clearProfileImage({
+      id: userId,
+      businessId: this.requireBusinessId(admin),
+    });
+  }
+
+  private async replaceProfileImage(
+    where: Prisma.UserWhereInput,
+    file: UploadedImage,
+  ): Promise<PresentedProfile> {
+    const user = await this.prisma.user.findFirst({
+      where: { ...where, deletedAt: null },
+      select: { id: true, profileImagePublicId: true },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const uploaded = await this.cloudinary.uploadImage(
+      file,
+      `suntech/users/${user.id}`,
+    );
+
+    try {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          profileImageUrl: uploaded.url,
+          profileImagePublicId: uploaded.publicId,
+        },
+      });
+    } catch (error) {
+      await this.cloudinary.deleteImage(uploaded.publicId);
+      throw error;
+    }
+
+    await this.removeStoredImage(user.profileImagePublicId);
+    return this.getMe(user.id);
+  }
+
+  private async clearProfileImage(
+    where: Prisma.UserWhereInput,
+  ): Promise<PresentedProfile> {
+    const user = await this.prisma.user.findFirst({
+      where: { ...where, deletedAt: null },
+      select: { id: true, profileImagePublicId: true },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        profileImageUrl: null,
+        profileImagePublicId: null,
+      },
+    });
+    await this.removeStoredImage(user.profileImagePublicId);
+    return this.getMe(user.id);
+  }
+
+  private async removeStoredImage(publicId: string | null): Promise<void> {
+    try {
+      await this.cloudinary.deleteImage(publicId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Could not delete stored image: ${message}`);
+    }
   }
 
   private requireBusinessId(admin: AccessTokenPayload): string {

@@ -10,6 +10,7 @@ export const userPublicSelect = {
   status: true,
   businessId: true,
   locationId: true,
+  profileImageUrl: true,
 } satisfies Prisma.UserSelect;
 
 export type PublicUser = Prisma.UserGetPayload<{

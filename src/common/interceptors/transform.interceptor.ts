@@ -3,6 +3,7 @@ import {
   ExecutionContext,
   Injectable,
   NestInterceptor,
+  StreamableFile,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Observable, map } from 'rxjs';
@@ -18,25 +19,31 @@ export interface ApiSuccessResponse<T> {
 @Injectable()
 export class TransformInterceptor<T> implements NestInterceptor<
   T,
-  ApiSuccessResponse<T>
+  ApiSuccessResponse<T> | T
 > {
   constructor(private readonly reflector: Reflector) {}
 
   intercept(
     context: ExecutionContext,
     next: CallHandler<T>,
-  ): Observable<ApiSuccessResponse<T>> {
+  ): Observable<ApiSuccessResponse<T> | T> {
     const message =
       this.reflector.get<string>(RESPONSE_MESSAGE_KEY, context.getHandler()) ??
       'Request successful';
 
     return next.handle().pipe(
-      map((data) => ({
-        success: true as const,
-        message,
-        data,
-        timestamp: new Date().toISOString(),
-      })),
+      map((data) => {
+        if (data instanceof StreamableFile) {
+          return data;
+        }
+
+        return {
+          success: true as const,
+          message,
+          data,
+          timestamp: new Date().toISOString(),
+        };
+      }),
     );
   }
 }

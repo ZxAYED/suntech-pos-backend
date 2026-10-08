@@ -1,14 +1,19 @@
 model Business {
-  id      String @id @default(cuid())
-  name    String
-  ownerId String @unique
-  owner   User   @relation("BusinessOwner", fields: [ownerId], references: [id])
+  id                   String  @id @default(cuid())
+  name                 String
+  ownerId              String  @unique
+  profileImageUrl      String?
+  profileImagePublicId String?
+  owner                User    @relation("BusinessOwner", fields: [ownerId], references: [id])
 
-  locations Location[]
-  users     User[]            @relation("BusinessStaff")
-  advances  EmployeeAdvance[]
-  shifts    ShiftSession[]
-  payroll   PayrollRecord[]
+  locations  Location[]
+  users      User[]            @relation("BusinessStaff")
+  categories Category[]
+  products   Product[]
+  variants   Variant[]
+  advances   EmployeeAdvance[]
+  shifts     ShiftSession[]
+  payroll    PayrollRecord[]
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())
@@ -24,6 +29,7 @@ model Location {
 
   users  User[]         @relation("LocationStaff")
   shifts ShiftSession[]
+  orders Order[]
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())

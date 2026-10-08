@@ -17,6 +17,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('register')
+  @Throttle(sensitiveThrottle)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Registration submitted for approval')

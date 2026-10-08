@@ -2,11 +2,24 @@ import { ExecutionContext, createParamDecorator } from '@nestjs/common';
 import { AccessTokenPayload } from '../types/access-token-payload';
 
 export const CurrentUser = createParamDecorator(
-  (_data: unknown, context: ExecutionContext): AccessTokenPayload => {
+  (data: string | undefined, context: ExecutionContext): unknown => {
     const request = context.switchToHttp().getRequest<{
-      user: AccessTokenPayload;
+      user?: AccessTokenPayload & { id?: string };
     }>();
 
-    return request.user;
+    const user = request.user;
+    if (!user) {
+      return undefined;
+    }
+
+    if (data === 'id') {
+      return user.id ?? user.sub;
+    }
+
+    if (data && typeof data === 'string') {
+      return (user as unknown as Record<string, unknown>)[data];
+    }
+
+    return user;
   },
 );

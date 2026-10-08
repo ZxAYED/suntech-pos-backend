@@ -1,8 +1,23 @@
 import { NotFoundException } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { IdGeneratorService } from '../identity/id-generator.service';
+import { CloudinaryService } from '../media/cloudinary.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { UserService } from './user.service';
+
+jest.mock('@nestjs/config', () => ({
+  ConfigService: class ConfigService {},
+}));
+
+jest.mock('cloudinary', () => ({
+  v2: {
+    config: jest.fn(),
+    uploader: {
+      upload_stream: jest.fn(),
+      destroy: jest.fn(),
+    },
+  },
+}));
 
 describe('UserService', () => {
   const locationFindFirst = jest.fn();
@@ -15,7 +30,11 @@ describe('UserService', () => {
   const idGenerator = {
     withUniquePublicId,
   } as unknown as IdGeneratorService;
-  const service = new UserService(prisma, idGenerator);
+  const cloudinary = {
+    uploadImage: jest.fn(),
+    deleteImage: jest.fn(),
+  } as unknown as CloudinaryService;
+  const service = new UserService(prisma, idGenerator, cloudinary);
 
   beforeEach(() => {
     locationFindFirst.mockReset();

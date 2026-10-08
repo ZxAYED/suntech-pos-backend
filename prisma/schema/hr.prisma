@@ -65,10 +65,13 @@ model ShiftSession {
 
   startingAmount Int
   closingAmount  Int?
+  cashCollected  Int         @default(0)
   status         ShiftStatus @default(OPEN)
 
   openedAt DateTime  @default(now())
   closedAt DateTime?
+
+  orders Order[]
 
   @@index([businessId])
   @@index([locationId])

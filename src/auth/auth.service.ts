@@ -21,6 +21,11 @@ import {
   PublicUser,
   userPublicSelect,
 } from '../common/prisma/user-public.select';
+import { presentEmail } from '../users/user-profile.select';
+
+type PresentedPublicUser = Omit<PublicUser, 'email'> & {
+  email: string | null;
+};
 import { EmailTemplateService } from '../identity/email-template.service';
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -78,7 +83,7 @@ export class AuthService {
   async login(dto: LoginDto): Promise<{
     accessToken: string;
     refreshToken: string;
-    user: PublicUser;
+    user: PresentedPublicUser;
   }> {
     const found =
       dto.loginType === LoginType.ADMIN
@@ -310,17 +315,18 @@ export class AuthService {
     return payload;
   }
 
-  private toPublicUser(user: User): PublicUser {
+  private toPublicUser(user: User): PresentedPublicUser {
     return {
       id: user.id,
       publicId: user.publicId,
       fullName: user.fullName,
-      email: user.email,
+      email: presentEmail(user.email),
       phoneNumber: user.phoneNumber,
       role: user.role,
       status: user.status,
       businessId: user.businessId,
       locationId: user.locationId,
+      profileImageUrl: user.profileImageUrl,
     };
   }
 

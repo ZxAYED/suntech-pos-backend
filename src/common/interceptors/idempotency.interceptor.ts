@@ -15,6 +15,7 @@ import { IDEMPOTENT_KEY } from '../decorators/idempotent.decorator';
 import { isUniqueConstraintError } from '../prisma/is-unique-constraint.error';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AccessTokenPayload } from '../types/access-token-payload';
+import { toStoredJson } from './to-stored-json';
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const PENDING_STATUS = 0;
@@ -192,9 +193,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
     statusCode: number,
     body: unknown,
   ): Promise<void> {
-    const responseBody = JSON.parse(
-      JSON.stringify(body ?? null),
-    ) as Prisma.InputJsonValue;
+    const responseBody = toStoredJson(body);
 
     await this.prisma.idempotencyRecord.update({
       where: { scopeId_key: { scopeId, key } },

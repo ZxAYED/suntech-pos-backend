@@ -25,10 +25,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       return;
     }
 
-    const status =
-      exception instanceof HttpException
-        ? exception.getStatus()
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+    const status = this.resolveStatus(exception);
 
     if (status >= 500) {
       const stack =
@@ -43,7 +40,23 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     } satisfies ApiErrorResponse);
   }
 
+  private resolveStatus(exception: unknown): number {
+    if (exception instanceof HttpException) {
+      return exception.getStatus();
+    }
+
+    if (this.isOversizedUpload(exception)) {
+      return HttpStatus.BAD_REQUEST;
+    }
+
+    return HttpStatus.INTERNAL_SERVER_ERROR;
+  }
+
   private resolveMessage(exception: unknown): string {
+    if (this.isOversizedUpload(exception)) {
+      return 'Image must be 5 MB or smaller';
+    }
+
     if (!(exception instanceof HttpException)) {
       return 'Internal server error';
     }
@@ -67,5 +80,14 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     }
 
     return exception.message;
+  }
+
+  private isOversizedUpload(exception: unknown): boolean {
+    return (
+      exception instanceof Error &&
+      exception.name === 'MulterError' &&
+      'code' in exception &&
+      exception.code === 'LIMIT_FILE_SIZE'
+    );
   }
 }

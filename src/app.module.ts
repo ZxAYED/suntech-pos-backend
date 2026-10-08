@@ -5,11 +5,17 @@ import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth/auth.module';
+import { CatalogModule } from './catalog/catalog.module';
+import { HrModule } from './hr/hr.module';
+import { MediaModule } from './media/media.module';
+import { OrdersModule } from './orders/orders.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { IdempotencyInterceptor } from './common/interceptors/idempotency.interceptor';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { SalaryMaskingInterceptor } from './common/interceptors/salary-masking.interceptor';
 import { PrismaModule } from './prisma/prisma.module';
+import { ReportsModule } from './reports/reports.module';
+import { ShiftModule } from './shifts/shift.module';
 import { TenantModule } from './tenant/tenant.module';
 import { UserModule } from './users/user.module';
 import { AppController } from './app.controller';
@@ -25,10 +31,16 @@ import { AppService } from './app.service';
       throttlers: [{ ttl: 60_000, limit: 60 }],
     }),
     PrismaModule,
+    MediaModule,
     AuthModule,
     AdminModule,
     TenantModule,
     UserModule,
+    CatalogModule,
+    ShiftModule,
+    OrdersModule,
+    ReportsModule,
+    HrModule,
   ],
   controllers: [AppController],
   providers: [

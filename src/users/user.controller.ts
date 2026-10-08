@@ -1,12 +1,16 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
   Post,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Idempotent } from '../common/decorators/idempotent.decorator';
@@ -15,6 +19,10 @@ import { Roles } from '../common/decorators/roles.decorator';
 import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import {
+  imageUploadOptions,
+  type UploadedImage,
+} from '../media/uploaded-image';
 import { CreateCashierDto } from './dto/create-cashier.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { UserService } from './user.service';
@@ -28,6 +36,22 @@ export class UserController {
   @ResponseMessage('Profile loaded')
   getMe(@CurrentUser() user: AccessTokenPayload) {
     return this.userService.getMe(user.sub);
+  }
+
+  @Post('me/profile-image')
+  @UseInterceptors(FileInterceptor('file', imageUploadOptions))
+  @ResponseMessage('Profile image updated')
+  setMyProfileImage(
+    @CurrentUser() user: AccessTokenPayload,
+    @UploadedFile() file: UploadedImage,
+  ) {
+    return this.userService.setOwnProfileImage(user.sub, file);
+  }
+
+  @Delete('me/profile-image')
+  @ResponseMessage('Profile image removed')
+  clearMyProfileImage(@CurrentUser() user: AccessTokenPayload) {
+    return this.userService.clearOwnProfileImage(user.sub);
   }
 
   @Post('cashiers')
@@ -50,5 +74,27 @@ export class UserController {
     @Body() dto: UpdateUserStatusDto,
   ) {
     return this.userService.updateStatus(admin, id, dto);
+  }
+
+  @Post(':id/profile-image')
+  @Roles(Role.ADMIN)
+  @UseInterceptors(FileInterceptor('file', imageUploadOptions))
+  @ResponseMessage('Profile image updated')
+  setStaffProfileImage(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+    @UploadedFile() file: UploadedImage,
+  ) {
+    return this.userService.setStaffProfileImage(admin, id, file);
+  }
+
+  @Delete(':id/profile-image')
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Profile image removed')
+  clearStaffProfileImage(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+  ) {
+    return this.userService.clearStaffProfileImage(admin, id);
   }
 }

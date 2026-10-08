@@ -2,26 +2,47 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
+  NotFoundException,
 } from '@nestjs/common';
-import { Business, Location } from '@prisma/client';
+import { Location, Prisma } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { AuthService } from '../auth/auth.service';
+import { CloudinaryService } from '../media/cloudinary.service';
+import { UploadedImage } from '../media/uploaded-image';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateBusinessDto } from './dto/create-business.dto';
 import { CreateLocationDto } from './dto/create-location.dto';
 
+const businessSelect = {
+  id: true,
+  name: true,
+  ownerId: true,
+  profileImageUrl: true,
+  deletedAt: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.BusinessSelect;
+
+export type PresentedBusiness = Prisma.BusinessGetPayload<{
+  select: typeof businessSelect;
+}>;
+
 @Injectable()
 export class TenantService {
+  private readonly logger = new Logger(TenantService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly authService: AuthService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   async createBusiness(
     admin: AccessTokenPayload,
     dto: CreateBusinessDto,
-  ): Promise<{ business: Business; accessToken: string }> {
+  ): Promise<{ business: PresentedBusiness; accessToken: string }> {
     try {
       const business = await this.prisma.$transaction(async (tx) => {
         const created = await tx.business.create({
@@ -29,6 +50,7 @@ export class TenantService {
             name: dto.name.trim(),
             ownerId: admin.sub,
           },
+          select: businessSelect,
         });
 
         await tx.user.update({
@@ -69,9 +91,86 @@ export class TenantService {
     });
   }
 
-  private requireBusinessId(admin: AccessTokenPayload): string {
+  async setBusinessProfileImage(
+    admin: AccessTokenPayload,
+    file: UploadedImage,
+  ): Promise<PresentedBusiness> {
+    const businessId = this.requireBusinessId(
+      admin,
+      'Create a business before uploading an image',
+    );
+    const business = await this.findOwnedBusiness(businessId);
+    const uploaded = await this.cloudinary.uploadImage(
+      file,
+      `suntech/businesses/${business.id}`,
+    );
+
+    try {
+      const updated = await this.prisma.business.update({
+        where: { id: business.id },
+        data: {
+          profileImageUrl: uploaded.url,
+          profileImagePublicId: uploaded.publicId,
+        },
+        select: businessSelect,
+      });
+      await this.removeStoredImage(business.profileImagePublicId);
+      return updated;
+    } catch (error) {
+      await this.cloudinary.deleteImage(uploaded.publicId);
+      throw error;
+    }
+  }
+
+  async clearBusinessProfileImage(
+    admin: AccessTokenPayload,
+  ): Promise<PresentedBusiness> {
+    const business = await this.findOwnedBusiness(
+      this.requireBusinessId(
+        admin,
+        'Create a business before uploading an image',
+      ),
+    );
+    const updated = await this.prisma.business.update({
+      where: { id: business.id },
+      data: {
+        profileImageUrl: null,
+        profileImagePublicId: null,
+      },
+      select: businessSelect,
+    });
+    await this.removeStoredImage(business.profileImagePublicId);
+    return updated;
+  }
+
+  private async findOwnedBusiness(businessId: string) {
+    const business = await this.prisma.business.findFirst({
+      where: { id: businessId, deletedAt: null },
+      select: { id: true, profileImagePublicId: true },
+    });
+
+    if (!business) {
+      throw new NotFoundException('Business not found');
+    }
+
+    return business;
+  }
+
+  private async removeStoredImage(publicId: string | null): Promise<void> {
+    try {
+      await this.cloudinary.deleteImage(publicId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Could not delete stored image: ${message}`);
+    }
+  }
+
+  private requireBusinessId(
+    admin: AccessTokenPayload,
+    message = 'Create a business before adding locations',
+  ): string {
     if (!admin.businessId) {
-      throw new ForbiddenException('Create a business before adding locations');
+      throw new ForbiddenException(message);
     }
 
     return admin.businessId;

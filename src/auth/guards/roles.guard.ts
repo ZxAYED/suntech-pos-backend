@@ -27,7 +27,10 @@ export class RolesGuard implements CanActivate {
       user?: AccessTokenPayload;
     }>();
 
-    if (!request.user || !roles.includes(request.user.role)) {
+    if (
+      !request.user ||
+      !roles.some((role) => String(role) === String(request.user?.role))
+    ) {
       throw new ForbiddenException(
         'You do not have permission to perform this action',
       );

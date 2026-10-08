@@ -12,6 +12,7 @@ export const userProfileSelect = {
   businessId: true,
   locationId: true,
   monthlySalary: true,
+  profileImageUrl: true,
 } satisfies Prisma.UserSelect;
 
 export type UserProfile = Prisma.UserGetPayload<{
@@ -24,12 +25,16 @@ export type PresentedProfile = Omit<UserProfile, 'email'> & {
 
 const INTERNAL_CASHIER_EMAIL_DOMAIN = '@cashiers.suntech.internal';
 
-export function presentProfile(profile: UserProfile): PresentedProfile {
-  if (profile.email.endsWith(INTERNAL_CASHIER_EMAIL_DOMAIN)) {
-    return { ...profile, email: null };
+export function presentEmail(email: string): string | null {
+  if (email.endsWith(INTERNAL_CASHIER_EMAIL_DOMAIN)) {
+    return null;
   }
 
-  return profile;
+  return email;
+}
+
+export function presentProfile(profile: UserProfile): PresentedProfile {
+  return { ...profile, email: presentEmail(profile.email) };
 }
 
 export function internalCashierEmail(publicId: string): string {
