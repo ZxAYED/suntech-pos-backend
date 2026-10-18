@@ -19,6 +19,8 @@ model EmployeeAdvance {
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   cashierId  String
   cashier    User     @relation(fields: [cashierId], references: [id], onDelete: Cascade)
+  shiftId    String?
+  shift      ShiftSession? @relation(fields: [shiftId], references: [id], onDelete: SetNull)
 
   amount  Int
   takenAt DateTime      @default(now())
@@ -31,6 +33,7 @@ model EmployeeAdvance {
 
   @@index([businessId])
   @@index([cashierId])
+  @@index([shiftId])
 }
 
 model PayrollRecord {
@@ -65,15 +68,22 @@ model ShiftSession {
 
   startingAmount Int
   closingAmount  Int?
+  expectedAmount Int?
+  variance       Int?
+  cashSales      Int         @default(0)
+  advancesOut    Int         @default(0)
   cashCollected  Int         @default(0)
   status         ShiftStatus @default(OPEN)
+  notes          String?
 
   openedAt DateTime  @default(now())
   closedAt DateTime?
 
-  orders Order[]
+  orders   Order[]
+  advances EmployeeAdvance[]
 
   @@index([businessId])
   @@index([locationId])
   @@index([cashierId, status])
 }
+

@@ -16,6 +16,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { DisbursePayrollDto } from './dto/disburse-payroll.dto';
 import { PayrollHistoryQueryDto } from './dto/payroll-history.query';
 import { ProcessPayrollDto } from './dto/process-payroll.dto';
 import { PayrollService } from './payroll.service';
@@ -26,6 +27,26 @@ import { PayrollService } from './payroll.service';
 export class PayrollController {
   constructor(private readonly payroll: PayrollService) {}
 
+  @Get('summary')
+  @ResponseMessage('Payroll summary loaded')
+  summary(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Query() query: PayrollHistoryQueryDto,
+  ) {
+    return this.payroll.summary(admin, query);
+  }
+
+  @Post('disburse')
+  @Idempotent()
+  @HttpCode(HttpStatus.OK)
+  @ResponseMessage('Payroll disbursed')
+  disburse(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Body() dto: DisbursePayrollDto,
+  ) {
+    return this.payroll.disburse(admin, dto);
+  }
+
   @Post('process')
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
@@ -35,6 +56,15 @@ export class PayrollController {
     @Body() dto: ProcessPayrollDto,
   ) {
     return this.payroll.process(admin, dto);
+  }
+
+  @Get('history')
+  @ResponseMessage('Payroll history loaded')
+  history(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Query() query: PayrollHistoryQueryDto,
+  ) {
+    return this.payroll.list(admin, query);
   }
 
   @Get()

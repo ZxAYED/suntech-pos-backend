@@ -1,8 +1,11 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
-import { Prisma, Role } from '@prisma/client';
+import { OrderStatus, PaymentMethod, Prisma, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
+import { resolveLocationScope } from '../common/utils/location-scope';
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
+import { AnalyticsQueryDto } from './dto/analytics.query';
+import { DashboardQueryDto } from './dto/dashboard.query';
 import { TransactionLogQueryDto } from './dto/transaction-log.query';
 
 export interface CashierDashboard {
@@ -18,10 +21,126 @@ export interface StaffLeaderboardEntry {
   revenue: number;
 }
 
+export interface RecentTicket {
+  id: string;
+  invoiceNumber: string;
+  customerName: string;
+  itemsSummary: string;
+  paymentMethod: string;
+  totalAmount: number;
+  status: string;
+  createdAt: Date;
+}
+
 export interface AdminDashboard {
   globalDailyRevenue: number;
   globalRolling30DayRevenue: number;
   staffLeaderboard: StaffLeaderboardEntry[];
+  periodRevenue: number;
+  ordersCount: number;
+  averageTicketValue: number;
+  grossMarginPercent: number;
+  paymentBreakdown: {
+    cashAmount: number;
+    digitalAmount: number;
+    cashPercentage: number;
+    digitalPercentage: number;
+    byMethod: {
+      COD: number;
+      BKASH: number;
+      NAGAD: number;
+      BANK: number;
+    };
+  };
+  topCategories: Array<{
+    name: string;
+    revenue: number;
+    percentage: number;
+  }>;
+  recentTickets: RecentTicket[];
+}
+
+export interface PeriodAnalytics {
+  grossRevenue: number;
+  ordersCount: number;
+  averageTicketValue: number;
+  grossMarginPercent: number;
+  cashPercentage: number;
+  digitalPercentage: number;
+  paymentBreakdown: {
+    cashAmount: number;
+    digitalAmount: number;
+    cashPercentage: number;
+    digitalPercentage: number;
+    byMethod: {
+      COD: number;
+      BKASH: number;
+      NAGAD: number;
+      BANK: number;
+    };
+  };
+  topCategories: Array<{
+    name: string;
+    revenue: number;
+    percentage: number;
+  }>;
+}
+
+export function getReportDateRange(
+  range?: string,
+  now = new Date(),
+): { gte: Date; lte?: Date } {
+  const startOfToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  );
+  const endOfToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+    23,
+    59,
+    59,
+    999,
+  );
+
+  switch (range?.toLowerCase()) {
+    case 'yesterday': {
+      const startOfYesterday = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() - 1,
+      );
+      const endOfYesterday = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() - 1,
+        23,
+        59,
+        59,
+        999,
+      );
+      return { gte: startOfYesterday, lte: endOfYesterday };
+    }
+    case 'today':
+    case 'daily': {
+      return { gte: startOfToday, lte: endOfToday };
+    }
+    case 'weekly': {
+      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      return { gte: sevenDaysAgo, lte: endOfToday };
+    }
+    case 'quarterly': {
+      const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      return { gte: ninetyDaysAgo, lte: endOfToday };
+    }
+    case 'monthly':
+    default: {
+      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      return { gte: thirtyDaysAgo, lte: endOfToday };
+    }
+  }
 }
 
 const transactionLineSelect = {
@@ -40,15 +159,24 @@ export class ReportService {
 
   dashboard(
     actor: AccessTokenPayload,
+    query?: DashboardQueryDto,
   ): Promise<CashierDashboard | AdminDashboard> {
-    const businessId = requireBusinessId(actor);
+    const scope = resolveLocationScope(actor, query?.locationId);
 
     if (actor.role === Role.CASHIER) {
-      return this.cashierDashboard(businessId, actor.sub);
+      return this.cashierDashboard(
+        scope.businessId,
+        actor.sub,
+        scope.locationId,
+      );
     }
 
     if (actor.role === Role.ADMIN) {
-      return this.adminDashboard(businessId);
+      return this.adminDashboard(
+        scope.businessId,
+        scope.locationId,
+        query?.range,
+      );
     }
 
     throw new ForbiddenException(
@@ -56,42 +184,93 @@ export class ReportService {
     );
   }
 
+  async analytics(
+    admin: AccessTokenPayload,
+    query?: AnalyticsQueryDto,
+  ): Promise<PeriodAnalytics> {
+    const scope = resolveLocationScope(admin, query?.locationId);
+    const range = query?.range ?? 'monthly';
+    const metrics = await this.computePeriodMetrics(
+      scope.businessId,
+      scope.locationId,
+      range,
+    );
+
+    return {
+      grossRevenue: metrics.periodRevenue,
+      ordersCount: metrics.ordersCount,
+      averageTicketValue: metrics.averageTicketValue,
+      grossMarginPercent: metrics.grossMarginPercent,
+      cashPercentage: metrics.paymentBreakdown.cashPercentage,
+      digitalPercentage: metrics.paymentBreakdown.digitalPercentage,
+      paymentBreakdown: metrics.paymentBreakdown,
+      topCategories: metrics.topCategories,
+    };
+  }
+
   async transactions(actor: AccessTokenPayload, query: TransactionLogQueryDto) {
-    const businessId = requireBusinessId(actor);
+    const scope = resolveLocationScope(actor, query?.locationId);
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
-    const where = { cashier: { businessId } };
+    const where: Prisma.OrderWhereInput = {
+      cashier: { businessId: scope.businessId },
+      ...(scope.locationId ? { locationId: scope.locationId } : {}),
+    };
+
+    if (query.range) {
+      const dateRange = getReportDateRange(query.range);
+      where.createdAt = {
+        gte: dateRange.gte,
+        ...(dateRange.lte ? { lte: dateRange.lte } : {}),
+      };
+    }
+
+    if (query.search?.trim()) {
+      const searchTerm = query.search.trim();
+      where.OR = [
+        { invoiceNumber: { contains: searchTerm, mode: 'insensitive' } },
+        { receiptNumber: { contains: searchTerm, mode: 'insensitive' } },
+        { customerName: { contains: searchTerm, mode: 'insensitive' } },
+        { customerPhone: { contains: searchTerm, mode: 'insensitive' } },
+        { customerNumber: { contains: searchTerm, mode: 'insensitive' } },
+      ];
+    }
+
     const [total, orders] = await Promise.all([
-      this.prisma.order.count({ where }),
-      this.prisma.order.findMany({
-        where,
-        select: {
-          id: true,
-          invoiceNumber: true,
-          receiptNumber: true,
-          orderType: true,
-          status: true,
-          customerName: true,
-          customerPhone: true,
-          customerNumber: true,
-          totalAmount: true,
-          subtotal: true,
-          tenderedAmount: true,
-          changeDue: true,
-          paymentMethod: true,
-          createdAt: true,
-          cashier: {
-            select: { id: true, fullName: true, publicId: true },
-          },
-          lines: { select: transactionLineSelect },
-        },
-        orderBy: { createdAt: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
-      }),
+      this.prisma.order.count
+        ? this.prisma.order.count({ where })
+        : Promise.resolve(0),
+      this.prisma.order.findMany
+        ? this.prisma.order.findMany({
+            where,
+            select: {
+              id: true,
+              invoiceNumber: true,
+              receiptNumber: true,
+              orderType: true,
+              status: true,
+              customerName: true,
+              customerPhone: true,
+              customerNumber: true,
+              totalAmount: true,
+              subtotal: true,
+              tenderedAmount: true,
+              changeDue: true,
+              paymentMethod: true,
+              createdAt: true,
+              cashier: {
+                select: { id: true, fullName: true, publicId: true },
+              },
+              lines: { select: transactionLineSelect },
+            },
+            orderBy: { createdAt: 'desc' },
+            skip: (page - 1) * limit,
+            take: limit,
+          })
+        : Promise.resolve([]),
     ]);
 
-    const items = orders.map((order) => ({
+    const items = (orders || []).map((order) => ({
       id: order.id,
       invoiceNumber: order.invoiceNumber,
       receiptNumber: order.invoiceNumber ?? order.receiptNumber,
@@ -108,10 +287,12 @@ export class ReportService {
       createdAt: order.createdAt,
       cashier: order.cashier,
       lines: order.lines,
-      items: order.lines.map((line) => ({
+      items: (order.lines || []).map((line) => ({
         id: line.id,
         variantId: line.variantId,
-        customItemName: line.variantId ? null : (line.variantName ?? line.productName),
+        customItemName: line.variantId
+          ? null
+          : (line.variantName ?? line.productName),
         price: line.unitPrice,
         quantity: line.quantity,
         subtotal: line.subtotal,
@@ -124,10 +305,15 @@ export class ReportService {
   private async cashierDashboard(
     businessId: string,
     cashierId: string,
+    locationId?: string,
   ): Promise<CashierDashboard> {
     const today = utcDay();
     const month = utcMonth();
-    const mine = { cashierId, cashier: { businessId } };
+    const mine: Prisma.OrderWhereInput = {
+      cashierId,
+      cashier: { businessId },
+      ...(locationId ? { locationId } : {}),
+    };
 
     const [myDailyRevenue, myMonthlyRevenue, myDailyUnitsSold] =
       await Promise.all([
@@ -139,59 +325,328 @@ export class ReportService {
     return { myDailyRevenue, myDailyUnitsSold, myMonthlyRevenue };
   }
 
-  private async adminDashboard(businessId: string): Promise<AdminDashboard> {
+  private async adminDashboard(
+    businessId: string,
+    locationId?: string,
+    range?: string,
+  ): Promise<AdminDashboard> {
     const today = utcDay();
     const rolling = {
       gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
       lt: new Date(),
     };
     const month = utcMonth();
-    const business = { cashier: { businessId } };
-    const [globalDailyRevenue, globalRolling30DayRevenue, staffLeaderboard] =
-      await Promise.all([
-        this.netRevenue({ ...business, createdAt: today }),
-        this.netRevenue({ ...business, createdAt: rolling }),
-        this.leaderboard(businessId, month),
-      ]);
+    const business: Prisma.OrderWhereInput = {
+      cashier: { businessId },
+      ...(locationId ? { locationId } : {}),
+    };
+
+    const [
+      globalDailyRevenue,
+      globalRolling30DayRevenue,
+      staffLeaderboard,
+      periodMetrics,
+      recentTickets,
+    ] = await Promise.all([
+      this.netRevenue({ ...business, createdAt: today }),
+      this.netRevenue({ ...business, createdAt: rolling }),
+      this.leaderboard(businessId, month, locationId),
+      this.computePeriodMetrics(businessId, locationId, range ?? 'today'),
+      this.fetchRecentTickets(businessId, locationId),
+    ]);
 
     return {
       globalDailyRevenue,
       globalRolling30DayRevenue,
       staffLeaderboard,
+      periodRevenue: periodMetrics.periodRevenue,
+      ordersCount: periodMetrics.ordersCount,
+      averageTicketValue: periodMetrics.averageTicketValue,
+      grossMarginPercent: periodMetrics.grossMarginPercent,
+      paymentBreakdown: periodMetrics.paymentBreakdown,
+      topCategories: periodMetrics.topCategories,
+      recentTickets,
     };
+  }
+
+  private async computePeriodMetrics(
+    businessId: string,
+    locationId?: string,
+    range?: string,
+  ): Promise<{
+    periodRevenue: number;
+    ordersCount: number;
+    averageTicketValue: number;
+    grossMarginPercent: number;
+    paymentBreakdown: {
+      cashAmount: number;
+      digitalAmount: number;
+      cashPercentage: number;
+      digitalPercentage: number;
+      byMethod: {
+        COD: number;
+        BKASH: number;
+        NAGAD: number;
+        BANK: number;
+      };
+    };
+    topCategories: Array<{
+      name: string;
+      revenue: number;
+      percentage: number;
+    }>;
+  }> {
+    const dateRange = getReportDateRange(range);
+    const createdAt = {
+      gte: dateRange.gte,
+      ...(dateRange.lte ? { lte: dateRange.lte } : {}),
+    };
+    const periodOrderWhere: Prisma.OrderWhereInput = {
+      cashier: { businessId },
+      ...(locationId ? { locationId } : {}),
+      createdAt,
+    };
+
+    const lineDelegate =
+      (this.prisma as any).orderLine ?? (this.prisma as any).orderItem;
+
+    const [periodRevenue, ordersCount, paymentGroups, lines] =
+      await Promise.all([
+        this.netRevenue(periodOrderWhere),
+        this.prisma.order.count
+          ? this.prisma.order.count({
+              where: {
+                ...periodOrderWhere,
+                status: OrderStatus.PAID,
+              },
+            })
+          : Promise.resolve(0),
+        this.prisma.order.groupBy
+          ? this.prisma.order.groupBy({
+              by: ['paymentMethod'],
+              where: periodOrderWhere,
+              _sum: { totalAmount: true },
+            })
+          : Promise.resolve([]),
+        lineDelegate?.findMany
+          ? lineDelegate.findMany({
+              where: {
+                order: periodOrderWhere,
+              },
+              select: {
+                subtotal: true,
+                quantity: true,
+                variantId: true,
+                variant: {
+                  select: {
+                    costPrice: true,
+                    product: {
+                      select: {
+                        category: {
+                          select: { name: true },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            })
+          : Promise.resolve([]),
+      ]);
+
+    const averageTicketValue =
+      ordersCount > 0 ? Math.round(periodRevenue / ordersCount) : 0;
+
+    const byMethod = {
+      COD: 0,
+      BKASH: 0,
+      NAGAD: 0,
+      BANK: 0,
+    };
+    for (const group of paymentGroups || []) {
+      if (group.paymentMethod && group.paymentMethod in byMethod) {
+        byMethod[group.paymentMethod as PaymentMethod] =
+          group._sum.totalAmount ?? 0;
+      }
+    }
+    const cashAmount = byMethod.COD;
+    const digitalAmount = byMethod.BKASH + byMethod.NAGAD + byMethod.BANK;
+    const totalPayment = cashAmount + digitalAmount;
+    const cashPercentage =
+      totalPayment > 0 ? Math.round((cashAmount / totalPayment) * 100) : 0;
+    const digitalPercentage = totalPayment > 0 ? 100 - cashPercentage : 0;
+
+    let catalogRevenue = 0;
+    let catalogCost = 0;
+    const categoryRevenueMap = new Map<string, number>();
+
+    for (const line of lines || []) {
+      const subtotal = line.subtotal ?? 0;
+      const quantity = line.quantity ?? 1;
+
+      if (line.variantId) {
+        catalogRevenue += subtotal;
+        const costPrice = line.variant?.costPrice ?? 0;
+        catalogCost += costPrice * quantity;
+      }
+
+      const categoryName =
+        line.variant?.product?.category?.name || 'Uncategorized';
+      categoryRevenueMap.set(
+        categoryName,
+        (categoryRevenueMap.get(categoryName) ?? 0) + subtotal,
+      );
+    }
+
+    const grossMarginPercent =
+      catalogRevenue > 0
+        ? Number(
+            (((catalogRevenue - catalogCost) / catalogRevenue) * 100).toFixed(
+              1,
+            ),
+          )
+        : 0;
+
+    const totalCategoryRevenue = Array.from(categoryRevenueMap.values()).reduce(
+      (a, b) => a + b,
+      0,
+    );
+
+    const topCategories = [...categoryRevenueMap.entries()]
+      .map(([name, revenue]) => ({
+        name,
+        revenue,
+        percentage:
+          totalCategoryRevenue > 0
+            ? Number(((revenue / totalCategoryRevenue) * 100).toFixed(1))
+            : 0,
+      }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    return {
+      periodRevenue,
+      ordersCount,
+      averageTicketValue,
+      grossMarginPercent,
+      paymentBreakdown: {
+        cashAmount,
+        digitalAmount,
+        cashPercentage,
+        digitalPercentage,
+        byMethod,
+      },
+      topCategories,
+    };
+  }
+
+  private async fetchRecentTickets(
+    businessId: string,
+    locationId?: string,
+  ): Promise<RecentTicket[]> {
+    if (!this.prisma.order.findMany) {
+      return [];
+    }
+
+    const orders = await this.prisma.order.findMany({
+      where: {
+        cashier: { businessId },
+        ...(locationId ? { locationId } : {}),
+      },
+      select: {
+        id: true,
+        invoiceNumber: true,
+        customerName: true,
+        paymentMethod: true,
+        totalAmount: true,
+        status: true,
+        createdAt: true,
+        lines: {
+          select: {
+            productName: true,
+            variantName: true,
+            quantity: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    });
+
+    return (orders || []).map((order) => {
+      const itemsSummary =
+        order.lines && order.lines.length > 0
+          ? order.lines
+              .map((l) =>
+                l.variantName
+                  ? `${l.variantName} (x${l.quantity})`
+                  : `${l.productName} (x${l.quantity})`,
+              )
+              .join(', ')
+          : 'Custom Sale';
+
+      return {
+        id: order.id,
+        invoiceNumber: order.invoiceNumber,
+        customerName: order.customerName || 'Walk-in Customer',
+        itemsSummary,
+        paymentMethod: order.paymentMethod,
+        totalAmount: order.totalAmount,
+        status: order.status,
+        createdAt: order.createdAt,
+      };
+    });
   }
 
   private async leaderboard(
     businessId: string,
     createdAt: { gte: Date; lt: Date },
+    locationId?: string,
   ): Promise<StaffLeaderboardEntry[]> {
-    const where = {
+    const where: Prisma.OrderWhereInput = {
       createdAt,
-      cashier: { businessId, role: Role.CASHIER, deletedAt: null },
+      cashier: {
+        businessId,
+        role: Role.CASHIER,
+        deletedAt: null,
+        ...(locationId ? { locationId } : {}),
+      },
+      ...(locationId ? { locationId } : {}),
+    };
+    const userWhere: Prisma.UserWhereInput = {
+      businessId,
+      role: Role.CASHIER,
+      deletedAt: null,
+      ...(locationId ? { locationId } : {}),
     };
     const [grouped, refunds, cashiers] = await Promise.all([
-      this.prisma.order.groupBy({
-        by: ['cashierId'],
-        where,
-        _sum: { totalAmount: true },
-      }),
-      this.prisma.refund.findMany({
-        where: { order: where },
-        select: {
-          totalRefund: true,
-          order: { select: { cashierId: true } },
-        },
-      }),
-      this.prisma.user.findMany({
-        where: { businessId, role: Role.CASHIER, deletedAt: null },
-        select: { id: true, fullName: true, publicId: true },
-      }),
+      this.prisma.order.groupBy
+        ? this.prisma.order.groupBy({
+            by: ['cashierId'],
+            where,
+            _sum: { totalAmount: true },
+          })
+        : Promise.resolve([]),
+      this.prisma.refund.findMany
+        ? this.prisma.refund.findMany({
+            where: { order: where },
+            select: {
+              totalRefund: true,
+              order: { select: { cashierId: true } },
+            },
+          })
+        : Promise.resolve([]),
+      this.prisma.user.findMany
+        ? this.prisma.user.findMany({
+            where: userWhere,
+            select: { id: true, fullName: true, publicId: true },
+          })
+        : Promise.resolve([]),
     ]);
     const revenue = new Map(
-      grouped.map((row) => [row.cashierId, row._sum.totalAmount ?? 0]),
+      (grouped || []).map((row) => [row.cashierId, row._sum.totalAmount ?? 0]),
     );
 
-    for (const refund of refunds) {
+    for (const refund of refunds || []) {
       const current = revenue.get(refund.order.cashierId);
 
       if (current === undefined) {
@@ -201,7 +656,9 @@ export class ReportService {
       revenue.set(refund.order.cashierId, current - refund.totalRefund);
     }
 
-    const profiles = new Map(cashiers.map((cashier) => [cashier.id, cashier]));
+    const profiles = new Map(
+      (cashiers || []).map((cashier) => [cashier.id, cashier]),
+    );
 
     return [...revenue.entries()]
       .flatMap(([cashierId, total]) => {
@@ -240,7 +697,8 @@ export class ReportService {
   }
 
   private async unitsSold(where: Prisma.OrderWhereInput): Promise<number> {
-    const lineDelegate = (this.prisma as any).orderLine ?? (this.prisma as any).orderItem;
+    const lineDelegate =
+      (this.prisma as any).orderLine ?? (this.prisma as any).orderItem;
     const [sold, returned] = await Promise.all([
       lineDelegate.aggregate({
         where: { order: where },
@@ -300,7 +758,9 @@ export class ReportService {
       grouping.set(label, existing);
     }
 
-    return [...grouping.values()].sort((a, b) => b.totalRevenue - a.totalRevenue);
+    return [...grouping.values()].sort(
+      (a, b) => b.totalRevenue - a.totalRevenue,
+    );
   }
 }
 

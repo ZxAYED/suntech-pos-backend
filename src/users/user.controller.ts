@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -24,6 +25,8 @@ import {
   type UploadedImage,
 } from '../media/uploaded-image';
 import { CreateCashierDto } from './dto/create-cashier.dto';
+import { ListCashiersQueryDto } from './dto/list-cashiers.query';
+import { UpdateCashierDto } from './dto/update-cashier.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { UserService } from './user.service';
 
@@ -63,6 +66,37 @@ export class UserController {
     @Body() dto: CreateCashierDto,
   ) {
     return this.userService.createCashier(admin, dto);
+  }
+
+  @Get('cashiers')
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Cashiers loaded')
+  listCashiers(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Query() query: ListCashiersQueryDto,
+  ) {
+    return this.userService.listCashiers(admin, query);
+  }
+
+  @Patch('cashiers/:id')
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Cashier updated')
+  updateCashier(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+    @Body() dto: UpdateCashierDto,
+  ) {
+    return this.userService.updateCashier(admin, id, dto);
+  }
+
+  @Delete('cashiers/:id')
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Cashier deleted')
+  deleteCashier(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+  ) {
+    return this.userService.deleteCashier(admin, id);
   }
 
   @Patch(':id/status')

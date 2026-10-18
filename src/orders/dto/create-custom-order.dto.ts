@@ -53,10 +53,12 @@ export class CreateCustomOrderDto {
   @IsOptional()
   shiftId?: string;
 
-  @ApiProperty({ description: 'Store location UUID' })
+  @ApiPropertyOptional({
+    description: 'Store location UUID (optional for cashiers)',
+  })
   @IsUUID()
-  @IsNotEmpty()
-  locationId: string;
+  @IsOptional()
+  locationId?: string;
 
   @ApiProperty({
     description: 'Amount tendered by customer (in cents/paisa)',
@@ -84,12 +86,18 @@ export class CreateCustomOrderDto {
   @IsEnum(PaymentMethod)
   paymentType?: PaymentMethod;
 
-  @ApiPropertyOptional({ description: 'Customer full name', example: 'Karim Ahmed' })
+  @ApiPropertyOptional({
+    description: 'Customer full name',
+    example: 'Karim Ahmed',
+  })
   @IsOptional()
   @IsString()
   customerName?: string;
 
-  @ApiPropertyOptional({ description: 'Customer phone number', example: '01822222222' })
+  @ApiPropertyOptional({
+    description: 'Customer phone number',
+    example: '01822222222',
+  })
   @IsOptional()
   @IsString()
   customerPhone?: string;

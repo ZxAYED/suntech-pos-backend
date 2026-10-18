@@ -14,15 +14,24 @@ import { CloudinaryService } from '../media/cloudinary.service';
 import { UploadedImage } from '../media/uploaded-image';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCashierDto } from './dto/create-cashier.dto';
+import { ListCashiersQueryDto } from './dto/list-cashiers.query';
+import { UpdateCashierDto } from './dto/update-cashier.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import {
   PresentedProfile,
   internalCashierEmail,
+  presentEmail,
   presentProfile,
   userProfileSelect,
 } from './user-profile.select';
 
 const BCRYPT_ROUNDS = 10;
+
+export type PresentedCashier = PresentedProfile & {
+  location: { id: string; name: string } | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
 
 @Injectable()
 export class UserService {
@@ -45,6 +54,69 @@ export class UserService {
     }
 
     return presentProfile(user);
+  }
+
+  async listCashiers(
+    admin: AccessTokenPayload,
+    query: ListCashiersQueryDto,
+  ): Promise<PresentedCashier[]> {
+    const businessId = this.requireBusinessId(admin);
+    const cashiers = await this.prisma.user.findMany({
+      where: {
+        businessId,
+        role: Role.CASHIER,
+        deletedAt: null,
+        ...(query.locationId ? { locationId: query.locationId } : {}),
+        ...(query.status ? { status: query.status } : {}),
+        ...(query.search?.trim()
+          ? {
+              OR: [
+                {
+                  fullName: {
+                    contains: query.search.trim(),
+                    mode: 'insensitive',
+                  },
+                },
+                {
+                  publicId: {
+                    contains: query.search.trim(),
+                    mode: 'insensitive',
+                  },
+                },
+                {
+                  phoneNumber: {
+                    contains: query.search.trim(),
+                    mode: 'insensitive',
+                  },
+                },
+                {
+                  email: {
+                    contains: query.search.trim(),
+                    mode: 'insensitive',
+                  },
+                },
+              ],
+            }
+          : {}),
+      },
+      select: {
+        ...userProfileSelect,
+        location: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+        createdAt: true,
+        updatedAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return cashiers.map((cashier) => ({
+      ...cashier,
+      email: presentEmail(cashier.email),
+    }));
   }
 
   async createCashier(
@@ -98,6 +170,113 @@ export class UserService {
 
       throw error;
     }
+  }
+
+  async updateCashier(
+    admin: AccessTokenPayload,
+    cashierId: string,
+    dto: UpdateCashierDto,
+  ): Promise<PresentedCashier> {
+    const businessId = this.requireBusinessId(admin);
+
+    const cashier = await this.prisma.user.findFirst({
+      where: {
+        id: cashierId,
+        businessId,
+        role: Role.CASHIER,
+        deletedAt: null,
+      },
+    });
+
+    if (!cashier) {
+      throw new NotFoundException('Cashier not found');
+    }
+
+    if (dto.locationId) {
+      const location = await this.prisma.location.findFirst({
+        where: {
+          id: dto.locationId,
+          businessId,
+          deletedAt: null,
+        },
+      });
+
+      if (!location) {
+        throw new NotFoundException('Location not found');
+      }
+    }
+
+    try {
+      const updated = await this.prisma.user.update({
+        where: { id: cashierId },
+        data: {
+          ...(dto.fullName !== undefined
+            ? { fullName: dto.fullName.trim() }
+            : {}),
+          ...(dto.phoneNumber !== undefined
+            ? { phoneNumber: dto.phoneNumber.trim() || null }
+            : {}),
+          ...(dto.locationId !== undefined
+            ? { locationId: dto.locationId }
+            : {}),
+          ...(dto.monthlySalary !== undefined
+            ? { monthlySalary: dto.monthlySalary }
+            : {}),
+        },
+        select: {
+          ...userProfileSelect,
+          location: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return {
+        ...updated,
+        email: presentEmail(updated.email),
+      };
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        throw new ConflictException(
+          'An account with that phone number already exists',
+        );
+      }
+
+      throw error;
+    }
+  }
+
+  async deleteCashier(
+    admin: AccessTokenPayload,
+    cashierId: string,
+  ): Promise<{ id: string; deletedAt: Date }> {
+    const businessId = this.requireBusinessId(admin);
+
+    const cashier = await this.prisma.user.findFirst({
+      where: {
+        id: cashierId,
+        businessId,
+        role: Role.CASHIER,
+        deletedAt: null,
+      },
+    });
+
+    if (!cashier) {
+      throw new NotFoundException('Cashier not found');
+    }
+
+    const deletedAt = new Date();
+    await this.prisma.user.update({
+      where: { id: cashierId },
+      data: { deletedAt },
+    });
+
+    return { id: cashierId, deletedAt };
   }
 
   async updateStatus(

@@ -9,6 +9,7 @@ import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.e
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateVariantDto } from './dto/create-variant.dto';
+import { ListVariantsQueryDto } from './dto/list-variants.query';
 import { UpdateVariantDto } from './dto/update-variant.dto';
 import { createSku } from './sku';
 
@@ -28,14 +29,50 @@ const variantSelect = {
     select: { id: true, url: true, sortOrder: true },
     orderBy: { sortOrder: 'asc' as const },
   },
+  product: {
+    select: {
+      id: true,
+      name: true,
+      categoryId: true,
+      category: { select: { id: true, name: true } },
+    },
+  },
 } satisfies Prisma.VariantSelect;
 
-export type PresentedVariant = Prisma.VariantGetPayload<{
+type VariantRow = Prisma.VariantGetPayload<{
   select: typeof variantSelect;
 }>;
 
+export type PresentedVariant = VariantRow & {
+  productName: string;
+  categoryId: string | null;
+  categoryName: string;
+  price: number;
+  marginPercent: number | null;
+};
+
 const CODE_TAKEN = 'A variant with that SKU or barcode already exists';
 const SKU_ATTEMPTS = 3;
+const LOW_STOCK_THRESHOLD = 5;
+
+export function presentVariant(variant: VariantRow): PresentedVariant {
+  const sellingPrice = variant.sellingPrice ?? 0;
+  const costPrice = variant.costPrice;
+  const marginPercent =
+    sellingPrice > 0 && costPrice != null
+      ? Math.round(((sellingPrice - costPrice) / sellingPrice) * 100)
+      : null;
+
+  return {
+    ...variant,
+    productName: variant.product?.name ?? '',
+    categoryId:
+      variant.product?.category?.id ?? variant.product?.categoryId ?? null,
+    categoryName: variant.product?.category?.name ?? 'Uncategorized',
+    price: sellingPrice,
+    marginPercent,
+  };
+}
 
 @Injectable()
 export class VariantService {
@@ -63,7 +100,7 @@ export class VariantService {
       const sku = requestedSku ?? createSku();
 
       try {
-        return await this.prisma.variant.create({
+        const created = await this.prisma.variant.create({
           data: {
             businessId,
             productId: dto.productId,
@@ -76,6 +113,8 @@ export class VariantService {
           },
           select: variantSelect,
         });
+
+        return presentVariant(created);
       } catch (error) {
         if (!isUniqueConstraintError(error)) {
           throw error;
@@ -92,19 +131,54 @@ export class VariantService {
     throw new ConflictException(CODE_TAKEN);
   }
 
-  async list(admin: AccessTokenPayload): Promise<PresentedVariant[]> {
-    return this.prisma.variant.findMany({
-      where: this.visibleWhere(requireBusinessId(admin)),
+  async list(
+    actor: AccessTokenPayload,
+    query?: ListVariantsQueryDto,
+  ): Promise<PresentedVariant[]> {
+    const businessId = requireBusinessId(actor);
+    const isLowStock = query?.lowStockOnly === 'true';
+    const search = query?.search?.trim();
+
+    const searchFilter = search
+      ? {
+          OR: [
+            { name: { contains: search, mode: 'insensitive' as const } },
+            { sku: { contains: search, mode: 'insensitive' as const } },
+            { barcode: { contains: search, mode: 'insensitive' as const } },
+            {
+              product: {
+                name: { contains: search, mode: 'insensitive' as const },
+              },
+            },
+          ],
+        }
+      : {};
+
+    const variants = await this.prisma.variant.findMany({
+      where: {
+        businessId,
+        deletedAt: null,
+        product: {
+          businessId,
+          deletedAt: null,
+          ...(query?.categoryId ? { categoryId: query.categoryId } : {}),
+        },
+        ...(query?.productId ? { productId: query.productId } : {}),
+        ...(isLowStock ? { stock: { lte: LOW_STOCK_THRESHOLD } } : {}),
+        ...searchFilter,
+      },
       select: variantSelect,
       orderBy: { name: 'asc' },
     });
+
+    return variants.map(presentVariant);
   }
 
   async get(
-    admin: AccessTokenPayload,
+    actor: AccessTokenPayload,
     variantId: string,
   ): Promise<PresentedVariant> {
-    return this.findVariant(requireBusinessId(admin), variantId);
+    return this.findVariant(requireBusinessId(actor), variantId);
   }
 
   async update(
@@ -166,16 +240,30 @@ export class VariantService {
     variantId: string,
   ): Promise<{ id: string; deletedAt: Date }> {
     const businessId = requireBusinessId(admin);
-    await this.findVariant(businessId, variantId);
-    const deletedAt = new Date();
-    const removed = await this.prisma.variant.updateMany({
+    const variant = await this.prisma.variant.findFirst({
       where: { id: variantId, businessId, deletedAt: null },
-      data: { deletedAt },
+      select: { id: true, sku: true, barcode: true },
     });
 
-    if (removed.count === 0) {
+    if (!variant) {
       throw new NotFoundException('Variant not found');
     }
+
+    const timestamp = Date.now();
+    const deletedAt = new Date();
+    const suffixedSku = `${variant.sku}__del_${timestamp}`;
+    const suffixedBarcode = variant.barcode
+      ? `${variant.barcode}__del_${timestamp}`
+      : null;
+
+    await this.prisma.variant.update({
+      where: { id: variant.id },
+      data: {
+        sku: suffixedSku,
+        barcode: suffixedBarcode,
+        deletedAt,
+      },
+    });
 
     return { id: variantId, deletedAt };
   }
@@ -198,7 +286,7 @@ export class VariantService {
       throw new NotFoundException('Variant not found');
     }
 
-    return variant;
+    return presentVariant(variant);
   }
 
   private async assertProduct(

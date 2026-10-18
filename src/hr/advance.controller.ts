@@ -21,6 +21,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { AdvanceService } from './advance.service';
 import { AdvanceSummaryQueryDto } from './dto/advance-summary.query';
 import { CreateAdvanceDto } from './dto/create-advance.dto';
+import { ListAdvancesQueryDto } from './dto/list-advances.query';
 
 @Controller('advances')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -37,6 +38,16 @@ export class AdvanceController {
     @Body() dto: CreateAdvanceDto,
   ) {
     return this.advances.create(actor, dto);
+  }
+
+  @Get()
+  @Roles(Role.ADMIN, Role.CASHIER)
+  @ResponseMessage('Advances loaded')
+  list(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query() query: ListAdvancesQueryDto,
+  ) {
+    return this.advances.list(actor, query);
   }
 
   @Get('summary')

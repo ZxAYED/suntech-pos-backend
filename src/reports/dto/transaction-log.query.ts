@@ -14,4 +14,13 @@ export class TransactionLogQueryDto {
   @Min(1)
   @Max(100)
   limit?: number;
+
+  @IsOptional()
+  locationId?: string;
+
+  @IsOptional()
+  search?: string;
+
+  @IsOptional()
+  range?: string;
 }

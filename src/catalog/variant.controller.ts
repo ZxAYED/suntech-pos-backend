@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
@@ -19,16 +20,17 @@ import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateVariantDto } from './dto/create-variant.dto';
+import { ListVariantsQueryDto } from './dto/list-variants.query';
 import { UpdateVariantDto } from './dto/update-variant.dto';
 import { VariantService } from './variant.service';
 
 @Controller('catalog/variants')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.ADMIN)
 export class VariantController {
   constructor(private readonly variants: VariantService) {}
 
   @Post()
+  @Roles(Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Variant created')
@@ -40,18 +42,24 @@ export class VariantController {
   }
 
   @Get()
+  @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Variants loaded')
-  list(@CurrentUser() admin: AccessTokenPayload) {
-    return this.variants.list(admin);
+  list(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query() query: ListVariantsQueryDto,
+  ) {
+    return this.variants.list(actor, query);
   }
 
   @Get(':id')
+  @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Variant loaded')
-  get(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {
-    return this.variants.get(admin, id);
+  get(@CurrentUser() actor: AccessTokenPayload, @Param('id') id: string) {
+    return this.variants.get(actor, id);
   }
 
   @Patch(':id')
+  @Roles(Role.ADMIN)
   @ResponseMessage('Variant updated')
   update(
     @CurrentUser() admin: AccessTokenPayload,
@@ -62,6 +70,7 @@ export class VariantController {
   }
 
   @Delete(':id')
+  @Roles(Role.ADMIN)
   @ResponseMessage('Variant removed')
   remove(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {
     return this.variants.remove(admin, id);

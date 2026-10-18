@@ -42,10 +42,12 @@ export class CreateCatalogOrderDto {
   @IsOptional()
   shiftId?: string;
 
-  @ApiProperty({ description: 'Store location UUID' })
+  @ApiPropertyOptional({
+    description: 'Store location UUID (optional for cashiers)',
+  })
   @IsUUID()
-  @IsNotEmpty()
-  locationId: string;
+  @IsOptional()
+  locationId?: string;
 
   @ApiProperty({
     description: 'Amount tendered by customer (in cents/paisa)',
@@ -73,12 +75,18 @@ export class CreateCatalogOrderDto {
   @IsEnum(PaymentMethod)
   paymentType?: PaymentMethod;
 
-  @ApiPropertyOptional({ description: 'Customer full name', example: 'Rahim Khan' })
+  @ApiPropertyOptional({
+    description: 'Customer full name',
+    example: 'Rahim Khan',
+  })
   @IsOptional()
   @IsString()
   customerName?: string;
 
-  @ApiPropertyOptional({ description: 'Customer phone number', example: '01711111111' })
+  @ApiPropertyOptional({
+    description: 'Customer phone number',
+    example: '01711111111',
+  })
   @IsOptional()
   @IsString()
   customerPhone?: string;

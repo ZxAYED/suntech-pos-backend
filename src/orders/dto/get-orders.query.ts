@@ -1,12 +1,20 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
+import { OrderStatus, OrderType, PaymentMethod } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
-import { OrderType } from '@prisma/client';
+import {
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Max,
+  Min,
+} from 'class-validator';
 
 export class GetOrdersQueryDto {
   @ApiPropertyOptional({ description: 'Filter by store location UUID' })
   @IsOptional()
-  @IsString()
+  @IsUUID()
   locationId?: string;
 
   @ApiPropertyOptional({
@@ -16,6 +24,38 @@ export class GetOrdersQueryDto {
   @IsOptional()
   @IsEnum(OrderType)
   orderType?: OrderType;
+
+  @ApiPropertyOptional({
+    description:
+      'Search matching invoiceNumber, receiptNumber, customerName, customerPhone, or line items',
+  })
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  @ApiPropertyOptional({
+    enum: PaymentMethod,
+    description: 'Filter by payment method (COD, BKASH, NAGAD, BANK)',
+  })
+  @IsOptional()
+  @IsEnum(PaymentMethod)
+  paymentMethod?: PaymentMethod;
+
+  @ApiPropertyOptional({
+    enum: OrderStatus,
+    description: 'Filter by order status (PAID, CANCELLED, REFUNDED)',
+  })
+  @IsOptional()
+  @IsEnum(OrderStatus)
+  status?: OrderStatus;
+
+  @ApiPropertyOptional({
+    enum: ['today', 'yesterday', 'weekly', 'monthly'],
+    description: 'Filter orders by period range',
+  })
+  @IsOptional()
+  @IsEnum(['today', 'yesterday', 'weekly', 'monthly'])
+  range?: 'today' | 'yesterday' | 'weekly' | 'monthly';
 
   @ApiPropertyOptional({ description: 'Page number', default: 1, minimum: 1 })
   @IsOptional()

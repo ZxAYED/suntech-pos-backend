@@ -96,7 +96,18 @@ export class RefundService {
 
     const orderLines =
       order.lines ??
-      (order as unknown as { items?: Array<{ id: string; variantId?: string | null; price?: number; unitPrice?: number; quantity: number; refundItems: Array<{ quantity: number }> }> }).items?.map((item) => ({
+      (
+        order as unknown as {
+          items?: Array<{
+            id: string;
+            variantId?: string | null;
+            price?: number;
+            unitPrice?: number;
+            quantity: number;
+            refundItems: Array<{ quantity: number }>;
+          }>;
+        }
+      ).items?.map((item) => ({
         id: item.id,
         variantId: item.variantId,
         unitPrice: item.unitPrice ?? item.price ?? 0,

@@ -9,6 +9,11 @@ export class UpdateCategoryDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(120)
+  slug?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(500)
   description?: string;
 }

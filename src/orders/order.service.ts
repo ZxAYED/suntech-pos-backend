@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -20,6 +21,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateCatalogOrderDto } from './dto/create-catalog-order.dto';
 import { CreateCustomOrderDto } from './dto/create-custom-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { GetOrdersQueryDto } from './dto/get-orders.query';
 import { ListOrdersQueryDto } from './dto/list-orders.query';
 import { createInvoiceNumber } from './invoice-number';
 import { lineTotal, sumMoney } from './money';
@@ -77,6 +79,56 @@ export interface ListedOrder {
   refundStatus: RefundStatus | null;
 }
 
+function getDateRange(
+  range: 'today' | 'yesterday' | 'weekly' | 'monthly',
+  now = new Date(),
+): { gte: Date; lte?: Date } | undefined {
+  const startOfToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  );
+  const endOfToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+    23,
+    59,
+    59,
+    999,
+  );
+
+  if (range === 'today') {
+    return { gte: startOfToday, lte: endOfToday };
+  }
+  if (range === 'yesterday') {
+    const startOfYesterday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - 1,
+    );
+    const endOfYesterday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - 1,
+      23,
+      59,
+      59,
+      999,
+    );
+    return { gte: startOfYesterday, lte: endOfYesterday };
+  }
+  if (range === 'weekly') {
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    return { gte: sevenDaysAgo };
+  }
+  if (range === 'monthly') {
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    return { gte: thirtyDaysAgo };
+  }
+  return undefined;
+}
+
 const INVOICE_ATTEMPTS = 3;
 const OPEN_SHIFT_REQUIRED = 'Open a shift before taking an order';
 
@@ -85,11 +137,13 @@ export class OrdersService {
   constructor(private readonly prisma: PrismaService) {}
 
   async createCatalogOrder(
-    userId: string,
+    actor: AccessTokenPayload | string,
     dto: CreateCatalogOrderDto,
   ): Promise<PresentedOrder> {
     if (!dto.lines?.length) {
-      throw new BadRequestException('Order must contain at least one line item');
+      throw new BadRequestException(
+        'Order must contain at least one line item',
+      );
     }
 
     for (let attempt = 1; attempt <= INVOICE_ATTEMPTS; attempt += 1) {
@@ -97,7 +151,7 @@ export class OrdersService {
         return await this.prisma.$transaction(
           async (tx) => {
             const invoiceNumber = createInvoiceNumber();
-            return this.executeCatalogOrder(tx, userId, dto, invoiceNumber);
+            return this.executeCatalogOrder(tx, actor, dto, invoiceNumber);
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
         );
@@ -128,10 +182,17 @@ export class OrdersService {
 
   async executeCatalogOrder(
     tx: Prisma.TransactionClient,
-    userId: string,
+    actor: AccessTokenPayload | string,
     dto: CreateCatalogOrderDto,
     invoiceNumber: string,
   ): Promise<PresentedOrder> {
+    const userId = typeof actor === 'string' ? actor : actor.sub;
+    const actorRole = typeof actor === 'string' ? undefined : actor.role;
+    const actorLocationId =
+      typeof actor === 'string' ? undefined : actor.locationId;
+    const actorBusinessId =
+      typeof actor === 'string' ? undefined : actor.businessId;
+
     const user = await tx.user.findFirst({
       where: { id: userId, deletedAt: null },
       include: { ownedBusiness: true },
@@ -141,12 +202,47 @@ export class OrdersService {
       throw new NotFoundException('User not found');
     }
 
+    const effectiveRole = actorRole ?? user.role;
+    const effectiveBusinessId =
+      actorBusinessId ?? user.businessId ?? user.ownedBusiness?.id;
+    const effectiveLocationId = actorLocationId ?? user.locationId;
+
+    let locationId = dto.locationId;
+    if (effectiveRole === Role.CASHIER) {
+      locationId = effectiveLocationId ?? dto.locationId;
+      if (!locationId) {
+        throw new ForbiddenException(
+          'A cashier must be assigned to a location before creating orders',
+        );
+      }
+      if (
+        dto.locationId &&
+        effectiveLocationId &&
+        dto.locationId !== effectiveLocationId
+      ) {
+        throw new ForbiddenException(
+          'Cashiers can only create orders for their assigned location',
+        );
+      }
+    } else {
+      if (!locationId) {
+        locationId = effectiveLocationId ?? undefined;
+      }
+      if (!locationId) {
+        throw new BadRequestException('Location ID is required');
+      }
+    }
+
     const location = await tx.location.findFirst({
-      where: { id: dto.locationId, deletedAt: null },
+      where: { id: locationId, deletedAt: null },
     });
 
     if (!location) {
       throw new NotFoundException('Location not found');
+    }
+
+    if (effectiveBusinessId && location.businessId !== effectiveBusinessId) {
+      throw new ForbiddenException('Location does not belong to your business');
     }
 
     const businessId = location.businessId;
@@ -263,8 +359,11 @@ export class OrdersService {
       });
     }
 
-    // If shiftId is present, increment the shift's cash collected totals
-    if (shiftId) {
+    const paymentMethod =
+      dto.paymentMethod ?? dto.paymentType ?? PaymentMethod.COD;
+
+    // Only COD orders increment physical drawer cash
+    if (shiftId && paymentMethod === PaymentMethod.COD) {
       await tx.shiftSession.update({
         where: { id: shiftId },
         data: {
@@ -279,7 +378,7 @@ export class OrdersService {
         receiptNumber: invoiceNumber,
         orderType: OrderType.CATALOG,
         status: OrderStatus.PAID,
-        locationId: dto.locationId,
+        locationId,
         shiftId: shiftId ?? null,
         cashierId: userId,
         subtotal,
@@ -290,7 +389,7 @@ export class OrdersService {
         customerPhone: dto.customerPhone?.trim() || null,
         customerNumber: dto.customerPhone?.trim() || null,
         notes: dto.notes?.trim() || null,
-        paymentMethod: dto.paymentMethod ?? dto.paymentType ?? PaymentMethod.COD,
+        paymentMethod,
         lines: {
           create: preparedLines,
         },
@@ -300,11 +399,13 @@ export class OrdersService {
   }
 
   async createCustomOrder(
-    userId: string,
+    actor: AccessTokenPayload | string,
     dto: CreateCustomOrderDto,
   ): Promise<PresentedOrder> {
     if (!dto.lines?.length) {
-      throw new BadRequestException('Order must contain at least one line item');
+      throw new BadRequestException(
+        'Order must contain at least one line item',
+      );
     }
 
     for (let attempt = 1; attempt <= INVOICE_ATTEMPTS; attempt += 1) {
@@ -312,7 +413,7 @@ export class OrdersService {
         return await this.prisma.$transaction(
           async (tx) => {
             const invoiceNumber = createInvoiceNumber();
-            return this.executeCustomOrder(tx, userId, dto, invoiceNumber);
+            return this.executeCustomOrder(tx, actor, dto, invoiceNumber);
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
         );
@@ -343,10 +444,17 @@ export class OrdersService {
 
   async executeCustomOrder(
     tx: Prisma.TransactionClient,
-    userId: string,
+    actor: AccessTokenPayload | string,
     dto: CreateCustomOrderDto,
     invoiceNumber: string,
   ): Promise<PresentedOrder> {
+    const userId = typeof actor === 'string' ? actor : actor.sub;
+    const actorRole = typeof actor === 'string' ? undefined : actor.role;
+    const actorLocationId =
+      typeof actor === 'string' ? undefined : actor.locationId;
+    const actorBusinessId =
+      typeof actor === 'string' ? undefined : actor.businessId;
+
     const user = await tx.user.findFirst({
       where: { id: userId, deletedAt: null },
       include: { ownedBusiness: true },
@@ -356,12 +464,47 @@ export class OrdersService {
       throw new NotFoundException('User not found');
     }
 
+    const effectiveRole = actorRole ?? user.role;
+    const effectiveBusinessId =
+      actorBusinessId ?? user.businessId ?? user.ownedBusiness?.id;
+    const effectiveLocationId = actorLocationId ?? user.locationId;
+
+    let locationId = dto.locationId;
+    if (effectiveRole === Role.CASHIER) {
+      locationId = effectiveLocationId ?? dto.locationId;
+      if (!locationId) {
+        throw new ForbiddenException(
+          'A cashier must be assigned to a location before creating orders',
+        );
+      }
+      if (
+        dto.locationId &&
+        effectiveLocationId &&
+        dto.locationId !== effectiveLocationId
+      ) {
+        throw new ForbiddenException(
+          'Cashiers can only create orders for their assigned location',
+        );
+      }
+    } else {
+      if (!locationId) {
+        locationId = effectiveLocationId ?? undefined;
+      }
+      if (!locationId) {
+        throw new BadRequestException('Location ID is required');
+      }
+    }
+
     const location = await tx.location.findFirst({
-      where: { id: dto.locationId, deletedAt: null },
+      where: { id: locationId, deletedAt: null },
     });
 
     if (!location) {
       throw new NotFoundException('Location not found');
+    }
+
+    if (effectiveBusinessId && location.businessId !== effectiveBusinessId) {
+      throw new ForbiddenException('Location does not belong to your business');
     }
 
     const businessId = location.businessId;
@@ -427,10 +570,12 @@ export class OrdersService {
     }
     const totalAmount = subtotal;
     const changeDue = dto.tenderedAmount - totalAmount;
+    const paymentMethod =
+      dto.paymentMethod ?? dto.paymentType ?? PaymentMethod.COD;
 
     // 3. Database Transaction
-    // If shiftId is present, increment the shift's cash collected totals so the physical cash drawer balances during shift close
-    if (shiftId) {
+    // Only COD orders increment physical drawer cash
+    if (shiftId && paymentMethod === PaymentMethod.COD) {
       await tx.shiftSession.update({
         where: { id: shiftId },
         data: {
@@ -445,7 +590,7 @@ export class OrdersService {
         receiptNumber: invoiceNumber,
         orderType: OrderType.CUSTOM,
         status: OrderStatus.PAID,
-        locationId: dto.locationId,
+        locationId,
         shiftId: shiftId ?? null,
         cashierId: userId,
         subtotal,
@@ -456,7 +601,7 @@ export class OrdersService {
         customerPhone: dto.customerPhone?.trim() || null,
         customerNumber: dto.customerPhone?.trim() || null,
         notes: dto.notes?.trim() || null,
-        paymentMethod: dto.paymentMethod ?? dto.paymentType ?? PaymentMethod.COD,
+        paymentMethod,
         lines: {
           create: preparedLines,
         },
@@ -465,26 +610,77 @@ export class OrdersService {
     });
   }
 
-  async getOrders(params: {
-    locationId?: string;
-    orderType?: 'CATALOG' | 'CUSTOM';
-    page?: number;
-    limit?: number;
-  }): Promise<{
+  async getOrders(
+    actorOrParams?: AccessTokenPayload | GetOrdersQueryDto,
+    maybeQuery?: GetOrdersQueryDto,
+  ): Promise<{
     items: PresentedOrder[];
     page: number;
     limit: number;
     total: number;
   }> {
-    const page = params.page ? Number(params.page) : 1;
-    const limit = params.limit ? Number(params.limit) : 20;
+    let actor: AccessTokenPayload | undefined;
+    let query: GetOrdersQueryDto;
+
+    if (actorOrParams && ('sub' in actorOrParams || 'role' in actorOrParams)) {
+      actor = actorOrParams as AccessTokenPayload;
+      query = maybeQuery ?? {};
+    } else {
+      query = (actorOrParams as GetOrdersQueryDto) ?? {};
+    }
+
+    const page = query.page ? Number(query.page) : 1;
+    const limit = query.limit ? Number(query.limit) : 20;
 
     const where: Prisma.OrderWhereInput = {};
-    if (params.locationId) {
-      where.locationId = params.locationId;
+
+    if (actor?.businessId) {
+      where.location = { businessId: actor.businessId };
     }
-    if (params.orderType) {
-      where.orderType = params.orderType;
+
+    if (actor?.role === Role.CASHIER) {
+      if (actor.locationId) {
+        where.locationId = actor.locationId;
+      }
+    } else if (query.locationId) {
+      where.locationId = query.locationId;
+    }
+
+    if (query.orderType) {
+      where.orderType = query.orderType;
+    }
+
+    if (query.paymentMethod) {
+      where.paymentMethod = query.paymentMethod;
+    }
+
+    if (query.status) {
+      where.status = query.status;
+    }
+
+    if (query.range) {
+      const dateRange = getDateRange(query.range);
+      if (dateRange) {
+        where.createdAt = dateRange;
+      }
+    }
+
+    if (query.search?.trim()) {
+      const searchTerm = query.search.trim();
+      where.OR = [
+        { invoiceNumber: { contains: searchTerm, mode: 'insensitive' } },
+        { receiptNumber: { contains: searchTerm, mode: 'insensitive' } },
+        { customerName: { contains: searchTerm, mode: 'insensitive' } },
+        { customerPhone: { contains: searchTerm, mode: 'insensitive' } },
+        { customerNumber: { contains: searchTerm, mode: 'insensitive' } },
+        {
+          lines: {
+            some: {
+              productName: { contains: searchTerm, mode: 'insensitive' },
+            },
+          },
+        },
+      ];
     }
 
     const [total, items] = await Promise.all([
@@ -612,7 +808,10 @@ export class OrdersService {
 
         lines.push({
           variantId: variant.id,
-          productName: (variant as any).product?.name ?? (variant as any).name ?? 'Catalog Item',
+          productName:
+            (variant as any).product?.name ??
+            (variant as any).name ??
+            'Catalog Item',
           variantName: (variant as any).name ?? null,
           unitPrice: variant.sellingPrice,
           price: variant.sellingPrice,

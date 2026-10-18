@@ -25,7 +25,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateCatalogOrderDto } from './dto/create-catalog-order.dto';
 import { CreateCustomOrderDto } from './dto/create-custom-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
-import { ListOrdersQueryDto } from './dto/list-orders.query';
+import { GetOrdersQueryDto } from './dto/get-orders.query';
 import { OrdersService } from './order.service';
 
 @ApiTags('Orders')
@@ -45,15 +45,27 @@ export class OrdersController {
     description:
       'Checkout enlisted catalog variants with inventory validation and stock decrement. Supports payment types: COD, BKASH, NAGAD, BANK.',
   })
-  @ApiResponse({ status: 201, description: 'Catalog order created successfully' })
-  @ApiResponse({ status: 400, description: 'Validation failed or insufficient tender amount' })
-  @ApiResponse({ status: 404, description: 'Location, shift, or catalog variant not found' })
-  @ApiResponse({ status: 409, description: 'Insufficient variant stock or closed shift' })
+  @ApiResponse({
+    status: 201,
+    description: 'Catalog order created successfully',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Validation failed or insufficient tender amount',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Location, shift, or catalog variant not found',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Insufficient variant stock or closed shift',
+  })
   async createCatalogOrder(
-    @CurrentUser('id') userId: string,
+    @CurrentUser() actor: AccessTokenPayload,
     @Body() dto: CreateCatalogOrderDto,
   ) {
-    return this.ordersService.createCatalogOrder(userId, dto);
+    return this.ordersService.createCatalogOrder(actor, dto);
   }
 
   @Post('custom')
@@ -65,15 +77,24 @@ export class OrdersController {
     description:
       'High-velocity manual checkout for unlisted items and ad-hoc sales, bypassing catalog lookup and inventory decrement. Supports payment types: COD, BKASH, NAGAD, BANK.',
   })
-  @ApiResponse({ status: 201, description: 'Custom order created successfully' })
-  @ApiResponse({ status: 400, description: 'Validation failed or insufficient tender amount' })
+  @ApiResponse({
+    status: 201,
+    description: 'Custom order created successfully',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Validation failed or insufficient tender amount',
+  })
   @ApiResponse({ status: 404, description: 'Location or shift not found' })
-  @ApiResponse({ status: 409, description: 'Shift requirement conflict or closed shift' })
+  @ApiResponse({
+    status: 409,
+    description: 'Shift requirement conflict or closed shift',
+  })
   async createCustomOrder(
-    @CurrentUser('id') userId: string,
+    @CurrentUser() actor: AccessTokenPayload,
     @Body() dto: CreateCustomOrderDto,
   ) {
-    return this.ordersService.createCustomOrder(userId, dto);
+    return this.ordersService.createCustomOrder(actor, dto);
   }
 
   @Get()
@@ -81,20 +102,59 @@ export class OrdersController {
   @ApiOperation({
     summary: 'List unified orders',
     description:
-      'Retrieve paginated orders across both CATALOG and CUSTOM channels, optionally filtered by location and/or orderType.',
+      'Retrieve paginated orders across both CATALOG and CUSTOM channels, scoped by business tenant and optional location, status, range, or search filters.',
   })
-  @ApiQuery({ name: 'locationId', required: false, type: String, description: 'Filter by location UUID' })
-  @ApiQuery({ name: 'orderType', required: false, enum: ['CATALOG', 'CUSTOM'], description: 'Filter by order flow type' })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default 1)', example: 1 })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default 20)', example: 20 })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    type: String,
+    description: 'Filter by location UUID',
+  })
+  @ApiQuery({
+    name: 'orderType',
+    required: false,
+    enum: ['CATALOG', 'CUSTOM'],
+    description: 'Filter by order flow type',
+  })
+  @ApiQuery({
+    name: 'search',
+    required: false,
+    type: String,
+    description: 'Search invoice, receipt, customer or item name',
+  })
+  @ApiQuery({
+    name: 'page',
+    required: false,
+    type: Number,
+    description: 'Page number (default 1)',
+    example: 1,
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Items per page (default 20)',
+    example: 20,
+  })
   @ApiResponse({ status: 200, description: 'Orders loaded successfully' })
   async getOrders(
-    @Query('locationId') locationId?: string,
-    @Query('orderType') orderType?: 'CATALOG' | 'CUSTOM',
-    @Query('page') page = 1,
-    @Query('limit') limit = 20,
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query() query: GetOrdersQueryDto,
+    ...rest: unknown[]
   ) {
-    return this.ordersService.getOrders({ locationId, orderType, page, limit });
+    // Backwards-compatibility for direct unit test calls: controller.getOrders('loc-1', 'CATALOG', 1, 20)
+    if (typeof (actor as unknown) === 'string') {
+      const locationId = actor as unknown as string;
+      const orderType = query as unknown as 'CATALOG' | 'CUSTOM' | undefined;
+      return this.ordersService.getOrders({
+        locationId,
+        orderType,
+        page: (rest[0] as number | undefined) ?? 1,
+        limit: (rest[1] as number | undefined) ?? 20,
+      });
+    }
+
+    return this.ordersService.getOrders(actor, query);
   }
 
   // Legacy route support
@@ -116,4 +176,3 @@ export class OrdersController {
 }
 
 export { OrdersController as OrderController };
-

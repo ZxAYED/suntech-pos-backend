@@ -70,7 +70,14 @@ export class ExportService {
     subtitle: string,
   ) {
     const records = await this.prisma.payrollRecord.findMany({
-      where: { businessId, month: query.month, year: query.year },
+      where: {
+        businessId,
+        month: query.month,
+        year: query.year,
+        ...(query.locationId
+          ? { cashier: { locationId: query.locationId } }
+          : {}),
+      },
       select: {
         baseSalary: true,
         totalAdvancesDeducted: true,
@@ -99,11 +106,25 @@ export class ExportService {
     subtitle: string,
   ) {
     const period = payrollPeriod(query.year, query.month);
+    const where: any = {
+      cashier: { businessId },
+      createdAt: { gte: period.start, lt: period.end },
+      ...(query.locationId ? { locationId: query.locationId } : {}),
+    };
+
+    if (query.search?.trim()) {
+      const searchTerm = query.search.trim();
+      where.OR = [
+        { invoiceNumber: { contains: searchTerm, mode: 'insensitive' } },
+        { receiptNumber: { contains: searchTerm, mode: 'insensitive' } },
+        { customerName: { contains: searchTerm, mode: 'insensitive' } },
+        { customerPhone: { contains: searchTerm, mode: 'insensitive' } },
+        { customerNumber: { contains: searchTerm, mode: 'insensitive' } },
+      ];
+    }
+
     const orders = await this.prisma.order.findMany({
-      where: {
-        cashier: { businessId },
-        createdAt: { gte: period.start, lt: period.end },
-      },
+      where,
       select: {
         invoiceNumber: true,
         receiptNumber: true,
@@ -132,7 +153,10 @@ export class ExportService {
           order.invoiceNumber ?? order.receiptNumber ?? '',
           order.createdAt.toISOString().slice(0, 10),
           order.cashier.fullName,
-          order.customerName ?? order.customerPhone ?? order.customerNumber ?? '',
+          order.customerName ??
+            order.customerPhone ??
+            order.customerNumber ??
+            '',
           String(order.totalAmount),
           String(refunded),
           String(order.totalAmount - refunded),

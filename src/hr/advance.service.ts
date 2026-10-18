@@ -9,6 +9,7 @@ import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdvanceSummaryQueryDto } from './dto/advance-summary.query';
 import { CreateAdvanceDto } from './dto/create-advance.dto';
+import { ListAdvancesQueryDto } from './dto/list-advances.query';
 import { payrollPeriod } from './payroll-period';
 import { requireBusinessId } from './require-business-id';
 
@@ -82,6 +83,104 @@ export class AdvanceService {
     }
 
     return { id: advanceId, deletedAt };
+  }
+
+  async list(actor: AccessTokenPayload, query: ListAdvancesQueryDto) {
+    const businessId = requireBusinessId(actor);
+    const where: Prisma.EmployeeAdvanceWhereInput = {
+      businessId,
+      deletedAt: null,
+    };
+
+    if (actor.role === Role.CASHIER) {
+      where.cashierId = actor.sub;
+      if (actor.locationId) {
+        where.cashier = { locationId: actor.locationId };
+      }
+    } else {
+      if (query.cashierId) {
+        where.cashierId = query.cashierId;
+      }
+      if (query.locationId) {
+        where.cashier = {
+          ...(where.cashier as Prisma.UserWhereInput),
+          locationId: query.locationId,
+        };
+      }
+    }
+
+    if (query.status) {
+      where.status = query.status;
+    }
+
+    if (query.month || query.year) {
+      const now = new Date();
+      const month = query.month ?? now.getMonth() + 1;
+      const year = query.year ?? now.getFullYear();
+      const { start, end } = payrollPeriod(year, month);
+      where.takenAt = { gte: start, lt: end };
+    }
+
+    const advances = await this.prisma.employeeAdvance.findMany({
+      where,
+      select: {
+        id: true,
+        cashierId: true,
+        amount: true,
+        reason: true,
+        status: true,
+        takenAt: true,
+        createdAt: true,
+        cashier: {
+          select: {
+            fullName: true,
+            publicId: true,
+            role: true,
+            location: {
+              select: {
+                name: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { takenAt: 'desc' },
+    });
+
+    const items = advances.map((adv) => ({
+      id: adv.id,
+      cashierId: adv.cashierId,
+      employeeName: adv.cashier.fullName,
+      employeeCode: adv.cashier.publicId ?? `CSH-${adv.cashierId.slice(-4)}`,
+      role: adv.cashier.role,
+      locationName: adv.cashier.location?.name ?? 'Unassigned',
+      amount: adv.amount,
+      reason: adv.reason,
+      status: adv.status,
+      takenAt: adv.takenAt,
+      createdAt: adv.createdAt,
+    }));
+
+    const totalActiveAdvances = advances
+      .filter((a) => a.status === AdvanceStatus.PENDING)
+      .reduce((sum, a) => sum + a.amount, 0);
+
+    const pendingCount = advances.filter(
+      (a) => a.status === AdvanceStatus.PENDING,
+    ).length;
+
+    const deductedCount = advances.filter(
+      (a) => a.status === AdvanceStatus.DEDUCTED,
+    ).length;
+
+    return {
+      items,
+      summary: {
+        totalActiveAdvances,
+        pendingCount,
+        deductedCount,
+      },
+    };
   }
 
   async summary(

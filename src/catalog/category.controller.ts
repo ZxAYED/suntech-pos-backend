@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
@@ -24,11 +25,11 @@ import { UpdateCategoryDto } from './dto/update-category.dto';
 
 @Controller('catalog/categories')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.ADMIN)
 export class CategoryController {
   constructor(private readonly categories: CategoryService) {}
 
   @Post()
+  @Roles(Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Category created')
@@ -40,18 +41,24 @@ export class CategoryController {
   }
 
   @Get()
+  @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Categories loaded')
-  list(@CurrentUser() admin: AccessTokenPayload) {
-    return this.categories.list(admin);
+  list(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query('search') search?: string,
+  ) {
+    return this.categories.list(actor, search);
   }
 
   @Get(':id')
+  @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Category loaded')
-  get(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {
-    return this.categories.get(admin, id);
+  get(@CurrentUser() actor: AccessTokenPayload, @Param('id') id: string) {
+    return this.categories.get(actor, id);
   }
 
   @Patch(':id')
+  @Roles(Role.ADMIN)
   @ResponseMessage('Category updated')
   update(
     @CurrentUser() admin: AccessTokenPayload,
@@ -62,6 +69,7 @@ export class CategoryController {
   }
 
   @Delete(':id')
+  @Roles(Role.ADMIN)
   @ResponseMessage('Category removed')
   remove(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {
     return this.categories.remove(admin, id);

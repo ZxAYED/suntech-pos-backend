@@ -7,11 +7,26 @@ describe('ShiftService', () => {
   const locationFindFirst = jest.fn();
   const shiftFindFirst = jest.fn();
   const shiftCreate = jest.fn();
+  const shiftUpdate = jest.fn();
   const shiftUpdateMany = jest.fn();
+  const shiftFindFirstOrThrow = jest.fn();
+  const shiftCount = jest.fn();
+  const shiftFindMany = jest.fn();
+  const orderAggregate = jest.fn();
+  const advanceAggregate = jest.fn();
+  const advanceFindMany = jest.fn();
+  const advanceCreate = jest.fn();
+
   const transaction = jest.fn((callback: (tx: unknown) => unknown) =>
     callback({
       location: { findFirst: locationFindFirst },
-      shiftSession: { findFirst: shiftFindFirst, create: shiftCreate },
+      shiftSession: {
+        findFirst: shiftFindFirst,
+        create: shiftCreate,
+        update: shiftUpdate,
+      },
+      order: { aggregate: orderAggregate },
+      employeeAdvance: { aggregate: advanceAggregate },
     }),
   );
   const prisma = {
@@ -19,7 +34,17 @@ describe('ShiftService', () => {
     shiftSession: {
       findFirst: shiftFindFirst,
       updateMany: shiftUpdateMany,
-      findFirstOrThrow: jest.fn(),
+      findFirstOrThrow: shiftFindFirstOrThrow,
+      count: shiftCount,
+      findMany: shiftFindMany,
+    },
+    order: {
+      aggregate: orderAggregate,
+    },
+    employeeAdvance: {
+      aggregate: advanceAggregate,
+      findMany: advanceFindMany,
+      create: advanceCreate,
     },
   } as unknown as PrismaService;
   const service = new ShiftService(prisma);
@@ -34,12 +59,39 @@ describe('ShiftService', () => {
     locationFindFirst.mockReset();
     shiftFindFirst.mockReset();
     shiftCreate.mockReset();
+    shiftUpdate.mockReset();
     shiftUpdateMany.mockReset();
+    shiftFindFirstOrThrow.mockReset();
+    shiftCount.mockReset();
+    shiftFindMany.mockReset();
+    orderAggregate.mockReset();
+    advanceAggregate.mockReset();
+    advanceFindMany.mockReset();
+    advanceCreate.mockReset();
+
     locationFindFirst.mockResolvedValue({ id: 'loc-1' });
     shiftFindFirst.mockResolvedValue(null);
     shiftCreate.mockImplementation(({ data }: { data: object }) =>
       Promise.resolve({ id: 'shift-1', ...data }),
     );
+    orderAggregate.mockResolvedValue({ _sum: { totalAmount: 24820 } });
+    advanceAggregate.mockResolvedValue({ _sum: { amount: 1350 } });
+    advanceFindMany.mockResolvedValue([
+      {
+        id: 'adv-1',
+        amount: 350,
+        reason: 'Lunch',
+        takenAt: new Date(),
+        status: 'PENDING',
+      },
+      {
+        id: 'adv-2',
+        amount: 1000,
+        reason: 'Emergency',
+        takenAt: new Date(),
+        status: 'PENDING',
+      },
+    ]);
   });
 
   it('opens a shift for the cashier location on the token', async () => {
@@ -57,13 +109,127 @@ describe('ShiftService', () => {
     });
   });
 
-  it('rejects a second open shift', async () => {
-    shiftFindFirst.mockResolvedValue({ id: 'shift-open' });
+  it('rejects a second open shift if opened today and autoClosePrevious is false', async () => {
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-open',
+      openedAt: new Date(),
+    });
 
     await expect(
       service.open(cashier, { startingAmount: 0 }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(shiftCreate).not.toHaveBeenCalled();
+  });
+
+  it('automatically closes a shift left open from a previous day and opens a new shift', async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-yesterday',
+      startingAmount: 2000,
+      openedAt: yesterday,
+    });
+    orderAggregate.mockResolvedValue({ _sum: { totalAmount: 8000 } });
+    advanceAggregate.mockResolvedValue({ _sum: { amount: 500 } });
+
+    const result = await service.open(cashier, { startingAmount: 3000 });
+
+    expect(shiftUpdate).toHaveBeenCalledWith({
+      where: { id: 'shift-yesterday' },
+      data: expect.objectContaining({
+        status: ShiftStatus.CLOSED,
+        closingAmount: 9500, // 2000 + 8000 - 500
+        expectedAmount: 9500,
+        variance: 0,
+        cashSales: 8000,
+        advancesOut: 500,
+        notes:
+          'Auto-closed: previous shift was left open before new shift start',
+      }),
+    });
+    expect(shiftCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+        cashierId: 'cashier-1',
+        startingAmount: 3000,
+        status: ShiftStatus.OPEN,
+      }),
+      select: expect.any(Object),
+    });
+    expect(result.autoClosedPreviousShiftId).toBe('shift-yesterday');
+  });
+
+  it('automatically closes today shift if autoClosePrevious is explicitly requested', async () => {
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-today',
+      startingAmount: 1000,
+      openedAt: new Date(),
+    });
+    orderAggregate.mockResolvedValue({ _sum: { totalAmount: 4000 } });
+    advanceAggregate.mockResolvedValue({ _sum: { amount: 0 } });
+
+    const result = await service.open(cashier, {
+      startingAmount: 2000,
+      autoClosePrevious: true,
+    });
+
+    expect(shiftUpdate).toHaveBeenCalledWith({
+      where: { id: 'shift-today' },
+      data: expect.objectContaining({
+        status: ShiftStatus.CLOSED,
+        closingAmount: 5000,
+        expectedAmount: 5000,
+      }),
+    });
+    expect(result.autoClosedPreviousShiftId).toBe('shift-today');
+  });
+
+  it('lists shifts scoped to cashier location and cashierId', async () => {
+    shiftCount.mockResolvedValue(1);
+    shiftFindMany.mockResolvedValue([{ id: 'shift-1' }]);
+
+    const result = await service.list(cashier, { page: 1, limit: 10 });
+
+    expect(shiftFindMany).toHaveBeenCalledWith({
+      where: {
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+        cashierId: 'cashier-1',
+      },
+      select: expect.any(Object),
+      orderBy: { openedAt: 'desc' },
+      skip: 0,
+      take: 10,
+    });
+    expect(result.data).toHaveLength(1);
+  });
+
+  it('lists shifts for admin with locationId filter', async () => {
+    shiftCount.mockResolvedValue(1);
+    shiftFindMany.mockResolvedValue([{ id: 'shift-1' }]);
+    const admin = {
+      sub: 'admin-1',
+      role: Role.ADMIN,
+      businessId: 'biz-1',
+    };
+
+    const result = await service.list(admin, {
+      locationId: 'loc-1',
+      page: 1,
+      limit: 10,
+    });
+
+    expect(shiftFindMany).toHaveBeenCalledWith({
+      where: {
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      },
+      select: expect.any(Object),
+      orderBy: { openedAt: 'desc' },
+      skip: 0,
+      take: 10,
+    });
+    expect(result.data).toHaveLength(1);
   });
 
   it('does not close a shift owned by another cashier', async () => {
@@ -78,8 +244,93 @@ describe('ShiftService', () => {
         businessId: 'biz-1',
         cashierId: 'cashier-1',
       },
-      select: { id: true, status: true },
+      select: { id: true, startingAmount: true, status: true },
     });
     expect(shiftUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it('returns active shift with live computed expected cash and advance ledger', async () => {
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-1',
+      businessId: 'biz-1',
+      startingAmount: 10000,
+      status: ShiftStatus.OPEN,
+    });
+
+    const active = await service.getActive(cashier);
+
+    expect(active).not.toBeNull();
+    expect(active?.openingFloat).toBe(10000);
+    expect(active?.cashSales).toBe(24820);
+    expect(active?.advancesOut).toBe(1350);
+    expect(active?.expectedCash).toBe(33470);
+    expect(active?.advanceLedger).toHaveLength(2);
+  });
+
+  it('closes active shift, calculates expected cash and variance', async () => {
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-1',
+      startingAmount: 10000,
+      status: ShiftStatus.OPEN,
+    });
+    shiftUpdateMany.mockResolvedValue({ count: 1 });
+    shiftFindFirstOrThrow.mockResolvedValue({
+      id: 'shift-1',
+      closingAmount: 33470,
+      expectedAmount: 33470,
+      variance: 0,
+      status: ShiftStatus.CLOSED,
+    });
+
+    const closed = await service.close(cashier, undefined, {
+      closingAmount: 33470,
+      notes: 'Balanced',
+    });
+
+    expect(shiftUpdateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'shift-1',
+        businessId: 'biz-1',
+        status: ShiftStatus.OPEN,
+      },
+      data: expect.objectContaining({
+        closingAmount: 33470,
+        expectedAmount: 33470,
+        variance: 0,
+        cashSales: 24820,
+        advancesOut: 1350,
+        notes: 'Balanced',
+        status: ShiftStatus.CLOSED,
+      }),
+    });
+    expect(closed.status).toBe(ShiftStatus.CLOSED);
+  });
+
+  it('adds an advance to the active shift', async () => {
+    shiftFindFirst.mockResolvedValue({ id: 'shift-1' });
+    advanceCreate.mockResolvedValue({
+      id: 'adv-3',
+      amount: 500,
+      reason: 'Snacks',
+      takenAt: new Date(),
+      status: 'PENDING',
+    });
+
+    const adv = await service.addAdvance(cashier, {
+      amount: 500,
+      reason: 'Snacks',
+    });
+
+    expect(advanceCreate).toHaveBeenCalledWith({
+      data: {
+        businessId: 'biz-1',
+        cashierId: 'cashier-1',
+        shiftId: 'shift-1',
+        amount: 500,
+        reason: 'Snacks',
+      },
+      select: expect.any(Object),
+    });
+    expect(adv.amount).toBe(500);
   });
 });

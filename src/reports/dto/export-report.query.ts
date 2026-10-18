@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, Max, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
 
 export enum ReportType {
   PAYROLL = 'payroll',
@@ -29,4 +29,10 @@ export class ExportReportQueryDto {
   @Min(2000)
   @Max(2100)
   year: number;
+
+  @IsOptional()
+  locationId?: string;
+
+  @IsOptional()
+  search?: string;
 }

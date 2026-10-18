@@ -100,6 +100,34 @@ export class AuthService {
 
     this.assertAccountActive(found.status);
     const user = await this.attachOwnedBusiness(found);
+
+    if (user.role === Role.CASHIER) {
+      if (
+        !user.businessId ||
+        !user.locationId ||
+        typeof user.businessId !== 'string' ||
+        typeof user.locationId !== 'string'
+      ) {
+        throw new ForbiddenException(
+          'Cashier account must be assigned to an active business and branch location',
+        );
+      }
+
+      const location = await this.prisma.location.findFirst({
+        where: {
+          id: user.locationId,
+          businessId: user.businessId,
+          deletedAt: null,
+        },
+      });
+
+      if (!location) {
+        throw new ForbiddenException(
+          'Cashier account must be assigned to an active business and branch location',
+        );
+      }
+    }
+
     const accessToken = await this.signAccessToken(user);
     const refreshToken = await this.signRefreshToken(user.id);
 
@@ -122,6 +150,19 @@ export class AuthService {
 
     this.assertAccountActive(user.status);
     const sessionUser = await this.attachOwnedBusiness(user);
+
+    if (sessionUser.role === Role.CASHIER) {
+      if (
+        !sessionUser.businessId ||
+        !sessionUser.locationId ||
+        typeof sessionUser.businessId !== 'string' ||
+        typeof sessionUser.locationId !== 'string'
+      ) {
+        throw new ForbiddenException(
+          'Cashier account must be assigned to an active business and branch location',
+        );
+      }
+    }
 
     return { accessToken: await this.signAccessToken(sessionUser) };
   }

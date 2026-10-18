@@ -14,6 +14,7 @@ import { UploadedImage } from '../media/uploaded-image';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateBusinessDto } from './dto/create-business.dto';
 import { CreateLocationDto } from './dto/create-location.dto';
+import { UpdateLocationDto } from './dto/update-location.dto';
 
 const businessSelect = {
   id: true,
@@ -38,6 +39,49 @@ export class TenantService {
     private readonly authService: AuthService,
     private readonly cloudinary: CloudinaryService,
   ) {}
+
+  async getBusiness(businessId: string): Promise<PresentedBusiness> {
+    const business = await this.prisma.business.findFirst({
+      where: { id: businessId, deletedAt: null },
+      select: businessSelect,
+    });
+
+    if (!business) {
+      throw new NotFoundException('Business not found');
+    }
+
+    return business;
+  }
+
+  async getLocations(
+    businessId: string,
+    locationId?: string,
+    search?: string,
+  ): Promise<Location[]> {
+    return this.prisma.location.findMany({
+      where: {
+        businessId,
+        deletedAt: null,
+        ...(locationId ? { id: locationId } : {}),
+        ...(search?.trim()
+          ? {
+              OR: [
+                {
+                  name: { contains: search.trim(), mode: 'insensitive' },
+                },
+                {
+                  address: {
+                    contains: search.trim(),
+                    mode: 'insensitive',
+                  },
+                },
+              ],
+            }
+          : {}),
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
 
   async createBusiness(
     admin: AccessTokenPayload,
@@ -89,6 +133,51 @@ export class TenantService {
         businessId,
       },
     });
+  }
+
+  async updateLocation(
+    admin: AccessTokenPayload,
+    locationId: string,
+    dto: UpdateLocationDto,
+  ): Promise<Location> {
+    const businessId = this.requireBusinessId(admin);
+
+    const location = await this.prisma.location.findFirst({
+      where: { id: locationId, businessId, deletedAt: null },
+    });
+
+    if (!location) {
+      throw new NotFoundException('Location not found');
+    }
+
+    return this.prisma.location.update({
+      where: { id: locationId },
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
+        ...(dto.address !== undefined
+          ? { address: dto.address.trim() || null }
+          : {}),
+      },
+    });
+  }
+
+  async deleteLocation(
+    admin: AccessTokenPayload,
+    locationId: string,
+  ): Promise<{ id: string; deletedAt: Date }> {
+    const businessId = this.requireBusinessId(admin);
+    const deletedAt = new Date();
+
+    const result = await this.prisma.location.updateMany({
+      where: { id: locationId, businessId, deletedAt: null },
+      data: { deletedAt },
+    });
+
+    if (result.count === 0) {
+      throw new NotFoundException('Location not found');
+    }
+
+    return { id: locationId, deletedAt };
   }
 
   async setBusinessProfileImage(

@@ -1,4 +1,9 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   OrderStatus,
   OrderType,
@@ -81,8 +86,9 @@ describe('OrdersService', () => {
     variantUpdate.mockResolvedValue({ id: 'variant-1', stock: 8 });
     variantUpdateMany.mockResolvedValue({ count: 1 });
     stockCreate.mockResolvedValue({ id: 'stock-1' });
-    orderCreate.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
-      Promise.resolve({ id: 'order-1', ...data }),
+    orderCreate.mockImplementation(
+      ({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ id: 'order-1', ...data }),
     );
   });
 
@@ -227,7 +233,9 @@ describe('OrdersService', () => {
           tenderedAmount: 3000,
           lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
         }),
-      ).rejects.toThrow(new BadRequestException('Insufficient stock for variant variant-1'));
+      ).rejects.toThrow(
+        new BadRequestException('Insufficient stock for variant variant-1'),
+      );
 
       expect(variantUpdate).not.toHaveBeenCalled();
       expect(orderCreate).not.toHaveBeenCalled();
@@ -302,6 +310,52 @@ describe('OrdersService', () => {
             orderType: OrderType.CATALOG,
             shiftId: null,
             cashierId: 'user-admin-1',
+          }),
+        }),
+      );
+    });
+
+    it('throws ForbiddenException if cashier attempts to create order for an unassigned location', async () => {
+      const cashierActor = {
+        sub: 'user-cashier-1',
+        role: Role.CASHIER,
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      };
+
+      await expect(
+        service.createCatalogOrder(cashierActor, {
+          locationId: 'loc-other',
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('does not increment physical cash drawer when paymentMethod is digital (BKASH)', async () => {
+      variantFindMany.mockResolvedValue([
+        {
+          id: 'variant-1',
+          name: '128GB Black',
+          stock: 10,
+          sellingPrice: 1500,
+          product: { name: 'iPhone 15' },
+        },
+      ]);
+
+      await service.createCatalogOrder('user-cashier-1', {
+        locationId: 'loc-1',
+        shiftId: 'shift-1',
+        tenderedAmount: 1500,
+        paymentMethod: PaymentMethod.BKASH,
+        lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+      });
+
+      expect(shiftUpdate).not.toHaveBeenCalled();
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            paymentMethod: PaymentMethod.BKASH,
           }),
         }),
       );
@@ -434,7 +488,9 @@ describe('OrdersService', () => {
   describe('getOrders', () => {
     it('retrieves orders with locationId and orderType filters', async () => {
       orderCount.mockResolvedValue(1);
-      orderFindMany.mockResolvedValue([{ id: 'order-1', orderType: OrderType.CATALOG }]);
+      orderFindMany.mockResolvedValue([
+        { id: 'order-1', orderType: OrderType.CATALOG },
+      ]);
 
       const result = await service.getOrders({
         locationId: 'loc-1',
@@ -455,6 +511,81 @@ describe('OrdersService', () => {
       });
       expect(result.items).toHaveLength(1);
       expect(result.total).toBe(1);
+    });
+
+    it('scopes orders to cashier location and tenant when called by cashier', async () => {
+      orderCount.mockResolvedValue(1);
+      orderFindMany.mockResolvedValue([{ id: 'order-1' }]);
+
+      const cashierActor = {
+        sub: 'cashier-1',
+        role: Role.CASHIER,
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      };
+
+      const result = await service.getOrders(cashierActor, {
+        orderType: OrderType.CATALOG,
+        page: 1,
+        limit: 10,
+      });
+
+      expect(orderCount).toHaveBeenCalledWith({
+        where: {
+          location: { businessId: 'biz-1' },
+          locationId: 'loc-1',
+          orderType: OrderType.CATALOG,
+        },
+      });
+      expect(result.items).toHaveLength(1);
+    });
+
+    it('applies search, paymentMethod, status, and range filters for admin', async () => {
+      orderCount.mockResolvedValue(1);
+      orderFindMany.mockResolvedValue([{ id: 'order-1' }]);
+
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+      };
+
+      await service.getOrders(adminActor, {
+        locationId: 'loc-2',
+        search: 'INV-1234',
+        paymentMethod: PaymentMethod.COD,
+        status: OrderStatus.PAID,
+        range: 'today',
+        page: 1,
+        limit: 20,
+      });
+
+      expect(orderCount).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          location: { businessId: 'biz-1' },
+          locationId: 'loc-2',
+          paymentMethod: PaymentMethod.COD,
+          status: OrderStatus.PAID,
+          createdAt: expect.objectContaining({
+            gte: expect.any(Date),
+            lte: expect.any(Date),
+          }),
+          OR: expect.arrayContaining([
+            { invoiceNumber: { contains: 'INV-1234', mode: 'insensitive' } },
+            { receiptNumber: { contains: 'INV-1234', mode: 'insensitive' } },
+            { customerName: { contains: 'INV-1234', mode: 'insensitive' } },
+            { customerPhone: { contains: 'INV-1234', mode: 'insensitive' } },
+            { customerNumber: { contains: 'INV-1234', mode: 'insensitive' } },
+            {
+              lines: {
+                some: {
+                  productName: { contains: 'INV-1234', mode: 'insensitive' },
+                },
+              },
+            },
+          ]),
+        }),
+      });
     });
   });
 

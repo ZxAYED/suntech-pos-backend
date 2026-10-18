@@ -28,6 +28,7 @@ model Category {
   businessId  String
   business    Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
   name        String    @unique
+  slug        String?
   description String?
   products    Product[]
 

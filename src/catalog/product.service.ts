@@ -9,6 +9,7 @@ import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.e
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProductDto } from './dto/create-product.dto';
+import { ListProductsQueryDto } from './dto/list-products.query';
 import { UpdateProductDto } from './dto/update-product.dto';
 
 const variantSelect = {
@@ -73,6 +74,7 @@ export class ProductService {
         },
         select: productSelect,
       });
+
       return presentProduct(product);
     } catch (error) {
       if (isUniqueConstraintError(error)) {
@@ -83,9 +85,51 @@ export class ProductService {
     }
   }
 
-  async list(admin: AccessTokenPayload): Promise<PresentedProduct[]> {
+  async list(
+    actor: AccessTokenPayload,
+    query?: ListProductsQueryDto,
+  ): Promise<PresentedProduct[]> {
+    const businessId = requireBusinessId(actor);
+    const search = query?.search?.trim();
+
+    const searchFilter = search
+      ? {
+          OR: [
+            {
+              name: { contains: search, mode: 'insensitive' as const },
+            },
+            {
+              description: { contains: search, mode: 'insensitive' as const },
+            },
+            {
+              variants: {
+                some: {
+                  deletedAt: null,
+                  OR: [
+                    {
+                      sku: { contains: search, mode: 'insensitive' as const },
+                    },
+                    {
+                      barcode: {
+                        contains: search,
+                        mode: 'insensitive' as const,
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        }
+      : {};
+
     const products = await this.prisma.product.findMany({
-      where: { businessId: requireBusinessId(admin), deletedAt: null },
+      where: {
+        businessId,
+        deletedAt: null,
+        ...(query?.categoryId ? { categoryId: query.categoryId } : {}),
+        ...searchFilter,
+      },
       select: productSelect,
       orderBy: { name: 'asc' },
     });
@@ -93,11 +137,11 @@ export class ProductService {
   }
 
   async get(
-    admin: AccessTokenPayload,
+    actor: AccessTokenPayload,
     productId: string,
   ): Promise<PresentedProduct> {
     return presentProduct(
-      await this.findProduct(requireBusinessId(admin), productId),
+      await this.findProduct(requireBusinessId(actor), productId),
     );
   }
 
@@ -151,15 +195,26 @@ export class ProductService {
     productId: string,
   ): Promise<{ id: string; deletedAt: Date }> {
     const businessId = requireBusinessId(admin);
-    const deletedAt = new Date();
-    const removed = await this.prisma.product.updateMany({
+    const product = await this.prisma.product.findFirst({
       where: { id: productId, businessId, deletedAt: null },
-      data: { deletedAt },
+      select: { id: true, name: true },
     });
 
-    if (removed.count === 0) {
+    if (!product) {
       throw new NotFoundException('Product not found');
     }
+
+    const timestamp = Date.now();
+    const deletedAt = new Date();
+    const suffixedName = `${product.name}__del_${timestamp}`;
+
+    await this.prisma.product.update({
+      where: { id: product.id },
+      data: {
+        name: suffixedName,
+        deletedAt,
+      },
+    });
 
     return { id: productId, deletedAt };
   }

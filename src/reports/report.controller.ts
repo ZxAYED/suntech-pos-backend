@@ -6,6 +6,8 @@ import { Roles } from '../common/decorators/roles.decorator';
 import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { AnalyticsQueryDto } from './dto/analytics.query';
+import { DashboardQueryDto } from './dto/dashboard.query';
 import { TransactionLogQueryDto } from './dto/transaction-log.query';
 import { ReportService } from './report.service';
 
@@ -17,8 +19,21 @@ export class ReportController {
   @Get('dashboard')
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Dashboard loaded')
-  dashboard(@CurrentUser() actor: AccessTokenPayload) {
-    return this.reports.dashboard(actor);
+  dashboard(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query() query: DashboardQueryDto,
+  ) {
+    return this.reports.dashboard(actor, query);
+  }
+
+  @Get('analytics')
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Analytics loaded')
+  analytics(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Query() query: AnalyticsQueryDto,
+  ) {
+    return this.reports.analytics(admin, query);
   }
 
   @Get('transactions')

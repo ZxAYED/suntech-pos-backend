@@ -22,12 +22,16 @@ jest.mock('bcrypt', () => ({
 describe('AuthService', () => {
   const create = jest.fn();
   const findFirst = jest.fn();
+  const locationFindFirst = jest.fn();
   const prisma = {
     user: { create, findFirst },
+    location: { findFirst: locationFindFirst },
   } as unknown as PrismaService;
   const signAsync = jest.fn().mockResolvedValue('token');
+  const verifyAsync = jest.fn();
   const jwtService = {
     signAsync,
+    verifyAsync,
   } as unknown as ConstructorParameters<typeof AuthService>[1];
   const emailTemplateService = {
     sendPasswordReset: jest.fn(),
@@ -58,7 +62,9 @@ describe('AuthService', () => {
   beforeEach(() => {
     create.mockReset();
     findFirst.mockReset();
+    locationFindFirst.mockReset();
     signAsync.mockClear();
+    verifyAsync.mockReset();
   });
 
   it('registers a pending admin and does not mint a public id', async () => {
@@ -153,11 +159,24 @@ describe('AuthService', () => {
       locationId: 'loc-1',
       password: 'hashed-password',
     });
+    locationFindFirst.mockResolvedValue({
+      id: 'loc-1',
+      businessId: 'biz-1',
+      deletedAt: null,
+    });
 
     await service.login({
       loginType: LoginType.BUSINESS_USER,
       publicId: 'CSH-8X9B2',
       password: 'password123',
+    });
+
+    expect(locationFindFirst).toHaveBeenCalledWith({
+      where: {
+        id: 'loc-1',
+        businessId: 'biz-1',
+        deletedAt: null,
+      },
     });
 
     expect(signAsync).toHaveBeenCalledWith(
@@ -168,6 +187,75 @@ describe('AuthService', () => {
         businessId: 'biz-1',
         locationId: 'loc-1',
       }),
+    );
+  });
+
+  it('rejects cashier login if businessId or locationId is missing', async () => {
+    findFirst.mockResolvedValue({
+      id: 'cashier-1',
+      publicId: 'CSH-8X9B2',
+      fullName: 'Rafi',
+      email: 'rafi@shop.test',
+      phoneNumber: null,
+      role: Role.CASHIER,
+      status: AccountStatus.ACTIVE,
+      businessId: null,
+      locationId: 'loc-1',
+      password: 'hashed-password',
+    });
+
+    await expect(
+      service.login({
+        loginType: LoginType.BUSINESS_USER,
+        publicId: 'CSH-8X9B2',
+        password: 'password123',
+      }),
+    ).rejects.toThrow(
+      'Cashier account must be assigned to an active business and branch location',
+    );
+  });
+
+  it('rejects cashier login if location does not exist or is deleted', async () => {
+    findFirst.mockResolvedValue({
+      id: 'cashier-1',
+      publicId: 'CSH-8X9B2',
+      fullName: 'Rafi',
+      email: 'rafi@shop.test',
+      phoneNumber: null,
+      role: Role.CASHIER,
+      status: AccountStatus.ACTIVE,
+      businessId: 'biz-1',
+      locationId: 'loc-deleted',
+      password: 'hashed-password',
+    });
+    locationFindFirst.mockResolvedValue(null);
+
+    await expect(
+      service.login({
+        loginType: LoginType.BUSINESS_USER,
+        publicId: 'CSH-8X9B2',
+        password: 'password123',
+      }),
+    ).rejects.toThrow(
+      'Cashier account must be assigned to an active business and branch location',
+    );
+  });
+
+  it('rejects cashier refresh if businessId or locationId is missing in DB', async () => {
+    verifyAsync.mockResolvedValue({
+      sub: 'cashier-1',
+      purpose: 'refresh',
+    });
+    findFirst.mockResolvedValue({
+      id: 'cashier-1',
+      role: Role.CASHIER,
+      status: AccountStatus.ACTIVE,
+      businessId: 'biz-1',
+      locationId: null,
+    });
+
+    await expect(service.refresh('some-refresh-token')).rejects.toThrow(
+      'Cashier account must be assigned to an active business and branch location',
     );
   });
 

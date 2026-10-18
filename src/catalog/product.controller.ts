@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
@@ -19,16 +20,17 @@ import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateProductDto } from './dto/create-product.dto';
+import { ListProductsQueryDto } from './dto/list-products.query';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ProductService } from './product.service';
 
 @Controller('catalog/products')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.ADMIN)
 export class ProductController {
   constructor(private readonly products: ProductService) {}
 
   @Post()
+  @Roles(Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Product created')
@@ -40,18 +42,24 @@ export class ProductController {
   }
 
   @Get()
+  @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Products loaded')
-  list(@CurrentUser() admin: AccessTokenPayload) {
-    return this.products.list(admin);
+  list(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query() query: ListProductsQueryDto,
+  ) {
+    return this.products.list(actor, query);
   }
 
   @Get(':id')
+  @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Product loaded')
-  get(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {
-    return this.products.get(admin, id);
+  get(@CurrentUser() actor: AccessTokenPayload, @Param('id') id: string) {
+    return this.products.get(actor, id);
   }
 
   @Patch(':id')
+  @Roles(Role.ADMIN)
   @ResponseMessage('Product updated')
   update(
     @CurrentUser() admin: AccessTokenPayload,
@@ -62,6 +70,7 @@ export class ProductController {
   }
 
   @Delete(':id')
+  @Roles(Role.ADMIN)
   @ResponseMessage('Product removed')
   remove(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {
     return this.products.remove(admin, id);
