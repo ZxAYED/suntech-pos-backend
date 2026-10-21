@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsOptional, IsUUID } from 'class-validator';
+import { IsEnum, IsOptional } from 'class-validator';
+import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export class DashboardQueryDto {
   @ApiPropertyOptional({
@@ -10,8 +11,8 @@ export class DashboardQueryDto {
   @IsEnum(['today', 'yesterday', 'weekly', 'monthly'])
   range?: 'today' | 'yesterday' | 'weekly' | 'monthly';
 
-  @ApiPropertyOptional({ description: 'Filter by store branch location UUID' })
+  @ApiPropertyOptional({ description: 'Filter by store branch location ID' })
   @IsOptional()
-  @IsUUID()
+  @IsEntityId()
   locationId?: string;
 }

@@ -11,6 +11,12 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Idempotent } from '../common/decorators/idempotent.decorator';
@@ -24,12 +30,24 @@ import { ListVariantsQueryDto } from './dto/list-variants.query';
 import { UpdateVariantDto } from './dto/update-variant.dto';
 import { VariantService } from './variant.service';
 
+@ApiTags('Catalog - Variants')
+@ApiBearerAuth()
 @Controller('catalog/variants')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class VariantController {
   constructor(private readonly variants: VariantService) {}
 
   @Post()
+  @ApiOperation({
+    summary: 'Create variant in catalog',
+    description:
+      'Creates a product variant with tenant-scoped SKU and Barcode uniqueness.',
+  })
+  @ApiResponse({ status: 201, description: 'Variant created' })
+  @ApiResponse({
+    status: 409,
+    description: 'SKU or Barcode already exists in this business',
+  })
   @Roles(Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
@@ -42,6 +60,12 @@ export class VariantController {
   }
 
   @Get()
+  @ApiOperation({
+    summary: 'List variants with filters',
+    description:
+      'Accessible by both ADMIN and CASHIER. Supports filtering by category, product, search, and low stock.',
+  })
+  @ApiResponse({ status: 200, description: 'Variants loaded' })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Variants loaded')
   list(
@@ -52,6 +76,12 @@ export class VariantController {
   }
 
   @Get(':id')
+  @ApiOperation({
+    summary: 'Get variant details by ID',
+    description: 'Accessible by both ADMIN and CASHIER.',
+  })
+  @ApiResponse({ status: 200, description: 'Variant loaded' })
+  @ApiResponse({ status: 404, description: 'Variant not found' })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Variant loaded')
   get(@CurrentUser() actor: AccessTokenPayload, @Param('id') id: string) {
@@ -59,6 +89,14 @@ export class VariantController {
   }
 
   @Patch(':id')
+  @ApiOperation({
+    summary: 'Update variant',
+    description:
+      'Updates variant name, prices, SKU, barcode, or stock. Admin only.',
+  })
+  @ApiResponse({ status: 200, description: 'Variant updated' })
+  @ApiResponse({ status: 404, description: 'Variant not found' })
+  @ApiResponse({ status: 409, description: 'SKU or Barcode conflict' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Variant updated')
   update(
@@ -70,6 +108,12 @@ export class VariantController {
   }
 
   @Delete(':id')
+  @ApiOperation({
+    summary: 'Delete variant',
+    description: 'Soft-deletes a variant from catalog. Admin only.',
+  })
+  @ApiResponse({ status: 200, description: 'Variant removed' })
+  @ApiResponse({ status: 404, description: 'Variant not found' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Variant removed')
   remove(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {

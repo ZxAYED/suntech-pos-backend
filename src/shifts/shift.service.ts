@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -15,6 +16,7 @@ import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { requireBusinessId } from '../hr/require-business-id';
 import { resolveLocationScope } from '../common/utils/location-scope';
 import { PrismaService } from '../prisma/prisma.service';
+import { payrollPeriod } from '../hr/payroll-period';
 import { CloseShiftDto } from './dto/close-shift.dto';
 import { CreateShiftAdvanceDto } from './dto/create-shift-advance.dto';
 import { ListShiftsQueryDto } from './dto/list-shifts.query';
@@ -70,24 +72,15 @@ export interface ActiveShiftDetails extends PresentedShift {
 
 const ALREADY_OPEN_TODAY = 'You already have an open shift today';
 
-function isPreviousCalendarDay(openedAt?: Date | null): boolean {
-  if (!openedAt) {
-    return false;
-  }
+export function isPreviousCalendarDay(
+  openedAt?: Date | null,
+  now = new Date(),
+): boolean {
+  if (!openedAt) return false;
   const dateObj = openedAt instanceof Date ? openedAt : new Date(openedAt);
-  if (isNaN(dateObj.getTime())) {
-    return false;
-  }
-  const tz = 'Asia/Dhaka';
-  const dtf = new Intl.DateTimeFormat('en-CA', { timeZone: tz });
-  const openedDay = dtf.format(dateObj);
-  const today = dtf.format(new Date());
-  if (openedDay !== today) {
-    return true;
-  }
-  return (
-    dateObj.toISOString().slice(0, 10) !== new Date().toISOString().slice(0, 10)
-  );
+  if (isNaN(dateObj.getTime())) return false;
+  const dtf = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' });
+  return dtf.format(dateObj) < dtf.format(now);
 }
 
 @Injectable()
@@ -132,26 +125,42 @@ export class ShiftService {
               dto.autoClosePrevious === true;
 
             if (isStale) {
-              const [cashOrdersAgg, advancesAgg] = await Promise.all([
-                tx.order.aggregate({
-                  where: {
-                    shiftId: openShift.id,
-                    paymentMethod: PaymentMethod.COD,
-                    status: OrderStatus.PAID,
-                  },
-                  _sum: { totalAmount: true },
-                }),
-                tx.employeeAdvance.aggregate({
-                  where: {
-                    shiftId: openShift.id,
-                    businessId,
-                    deletedAt: null,
-                  },
-                  _sum: { amount: true },
-                }),
-              ]);
+              const refundPromise = tx.refund?.aggregate
+                ? tx.refund.aggregate({
+                    where: {
+                      order: {
+                        shiftId: openShift.id,
+                        paymentMethod: PaymentMethod.COD,
+                      },
+                    },
+                    _sum: { totalRefund: true },
+                  })
+                : Promise.resolve({ _sum: { totalRefund: 0 } });
 
-              const cashSales = cashOrdersAgg?._sum?.totalAmount ?? 0;
+              const [cashOrdersAgg, advancesAgg, codRefundsAgg] =
+                await Promise.all([
+                  tx.order.aggregate({
+                    where: {
+                      shiftId: openShift.id,
+                      paymentMethod: PaymentMethod.COD,
+                      status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
+                    },
+                    _sum: { totalAmount: true },
+                  }),
+                  tx.employeeAdvance.aggregate({
+                    where: {
+                      shiftId: openShift.id,
+                      businessId,
+                      deletedAt: null,
+                    },
+                    _sum: { amount: true },
+                  }),
+                  refundPromise,
+                ]);
+
+              const rawCashSales = cashOrdersAgg?._sum?.totalAmount ?? 0;
+              const codRefunds = codRefundsAgg?._sum?.totalRefund ?? 0;
+              const cashSales = Math.max(0, rawCashSales - codRefunds);
               const advancesOut = advancesAgg?._sum?.amount ?? 0;
               const expectedAmount =
                 (openShift.startingAmount ?? 0) + cashSales - advancesOut;
@@ -312,11 +321,69 @@ export class ShiftService {
         cashierId: cashier.sub,
         status: ShiftStatus.OPEN,
       },
-      select: { id: true },
+      select: { id: true, startingAmount: true },
     });
 
     if (!activeShift) {
       throw new ConflictException('No open shift found to withdraw cash from');
+    }
+
+    const user = await this.prisma.user?.findFirst?.({
+      where: { id: cashier.sub, businessId, deletedAt: null },
+      select: { monthlySalary: true },
+    });
+
+    const now = new Date();
+    const { start, end } = payrollPeriod(
+      now.getUTCFullYear(),
+      now.getUTCMonth() + 1,
+    );
+
+    let currentPending = 0;
+    if (this.prisma.employeeAdvance?.aggregate) {
+      const agg = await this.prisma.employeeAdvance.aggregate({
+        where: {
+          businessId,
+          cashierId: cashier.sub,
+          status: 'PENDING',
+          deletedAt: null,
+          takenAt: { gte: start, lt: end },
+        },
+        _sum: { amount: true },
+      });
+      currentPending = agg._sum?.amount ?? 0;
+    } else if (this.prisma.employeeAdvance?.findMany) {
+      const existing = await this.prisma.employeeAdvance.findMany({
+        where: {
+          businessId,
+          cashierId: cashier.sub,
+          status: 'PENDING',
+          deletedAt: null,
+          takenAt: { gte: start, lt: end },
+        },
+      });
+      currentPending = Array.isArray(existing)
+        ? existing.reduce((sum, item) => sum + (item.amount ?? 0), 0)
+        : 0;
+    }
+
+    const maxSalary = user?.monthlySalary ?? 0;
+    if (maxSalary > 0 && currentPending + dto.amount > maxSalary) {
+      throw new BadRequestException(
+        'Advance amount exceeds remaining monthly salary limit',
+      );
+    }
+
+    const { cashSales, advancesOut } = await this.computeShiftMetrics(
+      activeShift.id,
+      businessId,
+    );
+    const expectedCash =
+      (activeShift.startingAmount ?? 0) + cashSales - advancesOut;
+    if (dto.amount > expectedCash) {
+      throw new BadRequestException(
+        'Advance amount exceeds physical cash available in drawer',
+      );
     }
 
     const advance = await this.prisma.employeeAdvance.create({
@@ -375,42 +442,58 @@ export class ShiftService {
   }
 
   private async computeShiftMetrics(shiftId: string, businessId: string) {
-    const [cashOrdersAgg, advancesAgg, advanceLedger] = await Promise.all([
-      this.prisma.order.aggregate({
-        where: {
-          shiftId,
-          paymentMethod: PaymentMethod.COD,
-          status: OrderStatus.PAID,
-        },
-        _sum: { totalAmount: true },
-      }),
-      this.prisma.employeeAdvance.aggregate({
-        where: {
-          shiftId,
-          businessId,
-          deletedAt: null,
-        },
-        _sum: { amount: true },
-      }),
-      this.prisma.employeeAdvance.findMany({
-        where: {
-          shiftId,
-          businessId,
-          deletedAt: null,
-        },
-        select: {
-          id: true,
-          amount: true,
-          reason: true,
-          takenAt: true,
-          status: true,
-        },
-        orderBy: { takenAt: 'desc' },
-      }),
-    ]);
+    const refundPromise = this.prisma.refund?.aggregate
+      ? this.prisma.refund.aggregate({
+          where: {
+            order: {
+              shiftId,
+              paymentMethod: PaymentMethod.COD,
+            },
+          },
+          _sum: { totalRefund: true },
+        })
+      : Promise.resolve({ _sum: { totalRefund: 0 } });
 
-    const cashSales = cashOrdersAgg._sum.totalAmount ?? 0;
-    const advancesOut = advancesAgg._sum.amount ?? 0;
+    const [cashOrdersAgg, advancesAgg, advanceLedger, codRefundsAgg] =
+      await Promise.all([
+        this.prisma.order.aggregate({
+          where: {
+            shiftId,
+            paymentMethod: PaymentMethod.COD,
+            status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
+          },
+          _sum: { totalAmount: true },
+        }),
+        this.prisma.employeeAdvance.aggregate({
+          where: {
+            shiftId,
+            businessId,
+            deletedAt: null,
+          },
+          _sum: { amount: true },
+        }),
+        this.prisma.employeeAdvance.findMany({
+          where: {
+            shiftId,
+            businessId,
+            deletedAt: null,
+          },
+          select: {
+            id: true,
+            amount: true,
+            reason: true,
+            takenAt: true,
+            status: true,
+          },
+          orderBy: { takenAt: 'desc' },
+        }),
+        refundPromise,
+      ]);
+
+    const rawCashSales = cashOrdersAgg?._sum?.totalAmount ?? 0;
+    const codRefunds = codRefundsAgg?._sum?.totalRefund ?? 0;
+    const cashSales = Math.max(0, rawCashSales - codRefunds);
+    const advancesOut = advancesAgg?._sum?.amount ?? 0;
 
     return { cashSales, advancesOut, advanceLedger };
   }

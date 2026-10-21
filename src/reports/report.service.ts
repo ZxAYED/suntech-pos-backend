@@ -424,19 +424,29 @@ export class ReportService {
         this.prisma.order.groupBy
           ? this.prisma.order.groupBy({
               by: ['paymentMethod'],
-              where: periodOrderWhere,
+              where: {
+                ...periodOrderWhere,
+                status: OrderStatus.PAID,
+              },
               _sum: { totalAmount: true },
             })
           : Promise.resolve([]),
         lineDelegate?.findMany
           ? lineDelegate.findMany({
               where: {
-                order: periodOrderWhere,
+                order: {
+                  ...periodOrderWhere,
+                  status: OrderStatus.PAID,
+                },
               },
               select: {
+                unitPrice: true,
                 subtotal: true,
                 quantity: true,
                 variantId: true,
+                refundItems: {
+                  select: { quantity: true, refundAmount: true },
+                },
                 variant: {
                   select: {
                     costPrice: true,
@@ -481,13 +491,27 @@ export class ReportService {
     const categoryRevenueMap = new Map<string, number>();
 
     for (const line of lines || []) {
-      const subtotal = line.subtotal ?? 0;
-      const quantity = line.quantity ?? 1;
+      const refundItems = Array.isArray((line as any).refundItems)
+        ? (line as any).refundItems
+        : [];
+      const refundedQty = refundItems.reduce(
+        (sum: number, r: any) => sum + (r.quantity ?? 0),
+        0,
+      );
+      const refundedAmount = refundItems.reduce(
+        (sum: number, r: any) =>
+          sum + (r.refundAmount ?? (r.quantity ?? 0) * (line.unitPrice ?? 0)),
+        0,
+      );
+      const subtotal = Math.max(0, (line.subtotal ?? 0) - refundedAmount);
+      const quantity = Math.max(0, (line.quantity ?? 1) - refundedQty);
+      if (subtotal === 0 && quantity === 0) {
+        continue;
+      }
 
-      if (line.variantId) {
+      if (line.variantId && line.variant?.costPrice != null) {
         catalogRevenue += subtotal;
-        const costPrice = line.variant?.costPrice ?? 0;
-        catalogCost += costPrice * quantity;
+        catalogCost += line.variant.costPrice * quantity;
       }
 
       const categoryName =

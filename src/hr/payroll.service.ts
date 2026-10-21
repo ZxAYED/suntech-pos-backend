@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -34,7 +35,9 @@ const payrollSelect = {
 
 export type PresentedPayroll = Prisma.PayrollRecordGetPayload<{
   select: typeof payrollSelect;
-}>;
+}> & {
+  autoClosedPreviousShiftId?: string;
+};
 
 const ALREADY_PAID = 'Payroll for this cashier and period already exists';
 
@@ -109,6 +112,10 @@ export class PayrollService {
     const totalAdvancesDeducted = aggregate._sum.amount ?? 0;
     const baseSalary = cashier.monthlySalary ?? 0;
 
+    if (totalAdvancesDeducted > baseSalary) {
+      throw new BadRequestException('Total advances cannot exceed base salary');
+    }
+
     await tx.employeeAdvance.updateMany({
       where: advanceWhere,
       data: { status: AdvanceStatus.DEDUCTED },
@@ -139,6 +146,7 @@ export class PayrollService {
       this.prisma.user.findMany({
         where: {
           businessId,
+          role: Role.CASHIER,
           deletedAt: null,
           monthlySalary: { not: null },
           ...(query.locationId ? { locationId: query.locationId } : {}),
@@ -153,7 +161,14 @@ export class PayrollService {
         orderBy: { fullName: 'asc' },
       }),
       this.prisma.payrollRecord.findMany({
-        where: { businessId, month, year },
+        where: {
+          businessId,
+          month,
+          year,
+          ...(query.locationId
+            ? { cashier: { locationId: query.locationId } }
+            : {}),
+        },
         select: payrollSelect,
       }),
     ]);
@@ -165,6 +180,9 @@ export class PayrollService {
         status: AdvanceStatus.PENDING,
         deletedAt: null,
         takenAt: { gte: start, lt: end },
+        ...(query.locationId
+          ? { cashier: { locationId: query.locationId } }
+          : {}),
       },
       select: { cashierId: true, amount: true },
     });
@@ -238,6 +256,7 @@ export class PayrollService {
       const staffList = await tx.user.findMany({
         where: {
           businessId,
+          role: Role.CASHIER,
           deletedAt: null,
           monthlySalary: { not: null, gt: 0 },
           ...(dto.locationId ? { locationId: dto.locationId } : {}),
@@ -250,6 +269,9 @@ export class PayrollService {
           businessId,
           month: dto.month,
           year: dto.year,
+          ...(dto.locationId
+            ? { cashier: { locationId: dto.locationId } }
+            : {}),
         },
         select: { cashierId: true },
       });
@@ -275,7 +297,14 @@ export class PayrollService {
         });
         const totalAdvancesDeducted = aggregate._sum.amount ?? 0;
         const baseSalary = staff.monthlySalary ?? 0;
-        const netPaid = Math.max(0, baseSalary - totalAdvancesDeducted);
+
+        if (totalAdvancesDeducted > baseSalary) {
+          throw new BadRequestException(
+            `Total advances (${totalAdvancesDeducted}) cannot exceed base salary (${baseSalary})`,
+          );
+        }
+
+        const netPaid = baseSalary - totalAdvancesDeducted;
 
         await tx.employeeAdvance.updateMany({
           where: advanceWhere,

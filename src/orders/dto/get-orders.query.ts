@@ -1,20 +1,13 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { OrderStatus, OrderType, PaymentMethod } from '@prisma/client';
 import { Type } from 'class-transformer';
-import {
-  IsEnum,
-  IsInt,
-  IsOptional,
-  IsString,
-  IsUUID,
-  Max,
-  Min,
-} from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export class GetOrdersQueryDto {
-  @ApiPropertyOptional({ description: 'Filter by store location UUID' })
+  @ApiPropertyOptional({ description: 'Filter by store location ID' })
   @IsOptional()
-  @IsUUID()
+  @IsEntityId()
   locationId?: string;
 
   @ApiPropertyOptional({

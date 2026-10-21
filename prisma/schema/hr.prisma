@@ -14,7 +14,7 @@ enum ShiftStatus {
 }
 
 model EmployeeAdvance {
-  id         String   @id @default(cuid())
+  id         String   @id @default(uuid())
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   cashierId  String
@@ -37,7 +37,7 @@ model EmployeeAdvance {
 }
 
 model PayrollRecord {
-  id         String   @id @default(cuid())
+  id         String   @id @default(uuid())
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   cashierId  String
@@ -58,7 +58,7 @@ model PayrollRecord {
 }
 
 model ShiftSession {
-  id         String   @id @default(cuid())
+  id         String   @id @default(uuid())
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   locationId String

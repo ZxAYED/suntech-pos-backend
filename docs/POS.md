@@ -102,19 +102,33 @@
   - Overflow protection asserts amounts do not exceed PostgreSQL 32-bit signed integer limits (`INT_MAX = 2,147,483,647`).
   - Negative value validation asserts monetary inputs (`amount`, `sellingPrice`, `startingAmount`, `unitPrice`) are non-negative.
 
-### 1.8 Soft-Delete Mechanics & Collision-Free Code Reuse
+### 1.8 Soft-Delete Mechanics, Safe Deletion & Collision-Free Code Reuse
 
-- **Files:** [`src/catalog/category.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/category.service.ts), [`src/catalog/product.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/product.service.ts), [`src/catalog/variant.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/variant.service.ts).
+- **Files:** [`src/catalog/category.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/category.service.ts), [`src/catalog/product.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/product.service.ts), [`src/catalog/variant.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/variant.service.ts), [`src/tenant/tenant.service.ts`](file:///d:/Project/SuntechPOS-backend/src/tenant/tenant.service.ts), [`src/users/user.service.ts`](file:///d:/Project/SuntechPOS-backend/src/users/user.service.ts).
 - **Mechanism:**
   - Entities use `deletedAt: DateTime?`. Active entities satisfy `deletedAt: null`.
-  - When soft-deleting a Category, Product, or Variant, unique columns (`name`, `slug` on Category; `name` on Product; `sku`, and `barcode` if present on Variant) are appended with `__del_${Date.now()}`.
-  - **Result:** Allows an admin to recreate a product with the identical SKU or barcode immediately without triggering PostgreSQL unique index conflicts (`P2002`).
+  - When soft-deleting an entity, unique columns are appended with `__del_${Date.now()}`:
+    - **Category:** `name`, `slug`.
+    - **Product:** `name`.
+    - **Variant:** `sku`, and `barcode` (if non-null).
+    - **Location:** `name`.
+    - **User (Cashier):** `email`, `publicId` (if non-null), and `phoneNumber` (if non-null). Cashier account status is set to `SUSPENDED`.
+  - **Deletion Safety Checks:**
+    - Deleting a Location checks for active open shifts (`ShiftStatus.OPEN`) and throws `409 Conflict` (`"Cannot delete a location with an active open shift"`).
+    - Deleting a Cashier checks for active open shifts (`ShiftStatus.OPEN`) and throws `409 Conflict` (`"Cannot delete a cashier with an active open shift"`).
+  - **Admin Self-Suspension Lockout Guard:**
+    - An Admin is strictly prohibited from updating their own account status to `SUSPENDED` or `REJECTED` (`400 Bad Request: "You cannot suspend or reject your own admin account"`), preventing permanent tenant lockout.
+  - **Collision-Free Reuse:** Allows an admin to recreate a product with the identical SKU/barcode or re-register an employee phone number immediately without triggering PostgreSQL unique index conflicts (`P2002`).
 
-### 1.9 Multi-Tenant Isolation & Hierarchical Location Scoping (`resolveLocationScope`)
+### 1.9 Multi-Tenant Isolation & Compound Uniqueness (`businessId` Dependent)
 
-- **File:** [`src/common/utils/location-scope.ts`](file:///d:/Project/SuntechPOS-backend/src/common/utils/location-scope.ts)
-- **Hierarchy:** `Business (Tenant) 1 ──> N Locations (Branches) 1 ──> N Cashiers / Orders / Shifts`.
-- **Enforcement:**
+- **Rule:** Global `@unique` is restricted strictly to `User.email` (for multi-tenant Admin login) and system-minted identifiers (`publicId`, `invoiceNumber`). All operational entities are compound-unique per tenant:
+  - `Category`: `@@unique([businessId, name])`, `@@unique([businessId, slug])`
+  - `Product`: `@@unique([businessId, name])`
+  - `Variant`: `@@unique([businessId, sku])`, `@@unique([businessId, barcode])`
+  - `Location`: `@@unique([businessId, name])`
+  - `User`: `@@unique([businessId, phoneNumber])`
+- **Location Scope Enforcement (`resolveLocationScope`):**
   - **Caller is `CASHIER`:** `businessId` and `locationId` are strictly resolved from the authenticated JWT token. Any attempt to supply a different `locationId` in the query or body throws `403 Forbidden` (`"Cashiers can only query their assigned store location"`).
   - **Caller is `ADMIN`:** `businessId` is resolved from the JWT token. Admin can pass optional `locationId` to filter down to a specific store branch, or omit `locationId` to aggregate across all branches.
   - Cashiers with no assigned `locationId` or `businessId` in DB are blocked from logging in.
@@ -122,7 +136,7 @@
 ### 1.10 Asynchronous Processing & Queue Roadmap
 
 - **Current State:**
-  - Email dispatch: Direct asynchronous delivery via Nodemailer SMTP with HTML templates (`EmailTemplateService`).
+  - Email dispatch: Direct asynchronous delivery via Nodemailer SMTP with HTML templates (`EmailTemplateService`). Cashiers with internal synthetic emails (`@cashiers.suntech.internal`) are prevented from triggering external SMTP delivery.
   - Report generation: In-memory streaming via PDFKit and CSV buffers (`ExportService`).
 - **Enterprise Scaling Roadmap (BullMQ + Redis):**
   - Mail Queue: Move `mailService.deliver()` to BullMQ `@Processor('mail')` with Redis backing, providing exponential backoff retries, dead-letter queues, and decoupling SMTP latency from HTTP requests.
@@ -148,6 +162,40 @@
   3. `Business`: `"SunTech Retail"`.
   4. `Location`: `"Uttara Doyel Branch"`.
   5. `CASHIER`: `Alex Rivera` (`CSH-UTT01`, monthlySalary: 35000) assigned to `"Uttara Doyel Branch"`.
+
+### 1.13 Strict Advance Ledger Salary Cap & Cash Drawer Availability
+
+- **Files:** [`src/hr/advance.service.ts`](file:///d:/Project/SuntechPOS-backend/src/hr/advance.service.ts), [`src/shifts/shift.service.ts`](file:///d:/Project/SuntechPOS-backend/src/shifts/shift.service.ts), [`src/hr/payroll.service.ts`](file:///d:/Project/SuntechPOS-backend/src/hr/payroll.service.ts).
+- **Hard Financial Constraint:** Total pending advances for an employee in the current payroll month can **never** exceed their `monthlySalary`:
+  ```ts
+  currentPendingAdvances + dto.amount <= monthlySalary;
+  ```
+- **Enforcement Points:**
+  1. **`AdvanceService.create`:** Calculates current UTC month payroll window (`payrollPeriod`), sums existing `PENDING` advances for that cashier, and throws `400 Bad Request: "Advance amount (${dto.amount}) exceeds remaining monthly salary limit (${remaining})"` if exceeded. If the cashier has an open register shift, links `shiftId` automatically.
+  2. **`ShiftService.addAdvance`:** Evaluates the identical salary cap. Additionally verifies cash drawer availability: `amount <= expectedCash`. Rejects with `400 Bad Request: "Advance amount exceeds physical cash available in drawer"` if drawer lacks cash.
+  3. **`PayrollService.process`:** Settle payroll throws `400 Bad Request: "Total advances cannot exceed base salary"` if deductions exceed base salary, guaranteeing `netPaid >= 0`.
+
+### 1.14 Dhaka Timezone Shift Auto-Close & Drawer Refund Accounting
+
+- **Files:** [`src/shifts/shift.service.ts`](file:///d:/Project/SuntechPOS-backend/src/shifts/shift.service.ts), [`src/orders/refund.service.ts`](file:///d:/Project/SuntechPOS-backend/src/orders/refund.service.ts).
+- **Timezone Integrity:** Shift day boundaries are evaluated strictly in `Asia/Dhaka` time using `Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' })`. A shift opened on a prior calendar day in Dhaka triggers the human-error auto-close protocol.
+- **Refund Drawer Deductions:**
+  - When computing shift cash sales (`cashSales`), includes COD orders with `status: { in: [PAID, REFUNDED] }` and subtracts all `Refund` amounts issued against those COD orders.
+  - `RefundService.create`: If order becomes fully refunded, updates `Order.status = REFUNDED`. For COD orders linked to a shift, decrements `ShiftSession.cashCollected`.
+
+### 1.15 OpenAPI / Swagger Interactive Documentation
+
+- **Interactive UI:** Hosted at `/api/docs` (JSON spec available at `/api/docs-json`).
+- **Standardized Tags & Decorators:**
+  - `@ApiTags`: Clearly groups endpoints into domains (`Auth`, `Super Admin - User Approvals`, `Users & Staff`, `Tenancy & Locations`, `Catalog - Categories`, `Catalog - Products`, `Catalog - Variants`, `Catalog - Variant Images`, `Shift Sessions & Cash Register`, `Orders`, `Orders - Refunds`, `HR - Employee Advances`, `HR - Payroll`, `Reports & Analytics`, `Health & Status`).
+  - `@ApiBearerAuth()`: Configured across all JWT-protected endpoints.
+  - `@ApiOperation()` & `@ApiResponse()`: Fully documented HTTP status codes (200, 201, 400, 401, 403, 404, 409).
+  - `@ApiConsumes('multipart/form-data')`: Documents file and image upload schemas.
+
+### 1.16 UUID Primary Key Standard & Whitelist Sanitization
+
+- **Prisma UUID Standard:** All Prisma models utilize `@default(uuid())` for entity primary keys (`User`, `Business`, `Location`, `Category`, `Product`, `Variant`, `ShiftSession`, `EmployeeAdvance`, `Refund`, `Order`, `OrderLine`, etc.). All DTOs validate IDs using `@IsEntityId()` (`@IsString() @MinLength(1) @MaxLength(64)`), ensuring clean interoperability with standard UUIDv4 strings.
+- **ValidationPipe Whitelist:** All query and mutation DTOs are decorated with `@IsString()`, `@IsInt()`, etc., preventing `ValidationPipe({ whitelist: true })` from silently stripping query parameters such as `locationId`, `search`, and `range`.
 
 ---
 
@@ -231,13 +279,21 @@ erDiagram
 #### `POST /auth/forgot-password`
 
 - **Access:** Public (Throttled 5 req/min)
-- **DTO:** `{ email: string }`
-- **Behavior:** Looks up user by email. If found, generates 6-digit OTP, bcrypt-hashes it into `resetOtpHash`, sets `otpExpiry = now + 15m`, and dispatches an HTML email via `MailService`. Returns `{ success: true, message: 'OTP sent' }` even if user not found (preventing email enumeration).
+- **DTO Validation:**
+  - `loginType`: `@IsEnum(LoginType)` (`ADMIN` | `CASHIER` | `BUSINESS_USER`)
+  - `identifier`: `@IsString()`, `@MinLength(1)` (accepts Email for Admin or Cashier Public ID)
+  - `email`: `@IsOptional()`, legacy alias for `identifier`
+- **Behavior & Guardrails:**
+  - Looks up user by email or public ID within the tenant role.
+  - **Internal Email Guard:** If the user email ends with `@cashiers.suntech.internal` (synthetic cashiers created without a personal email), rejects with `400 Bad Request: "This cashier account does not have a recovery email configured. Please ask your Store Admin to reset your password."`, preventing Nodemailer/SMTP failure on `.internal` fake domains.
+  - If a valid external email exists: generates 6-digit OTP, bcrypt-hashes it into `resetOtpHash`, sets `otpExpiry = now + 15m`, and dispatches an HTML email via `MailService`. Returns `{ success: true, message: 'OTP sent' }` even if user not found (preventing account enumeration).
 
 #### `POST /auth/verify-otp`
 
 - **Access:** Public (Throttled 5 req/min)
-- **DTO:** `{ email: string, otp: string }`
+- **DTO:**
+  - `otp`: `@IsString()`, `@MinLength(6)`, `@MaxLength(6)`
+  - `email?: string` or `identifier?: string`
 - **Behavior:** Verifies OTP against `resetOtpHash`. If valid and not expired, returns short-lived signed JWT `resetToken` (10m TTL).
 - **Edge Cases:**
   - `400 Bad Request`: OTP expired or invalid.
@@ -338,8 +394,8 @@ erDiagram
 #### `PATCH /users/cashiers/:id`
 
 - **Access:** `@Roles(Role.ADMIN)`
-- **DTO:** `fullName?: string`, `phoneNumber?: string`, `locationId?: string`, `monthlySalary?: number`.
-- **Behavior:** Updates staff details, reassigns location, or adjusts base salary.
+- **DTO:** `fullName?: string`, `phoneNumber?: string`, `locationId?: string`, `monthlySalary?: number`, `password?: string`.
+- **Behavior:** Updates staff details, reassigns location, adjusts base salary, or hashes and resets cashier password (enabling recovery for cashiers with synthetic internal emails).
 
 #### `DELETE /users/cashiers/:id`
 
@@ -385,13 +441,14 @@ erDiagram
 #### `POST /shifts/open`
 
 - **Access:** `@Roles(Role.CASHIER, Role.ADMIN)` (`@Idempotent()`)
-- **DTO:**
+- **DTO Validation:**
   - `startingAmount`: `@IsInt()`, `@Min(0)`
-  - `locationId?: string` (required for Admin; ignored and taken from token for Cashier)
-  - `autoClosePrevious?: boolean`
+  - `locationId?: string`: `@IsOptional()`, `@IsString()`, `@MinLength(1)`, `@MaxLength(64)` (required for Admin; taken from token for Cashier)
+  - `autoClosePrevious?: boolean`: `@IsOptional()`, `@IsBoolean()`
 - **Smart Auto-Close Logic:**
-  - **Case A (Stale Shift from Yesterday):** If caller has an `OPEN` shift whose `openedAt` is before start of today (or `autoClosePrevious === true`), atomically auto-closes the stale shift first:
-    - `cashSales`: Sum of paid COD orders in that shift.
+  - Evaluates calendar day boundaries strictly in `Asia/Dhaka` time (`isPreviousCalendarDay`).
+  - **Case A (Stale Shift from Yesterday):** If caller has an `OPEN` shift whose `openedAt` is on a previous calendar day in Dhaka (or `autoClosePrevious === true`), atomically auto-closes the stale shift first:
+    - `cashSales`: Sum of COD orders (`status: { in: [PAID, REFUNDED] }`) minus sum of COD order `Refund.totalRefund`.
     - `advancesOut`: Sum of cash advances paid in that shift.
     - `expectedAmount = startingAmount + cashSales - advancesOut`.
     - Sets `closingAmount = expectedAmount`, `variance = 0`, `status = 'CLOSED'`, `closedAt = now()`.
@@ -412,8 +469,13 @@ erDiagram
 #### `POST /shifts/advances`
 
 - **Access:** `@Roles(Role.CASHIER, Role.ADMIN)` (`@Idempotent()`)
-- **DTO:** `{ amount: number, reason?: string }`
-- **Behavior:** Records an employee advance taken directly out of the shift drawer float, incrementing `shift.advancesOut`.
+- **DTO Validation:**
+  - `amount`: `@IsInt()`, `@Min(1)`
+  - `reason`: `@IsString()`, `@IsNotEmpty()`
+- **Guardrails & Invariants:**
+  1. **Strict Salary Cap:** Queries cashier's `monthlySalary` and current month's `PENDING` advances. If `currentPendingAdvances + amount > cashier.monthlySalary`, rejects immediately with `400 Bad Request: "Advance amount exceeds remaining monthly salary limit"`.
+  2. **Physical Cash Drawer Limit:** Computes current shift expected drawer cash (`expectedCash`). If `amount > expectedCash`, rejects immediately with `400 Bad Request: "Advance amount exceeds physical cash available in drawer"`.
+  3. Records advance directly against the shift drawer and employee ledger.
 
 #### `GET /shifts`
 
@@ -428,35 +490,44 @@ erDiagram
 #### `POST /orders/catalog`
 
 - **Access:** `@Roles(Role.CASHIER, Role.ADMIN, Role.SUPER_ADMIN)` (`@Idempotent()`)
-- **DTO:**
-  - `items`: Array of `{ variantId: string, quantity: number }`
-  - `paymentMethod`: `COD` | `BKASH` | `NAGAD` | `BANK`
+- **DTO Validation:**
+  - `lines`: Array of `CatalogOrderLineItemDto`:
+    - `variantId`: `@IsString()`, `@MinLength(1)`, `@MaxLength(64)` (CUID)
+    - `quantity`: `@IsInt()`, `@Min(1)`
+    - `unitPrice`: `@IsInt()`, `@Min(0)`
+  - `paymentMethod` (or `paymentType`): `COD` | `BKASH` | `NAGAD` | `BANK` (default `COD`)
   - `tenderedAmount`: `@IsInt()`, `@Min(0)`
-  - `customerName?: string`, `customerPhone?: string`
-  - `locationId?: string`
+  - `locationId?: string`: `@IsOptional()`, `@IsString()`, `@MinLength(1)`, `@MaxLength(64)`
+  - `shiftId?: string`: `@IsOptional()`, `@IsString()`, `@MinLength(1)`, `@MaxLength(64)`
+  - `customerName?: string`, `customerPhone?: string`, `notes?: string`
 - **Transaction Execution:**
-  1. Validates location belongs to tenant; Cashiers locked to token location.
-  2. Queries variants and validates active stock: throws `400 Bad Request` if `variant.stock < item.quantity`.
-  3. Decrements variant stock and writes `StockTransaction(type: SALE)`.
-  4. Generates unique `invoiceNumber` (`INV-YYYYMMDD-XXXX`).
-  5. Computes `changeDue = tenderedAmount - totalAmount`.
-  6. Increments active shift `cashCollected` **only if** `paymentMethod === 'COD'`. Digital payments do not alter cash drawer float.
+  1. **DRY Execution Context (`resolveOrderExecutionContext`):** Centralizes user lookup, location verification, and shift ownership checks (`shift.locationId === locationId` and `shift.cashierId === user.id` for Cashiers) across both catalog and custom orders.
+  2. **Active Stock Check:** Queries variants and validates active stock: throws `400 Bad Request` if `variant.stock < line.quantity`.
+  3. **Atomic Stock Decrement:** Decrements variant stock atomically and writes `StockTransaction(type: SALE)`.
+  4. **Invoice Assign & P2034 Conflict Retry:** Generates unique `invoiceNumber` (`INV-YYYYMMDD-XXXX`). Automatically retries up to `INVOICE_ATTEMPTS = 3` on PostgreSQL transaction serialization conflicts (`P2034`) before throwing `409 Conflict`.
+  5. **Financial Ledger Math:** Computes `changeDue = tenderedAmount - totalAmount`.
+  6. **COD Drawer Sychronization:** Increments active shift `cashCollected` **only if** `paymentMethod === 'COD'`. Digital payments do not alter cash drawer float.
 
 #### `POST /orders/custom`
 
 - **Access:** `@Roles(Role.CASHIER, Role.ADMIN, Role.SUPER_ADMIN)` (`@Idempotent()`)
-- **DTO:**
-  - `items`: Array of `{ description: string, quantity: number, unitPrice: number }`
-  - `paymentMethod`: `COD` | `BKASH` | `NAGAD` | `BANK`
+- **DTO Validation:**
+  - `lines`: Array of `CustomOrderLineItemDto`:
+    - `productName`: `@IsString()`, `@IsNotEmpty()`
+    - `variantName?: string`: `@IsOptional()`, `@IsString()`
+    - `quantity`: `@IsInt()`, `@Min(1)`
+    - `unitPrice`: `@IsInt()`, `@Min(0)`
+  - `paymentMethod` (or `paymentType`): `COD` | `BKASH` | `NAGAD` | `BANK`
   - `tenderedAmount`: `@IsInt()`, `@Min(0)`
-  - `customerName?: string`, `customerPhone?: string`
+  - `locationId?: string`, `shiftId?: string`
+  - `customerName?: string`, `customerPhone?: string`, `notes?: string`
 - **Behavior:** Handles unlisted retail accessories, repair services, or custom ad-hoc orders. Bypasses inventory stock deduction while recording full financial and shift ledger data.
 
 #### `GET /orders`
 
 - **Access:** `@Roles(Role.CASHIER, Role.ADMIN, Role.SUPER_ADMIN)`
 - **Query Parameters:**
-  - `search?: string` (matches invoice, receipt, customer name, customer phone, customer number, product name)
+  - `search?: string` (matches invoice, receipt, customer name, customer phone, product name)
   - `paymentMethod?: PaymentMethod`
   - `status?: OrderStatus`
   - `orderType?: OrderType`
@@ -467,18 +538,30 @@ erDiagram
 #### `POST /orders/:id/refunds`
 
 - **Access:** `@Roles(Role.ADMIN)` (`@Idempotent()`)
-- **DTO:**
+- **DTO Validation:**
   - `reason?: string`
-  - `items`: Array of `{ orderLineId: string, quantity: number }`
-- **Behavior:**
+  - `items`: Array of `RefundLineDto`:
+    - `orderItemId`: `@IsString()`, `@MinLength(1)` (OrderLine CUID)
+    - `quantity`: `@IsInt()`, `@Min(1)`
+- **Behavior & Drawer Math:**
   - Validates returned quantities do not exceed unrefunded order line quantities.
   - Restores variant inventory stock and records `StockTransaction(type: REFUND)`.
   - Creates `Refund` record with auditor `processedById = actor.sub`.
   - If 100% of order lines are returned, marks `Order.status = REFUNDED`.
+  - **COD Drawer Sychronization:** If the order was paid via `COD` and has an associated `shiftId`, decrements `ShiftSession.cashCollected` atomically.
 
 ---
 
 ### 3.8 HR Advance Ledger & Payroll (`/api/v1/advances` & `/api/v1/payroll`)
+
+#### `POST /advances`
+
+- **Access:** `@Roles(Role.ADMIN, Role.CASHIER)` (`@Idempotent()`)
+- **DTO Validation:**
+  - `amount`: `@IsInt()`, `@Min(1)`
+  - `reason?: string`: `@IsOptional()`, `@IsString()`
+  - `cashierId?: string`: `@IsOptional()`, required for Admin
+- **Behavior:** Enforces the strict salary cap: `currentPendingAdvances + dto.amount <= cashier.monthlySalary`. Automatically links caller's active open `shiftId` if request originates from Cashier.
 
 #### `GET /advances`
 
@@ -498,7 +581,7 @@ erDiagram
     "items": [
       {
         "id": "cuid...",
-        "cashierId": "uuid...",
+        "cashierId": "cuid...",
         "employeeName": "Tariqul Islam",
         "employeeCode": "CSH-8X9B2",
         "role": "CASHIER",
@@ -518,21 +601,30 @@ erDiagram
   }
   ```
 
+#### `DELETE /advances/:id`
+
+- **Access:** `@Roles(Role.ADMIN)`
+- **Behavior:** Cancels and soft-deletes a pending employee advance (`deletedAt = new Date()`).
+- **Guards & Edge Cases:**
+  - `400 Bad Request`: If advance status is `DEDUCTED` (`"Cannot delete an advance that has already been deducted in payroll"`). Only `PENDING` advances can be cancelled.
+  - `404 Not Found`: If advance does not exist, has already been deleted, or does not belong to caller's `businessId`.
+
 #### `GET /payroll/summary`
 
 - **Access:** `@Roles(Role.ADMIN)`
 - **Query Parameters:** `month?: number`, `year?: number`, `locationId?: string`.
-- **Behavior:** Aggregates staff base salaries, pending advances in the payroll period, and net payable amounts. Returns disbursement status (`DISBURSED`, `PARTIAL`, `PENDING`).
+- **Behavior:** Aggregates staff base salaries, pending advances in the payroll period (strictly filtered by `locationId` if provided), and net payable amounts. Returns disbursement status (`DISBURSED`, `PARTIAL`, `PENDING`).
 
 #### `POST /payroll/disburse`
 
 - **Access:** `@Roles(Role.ADMIN)` (`@Idempotent()`)
 - **DTO:** `{ month: number, year: number, locationId?: string }`
 - **Behavior:** Atomically disburses payroll in bulk for all pending salaried staff:
-  1. Deducts active pending advances in the period and sets advance status to `DEDUCTED`.
-  2. Computes `netPaid = baseSalary - totalAdvancesDeducted`.
-  3. Creates `PayrollRecord` with unique constraint `[cashierId, month, year]`.
-  4. Prevents duplicate payments for staff already paid for that period.
+  1. Deducts active pending advances in the period (filtered by branch `locationId` if provided) and sets advance status to `DEDUCTED`.
+  2. Enforces salary cap: throws `400 Bad Request: "Total advances (${totalAdvancesDeducted}) cannot exceed base salary (${baseSalary})"` if deductions exceed base salary.
+  3. Computes `netPaid = baseSalary - totalAdvancesDeducted`.
+  4. Creates `PayrollRecord` with unique constraint `[cashierId, month, year]`.
+  5. Prevents duplicate payments for staff already paid for that period.
 
 ---
 
@@ -667,7 +759,7 @@ All code commits must satisfy the following zero-error verification standard:
    ```bash
    npm test
    ```
-   - _Status:_ 22 / 22 test suites passing, 122 / 122 tests passing.
+   - _Status:_ 22 / 22 test suites passing, 129 / 129 tests passing (100% green).
 3. **TypeScript Compilation:**
    ```bash
    npm run build

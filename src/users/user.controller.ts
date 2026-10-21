@@ -11,6 +11,13 @@ import {
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiConsumes,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -30,18 +37,31 @@ import { UpdateCashierDto } from './dto/update-cashier.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { UserService } from './user.service';
 
+@ApiTags('Users & Staff')
+@ApiBearerAuth()
 @Controller('users')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class UserController {
   constructor(private readonly userService: UserService) {}
 
   @Get('me')
+  @ApiOperation({
+    summary: 'Get current user profile',
+    description: 'Returns profile details for the authenticated user.',
+  })
+  @ApiResponse({ status: 200, description: 'Profile returned' })
   @ResponseMessage('Profile loaded')
   getMe(@CurrentUser() user: AccessTokenPayload) {
     return this.userService.getMe(user.sub);
   }
 
   @Post('me/profile-image')
+  @ApiOperation({
+    summary: 'Upload current user profile image',
+    description: 'Uploads and links profile image to Cloudinary.',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiResponse({ status: 201, description: 'Profile image updated' })
   @UseInterceptors(FileInterceptor('file', imageUploadOptions))
   @ResponseMessage('Profile image updated')
   setMyProfileImage(
@@ -52,12 +72,27 @@ export class UserController {
   }
 
   @Delete('me/profile-image')
+  @ApiOperation({
+    summary: 'Remove current user profile image',
+    description: 'Deletes profile image from Cloudinary and clears reference.',
+  })
+  @ApiResponse({ status: 200, description: 'Profile image removed' })
   @ResponseMessage('Profile image removed')
   clearMyProfileImage(@CurrentUser() user: AccessTokenPayload) {
     return this.userService.clearOwnProfileImage(user.sub);
   }
 
   @Post('cashiers')
+  @ApiOperation({
+    summary: 'Create new cashier staff account',
+    description:
+      'Creates a cashier account for the business. Auto-generates publicId (CSH-XXXXX) and synthetic internal email if omitted.',
+  })
+  @ApiResponse({ status: 201, description: 'Cashier created successfully' })
+  @ApiResponse({
+    status: 409,
+    description: 'Phone number already in use within this business',
+  })
   @Roles(Role.ADMIN)
   @Idempotent()
   @ResponseMessage('Cashier created')
@@ -69,6 +104,12 @@ export class UserController {
   }
 
   @Get('cashiers')
+  @ApiOperation({
+    summary: 'List cashiers in business',
+    description:
+      'Returns all non-deleted cashiers with optional location/search filters.',
+  })
+  @ApiResponse({ status: 200, description: 'Cashiers list returned' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Cashiers loaded')
   listCashiers(
@@ -79,6 +120,13 @@ export class UserController {
   }
 
   @Patch('cashiers/:id')
+  @ApiOperation({
+    summary: 'Update cashier account details',
+    description:
+      'Update name, phone, branch location, salary, or reset password.',
+  })
+  @ApiResponse({ status: 200, description: 'Cashier updated' })
+  @ApiResponse({ status: 404, description: 'Cashier not found' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Cashier updated')
   updateCashier(
@@ -90,6 +138,16 @@ export class UserController {
   }
 
   @Delete('cashiers/:id')
+  @ApiOperation({
+    summary: 'Soft-delete cashier account',
+    description:
+      'Soft-deletes cashier account (verifying no active open shift). Suffixes phone and email to release uniqueness.',
+  })
+  @ApiResponse({ status: 200, description: 'Cashier soft-deleted' })
+  @ApiResponse({
+    status: 409,
+    description: 'Cannot delete cashier with active open shift',
+  })
   @Roles(Role.ADMIN)
   @ResponseMessage('Cashier deleted')
   deleteCashier(
@@ -100,6 +158,13 @@ export class UserController {
   }
 
   @Patch(':id/status')
+  @ApiOperation({
+    summary: 'Update employee account status',
+    description:
+      'Updates account status (ACTIVE, SUSPENDED, REJECTED). Prevents self-suspension.',
+  })
+  @ApiResponse({ status: 200, description: 'Status updated' })
+  @ApiResponse({ status: 400, description: 'Cannot suspend own admin account' })
   @Roles(Role.ADMIN)
   @ResponseMessage('User status updated')
   updateStatus(
@@ -111,6 +176,12 @@ export class UserController {
   }
 
   @Post(':id/profile-image')
+  @ApiOperation({
+    summary: 'Upload staff profile image',
+    description: 'Uploads profile photo for an employee.',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiResponse({ status: 201, description: 'Profile image updated' })
   @Roles(Role.ADMIN)
   @UseInterceptors(FileInterceptor('file', imageUploadOptions))
   @ResponseMessage('Profile image updated')
@@ -123,6 +194,11 @@ export class UserController {
   }
 
   @Delete(':id/profile-image')
+  @ApiOperation({
+    summary: 'Remove staff profile image',
+    description: 'Deletes profile image from Cloudinary for an employee.',
+  })
+  @ApiResponse({ status: 200, description: 'Profile image removed' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Profile image removed')
   clearStaffProfileImage(

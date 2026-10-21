@@ -5,7 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Location, Prisma } from '@prisma/client';
+import { Location, Prisma, ShiftStatus } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { AuthService } from '../auth/auth.service';
@@ -126,6 +126,20 @@ export class TenantService {
   ): Promise<Location> {
     const businessId = this.requireBusinessId(admin);
 
+    const existing = await this.prisma.location.findFirst({
+      where: {
+        businessId,
+        name: { equals: dto.name.trim(), mode: 'insensitive' },
+        deletedAt: null,
+      },
+    });
+
+    if (existing) {
+      throw new ConflictException(
+        'A location with that name already exists in your business',
+      );
+    }
+
     return this.prisma.location.create({
       data: {
         name: dto.name.trim(),
@@ -150,6 +164,24 @@ export class TenantService {
       throw new NotFoundException('Location not found');
     }
 
+    if (dto.name !== undefined) {
+      const trimmedName = dto.name.trim();
+      const duplicate = await this.prisma.location.findFirst({
+        where: {
+          businessId,
+          name: { equals: trimmedName, mode: 'insensitive' },
+          id: { not: locationId },
+          deletedAt: null,
+        },
+      });
+
+      if (duplicate) {
+        throw new ConflictException(
+          'A location with that name already exists in your business',
+        );
+      }
+    }
+
     return this.prisma.location.update({
       where: { id: locationId },
       data: {
@@ -166,16 +198,34 @@ export class TenantService {
     locationId: string,
   ): Promise<{ id: string; deletedAt: Date }> {
     const businessId = this.requireBusinessId(admin);
-    const deletedAt = new Date();
 
-    const result = await this.prisma.location.updateMany({
+    const location = await this.prisma.location.findFirst({
       where: { id: locationId, businessId, deletedAt: null },
-      data: { deletedAt },
     });
 
-    if (result.count === 0) {
+    if (!location) {
       throw new NotFoundException('Location not found');
     }
+
+    if (this.prisma.shiftSession?.findFirst) {
+      const activeShift = await this.prisma.shiftSession.findFirst({
+        where: { locationId, businessId, status: ShiftStatus.OPEN },
+      });
+      if (activeShift) {
+        throw new ConflictException(
+          'Cannot delete a location with an active open shift',
+        );
+      }
+    }
+
+    const deletedAt = new Date();
+    await this.prisma.location.update({
+      where: { id: locationId },
+      data: {
+        deletedAt,
+        name: `${location.name}__del_${Date.now()}`,
+      },
+    });
 
     return { id: locationId, deletedAt };
   }

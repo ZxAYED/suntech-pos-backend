@@ -1,4 +1,10 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
@@ -11,12 +17,20 @@ import { DashboardQueryDto } from './dto/dashboard.query';
 import { TransactionLogQueryDto } from './dto/transaction-log.query';
 import { ReportService } from './report.service';
 
+@ApiTags('Reports & Analytics')
+@ApiBearerAuth()
 @Controller('reports')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class ReportController {
   constructor(private readonly reports: ReportService) {}
 
   @Get('dashboard')
+  @ApiOperation({
+    summary: 'Get executive dashboard metrics',
+    description:
+      'Aggregates gross sales, net sales, refund deductions, order count, and payment method breakdown across today, yesterday, weekly, or monthly periods.',
+  })
+  @ApiResponse({ status: 200, description: 'Dashboard loaded' })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Dashboard loaded')
   dashboard(
@@ -27,6 +41,12 @@ export class ReportController {
   }
 
   @Get('analytics')
+  @ApiOperation({
+    summary: 'Get business analytics & category performance',
+    description:
+      'Provides gross margin, revenue breakdown by payment method, top-selling categories, and period-over-period growth metrics (filtered by PAID orders only).',
+  })
+  @ApiResponse({ status: 200, description: 'Analytics loaded' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Analytics loaded')
   analytics(
@@ -37,6 +57,12 @@ export class ReportController {
   }
 
   @Get('transactions')
+  @ApiOperation({
+    summary: 'Get consolidated transaction log',
+    description:
+      'Paginated chronological audit log of all orders, refunds, and tender methods across business locations.',
+  })
+  @ApiResponse({ status: 200, description: 'Transactions loaded' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Transactions loaded')
   transactions(

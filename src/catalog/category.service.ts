@@ -156,28 +156,49 @@ export class CategoryService {
     >();
 
     if (allVariantIds.length > 0) {
-      const orderLines = await this.prisma.orderLine.findMany({
-        where: {
-          variantId: { in: allVariantIds },
-          order: { status: OrderStatus.PAID },
-        },
-        select: {
-          variantId: true,
-          quantity: true,
-          subtotal: true,
-        },
-      });
-
-      for (const line of orderLines) {
-        if (!line.variantId) continue;
-        const current = salesByVariant.get(line.variantId) ?? {
-          quantity: 0,
-          subtotal: 0,
-        };
-        salesByVariant.set(line.variantId, {
-          quantity: current.quantity + line.quantity,
-          subtotal: current.subtotal + line.subtotal,
+      if (typeof this.prisma.orderLine?.groupBy === 'function') {
+        const groups = await this.prisma.orderLine.groupBy({
+          by: ['variantId'],
+          where: {
+            variantId: { in: allVariantIds },
+            order: { status: OrderStatus.PAID },
+          },
+          _sum: {
+            quantity: true,
+            subtotal: true,
+          },
         });
+        for (const g of groups) {
+          if (!g.variantId) continue;
+          salesByVariant.set(g.variantId, {
+            quantity: g._sum?.quantity ?? 0,
+            subtotal: g._sum?.subtotal ?? 0,
+          });
+        }
+      } else {
+        const orderLines = await this.prisma.orderLine.findMany({
+          where: {
+            variantId: { in: allVariantIds },
+            order: { status: OrderStatus.PAID },
+          },
+          select: {
+            variantId: true,
+            quantity: true,
+            subtotal: true,
+          },
+        });
+
+        for (const line of orderLines) {
+          if (!line.variantId) continue;
+          const current = salesByVariant.get(line.variantId) ?? {
+            quantity: 0,
+            subtotal: 0,
+          };
+          salesByVariant.set(line.variantId, {
+            quantity: current.quantity + line.quantity,
+            subtotal: current.subtotal + line.subtotal,
+          });
+        }
       }
     }
 
@@ -266,20 +287,35 @@ export class CategoryService {
     let salesRevenue = 0;
 
     if (variantIds.length > 0) {
-      const orderLines = await this.prisma.orderLine.findMany({
-        where: {
-          variantId: { in: variantIds },
-          order: { status: OrderStatus.PAID },
-        },
-        select: {
-          quantity: true,
-          subtotal: true,
-        },
-      });
+      if (typeof this.prisma.orderLine?.aggregate === 'function') {
+        const agg = await this.prisma.orderLine.aggregate({
+          where: {
+            variantId: { in: variantIds },
+            order: { status: OrderStatus.PAID },
+          },
+          _sum: {
+            quantity: true,
+            subtotal: true,
+          },
+        });
+        salesCount = agg._sum?.quantity ?? 0;
+        salesRevenue = agg._sum?.subtotal ?? 0;
+      } else {
+        const orderLines = await this.prisma.orderLine.findMany({
+          where: {
+            variantId: { in: variantIds },
+            order: { status: OrderStatus.PAID },
+          },
+          select: {
+            quantity: true,
+            subtotal: true,
+          },
+        });
 
-      for (const line of orderLines) {
-        salesCount += line.quantity;
-        salesRevenue += line.subtotal;
+        for (const line of orderLines) {
+          salesCount += line.quantity;
+          salesRevenue += line.subtotal;
+        }
       }
     }
 

@@ -163,7 +163,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
     }
 
     if (existing.expiresAt.getTime() <= Date.now()) {
-      await this.prisma.idempotencyRecord.delete({
+      await this.prisma.idempotencyRecord.deleteMany({
         where: { id: existing.id },
       });
       return null;

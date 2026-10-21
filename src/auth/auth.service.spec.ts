@@ -1,4 +1,8 @@
-import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { AccountStatus, Role } from '@prisma/client';
 import { EmailTemplateService } from '../identity/email-template.service';
 import { MailService } from '../mail/mail.service';
@@ -269,5 +273,23 @@ describe('AuthService', () => {
         password: 'password123',
       }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('rejects forgotPassword for cashier with @cashiers.suntech.internal email', async () => {
+    findFirst.mockResolvedValue({
+      id: 'cashier-1',
+      publicId: 'CSH-001',
+      fullName: 'Alex Rivera',
+      email: 'csh-001@cashiers.suntech.internal',
+      role: Role.CASHIER,
+      status: AccountStatus.ACTIVE,
+    });
+
+    await expect(
+      service.forgotPassword({
+        loginType: LoginType.CASHIER,
+        identifier: 'CSH-001',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 });

@@ -7,18 +7,18 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
-  IsUUID,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
 import { PaymentMethod } from '@prisma/client';
+import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export { PaymentMethod as PaymentType };
 
 export class CatalogOrderLineItemDto {
-  @ApiProperty({ description: 'Catalog variant UUID' })
-  @IsUUID()
-  @IsNotEmpty()
+  @ApiProperty({ description: 'Catalog variant ID' })
+  @IsEntityId()
   variantId: string;
 
   @ApiProperty({ description: 'Quantity purchased', minimum: 1, example: 2 })
@@ -37,16 +37,16 @@ export class CatalogOrderLineItemDto {
 }
 
 export class CreateCatalogOrderDto {
-  @ApiPropertyOptional({ description: 'Optional shift register UUID' })
-  @IsUUID()
+  @ApiPropertyOptional({ description: 'Optional shift register ID' })
   @IsOptional()
+  @IsEntityId()
   shiftId?: string;
 
   @ApiPropertyOptional({
-    description: 'Store location UUID (optional for cashiers)',
+    description: 'Store location ID (optional for cashiers)',
   })
-  @IsUUID()
   @IsOptional()
+  @IsEntityId()
   locationId?: string;
 
   @ApiProperty({

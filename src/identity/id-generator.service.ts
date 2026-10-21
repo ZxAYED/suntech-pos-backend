@@ -35,7 +35,7 @@ export class IdGeneratorService {
         const result = await this.prisma.user.updateMany({
           where: {
             id: userId,
-            status: AccountStatus.PENDING_APPROVAL,
+            publicId: null,
             deletedAt: null,
           },
           data: {

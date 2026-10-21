@@ -4,7 +4,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, StockTransactionType } from '@prisma/client';
+import {
+  OrderStatus,
+  PaymentMethod,
+  Prisma,
+  StockTransactionType,
+} from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
@@ -78,6 +83,8 @@ export class RefundService {
         id: true,
         invoiceNumber: true,
         receiptNumber: true,
+        shiftId: true,
+        paymentMethod: true,
         lines: {
           select: {
             id: true,
@@ -205,6 +212,26 @@ export class RefundService {
           ),
       })),
     );
+
+    if (status === 'REFUNDED' && tx.order?.update) {
+      await tx.order.update({
+        where: { id: order.id },
+        data: { status: OrderStatus.REFUNDED },
+      });
+    }
+
+    if (
+      order.shiftId &&
+      order.paymentMethod === PaymentMethod.COD &&
+      tx.shiftSession?.update
+    ) {
+      await tx.shiftSession.update({
+        where: { id: order.shiftId },
+        data: {
+          cashCollected: { decrement: refund.totalRefund },
+        },
+      });
+    }
 
     return {
       ...refund,

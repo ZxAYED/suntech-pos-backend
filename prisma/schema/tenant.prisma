@@ -1,5 +1,5 @@
 model Business {
-  id                   String  @id @default(cuid())
+  id                   String  @id @default(uuid())
   name                 String
   ownerId              String  @unique
   profileImageUrl      String?
@@ -21,7 +21,7 @@ model Business {
 }
 
 model Location {
-  id         String   @id @default(cuid())
+  id         String   @id @default(uuid())
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   name       String
@@ -35,11 +35,12 @@ model Location {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
+  @@unique([businessId, name])
   @@index([businessId])
 }
 
 model IdempotencyRecord {
-  id           String   @id @default(cuid())
+  id           String   @id @default(uuid())
   key          String
   scopeId      String
   path         String

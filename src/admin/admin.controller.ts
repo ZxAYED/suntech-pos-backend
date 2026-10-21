@@ -7,6 +7,12 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Role } from '@prisma/client';
 import { Idempotent } from '../common/decorators/idempotent.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
@@ -17,6 +23,8 @@ import { UpdateUserStatusDto } from '../users/dto/update-user-status.dto';
 import { AdminService } from './admin.service';
 import { ListAdminUsersQueryDto } from './dto/list-admin-users.query';
 
+@ApiTags('Super Admin - User Approvals')
+@ApiBearerAuth()
 @Controller('admin/users')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.SUPER_ADMIN)
@@ -24,12 +32,28 @@ export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
   @Get()
+  @ApiOperation({
+    summary: 'List admin registration requests',
+    description:
+      'Super Admin list of registered Admin accounts with status filter (PENDING_APPROVAL, ACTIVE, etc.).',
+  })
+  @ApiResponse({ status: 200, description: 'Admin accounts returned' })
   @ResponseMessage('Admin accounts loaded')
   list(@Query() query: ListAdminUsersQueryDto) {
     return this.adminService.list(query);
   }
 
   @Patch(':id/approve')
+  @ApiOperation({
+    summary: 'Approve pending admin registration',
+    description:
+      'Approves pending admin, generates their publicId (ADM-XXXXX), and activates their account.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Admin account approved and activated',
+  })
+  @ApiResponse({ status: 404, description: 'Pending admin account not found' })
   @Idempotent()
   @ResponseMessage('Admin account approved')
   approve(@Param('id') id: string) {
@@ -37,6 +61,13 @@ export class AdminController {
   }
 
   @Patch(':id/status')
+  @ApiOperation({
+    summary: 'Update admin account status',
+    description:
+      'Update status of an admin account (SUSPENDED, REJECTED, ACTIVE).',
+  })
+  @ApiResponse({ status: 200, description: 'Admin account status updated' })
+  @ApiResponse({ status: 404, description: 'Admin account not found' })
   @ResponseMessage('Admin status updated')
   updateStatus(@Param('id') id: string, @Body() dto: UpdateUserStatusDto) {
     return this.adminService.updateStatus(id, dto);

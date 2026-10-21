@@ -50,6 +50,63 @@ export class AdvanceService {
       businessId,
       dto.cashierId,
     );
+    const cashier = await this.findCashier(businessId, cashierId);
+
+    const now = new Date();
+    const { start, end } = payrollPeriod(
+      now.getUTCFullYear(),
+      now.getUTCMonth() + 1,
+    );
+
+    let currentPending = 0;
+    if (this.prisma.employeeAdvance?.aggregate) {
+      const agg = await this.prisma.employeeAdvance.aggregate({
+        where: {
+          businessId,
+          cashierId,
+          status: AdvanceStatus.PENDING,
+          deletedAt: null,
+          takenAt: { gte: start, lt: end },
+        },
+        _sum: { amount: true },
+      });
+      currentPending = agg._sum?.amount ?? 0;
+    } else if (this.prisma.employeeAdvance?.findMany) {
+      const existing = await this.prisma.employeeAdvance.findMany({
+        where: {
+          businessId,
+          cashierId,
+          status: AdvanceStatus.PENDING,
+          deletedAt: null,
+          takenAt: { gte: start, lt: end },
+        },
+      });
+      currentPending = Array.isArray(existing)
+        ? existing.reduce((sum, item) => sum + (item.amount ?? 0), 0)
+        : 0;
+    }
+
+    const maxSalary = cashier.monthlySalary ?? 0;
+    if (maxSalary > 0 && currentPending + dto.amount > maxSalary) {
+      const remaining = Math.max(0, maxSalary - currentPending);
+      throw new BadRequestException(
+        `Advance amount (${dto.amount}) exceeds remaining monthly salary limit (${remaining})`,
+      );
+    }
+
+    let shiftId: string | undefined = undefined;
+    if (actor.role === Role.CASHIER && this.prisma.shiftSession?.findFirst) {
+      const activeShift = await this.prisma.shiftSession.findFirst({
+        where: {
+          cashierId: actor.sub,
+          businessId,
+          status: 'OPEN',
+        },
+      });
+      if (activeShift) {
+        shiftId = activeShift.id;
+      }
+    }
 
     return this.prisma.employeeAdvance.create({
       data: {
@@ -58,6 +115,7 @@ export class AdvanceService {
         amount: dto.amount,
         reason: dto.reason?.trim() || null,
         status: AdvanceStatus.PENDING,
+        ...(shiftId ? { shiftId } : {}),
       },
       select: advanceSelect,
     });
@@ -69,10 +127,28 @@ export class AdvanceService {
   ): Promise<{ id: string; deletedAt: Date }> {
     const businessId = requireBusinessId(actor);
     const deletedAt = new Date();
+
+    if (this.prisma.employeeAdvance?.findFirst) {
+      const existing = await this.prisma.employeeAdvance.findFirst({
+        where: { id: advanceId, businessId, deletedAt: null },
+      });
+
+      if (!existing) {
+        throw new NotFoundException('Advance not found');
+      }
+
+      if (existing.status === AdvanceStatus.DEDUCTED) {
+        throw new BadRequestException(
+          'Cannot delete an advance that has already been deducted in payroll',
+        );
+      }
+    }
+
     const removed = await this.prisma.employeeAdvance.updateMany({
       where: {
         id: advanceId,
         businessId,
+        status: AdvanceStatus.PENDING,
         deletedAt: null,
       },
       data: { deletedAt },

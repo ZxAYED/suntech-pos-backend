@@ -1,4 +1,8 @@
-import { ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { AdvanceStatus, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdvanceService } from './advance.service';
@@ -7,9 +11,16 @@ describe('AdvanceService', () => {
   const userFindFirst = jest.fn();
   const advanceCreate = jest.fn();
   const advanceFindMany = jest.fn();
+  const advanceFindFirst = jest.fn();
+  const advanceUpdateMany = jest.fn();
   const prisma = {
     user: { findFirst: userFindFirst },
-    employeeAdvance: { create: advanceCreate, findMany: advanceFindMany },
+    employeeAdvance: {
+      create: advanceCreate,
+      findMany: advanceFindMany,
+      findFirst: advanceFindFirst,
+      updateMany: advanceUpdateMany,
+    },
   } as unknown as PrismaService;
   const service = new AdvanceService(prisma);
 
@@ -17,6 +28,8 @@ describe('AdvanceService', () => {
     userFindFirst.mockReset();
     advanceCreate.mockReset();
     advanceFindMany.mockReset();
+    advanceFindFirst.mockReset();
+    advanceUpdateMany.mockReset();
     userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 15000 });
     advanceCreate.mockResolvedValue({ id: 'advance-1' });
   });
@@ -220,6 +233,73 @@ describe('AdvanceService', () => {
       totalActiveAdvances: 1000,
       pendingCount: 1,
       deductedCount: 1,
+    });
+  });
+
+  it('rejects an advance when requested amount exceeds remaining monthly salary', async () => {
+    userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 10000 });
+    advanceFindMany.mockResolvedValue([{ amount: 7000 }]);
+
+    await expect(
+      service.create(
+        {
+          sub: 'cashier-1',
+          role: Role.CASHIER,
+          businessId: 'biz-1',
+        },
+        { amount: 4000, reason: 'Over limit' },
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  describe('remove', () => {
+    it('throws BadRequestException when trying to delete an already deducted advance', async () => {
+      advanceFindFirst.mockResolvedValue({
+        id: 'adv-1',
+        status: AdvanceStatus.DEDUCTED,
+      });
+
+      await expect(
+        service.remove(
+          { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+          'adv-1',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('soft deletes a pending advance', async () => {
+      advanceFindFirst.mockResolvedValue({
+        id: 'adv-1',
+        status: AdvanceStatus.PENDING,
+      });
+      advanceUpdateMany.mockResolvedValue({ count: 1 });
+
+      const res = await service.remove(
+        { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+        'adv-1',
+      );
+
+      expect(advanceUpdateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'adv-1',
+          businessId: 'biz-1',
+          status: AdvanceStatus.PENDING,
+          deletedAt: null,
+        },
+        data: { deletedAt: expect.any(Date) },
+      });
+      expect(res.id).toBe('adv-1');
+    });
+
+    it('throws NotFoundException when advance to delete is not found', async () => {
+      advanceFindFirst.mockResolvedValue(null);
+
+      await expect(
+        service.remove(
+          { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+          'non-existent',
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

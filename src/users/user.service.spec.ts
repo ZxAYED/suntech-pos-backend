@@ -1,5 +1,9 @@
-import { NotFoundException } from '@nestjs/common';
-import { AccountStatus, Role } from '@prisma/client';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
+import { AccountStatus, Role, ShiftStatus } from '@prisma/client';
 import { IdGeneratorService } from '../identity/id-generator.service';
 import { CloudinaryService } from '../media/cloudinary.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -25,15 +29,19 @@ describe('UserService', () => {
   const userFindMany = jest.fn();
   const userFindFirst = jest.fn();
   const userUpdate = jest.fn();
+  const userUpdateMany = jest.fn();
+  const shiftSessionFindFirst = jest.fn();
   const withUniquePublicId = jest.fn();
 
   const prisma = {
     location: { findFirst: locationFindFirst },
+    shiftSession: { findFirst: shiftSessionFindFirst },
     user: {
       create: userCreate,
       findMany: userFindMany,
       findFirst: userFindFirst,
       update: userUpdate,
+      updateMany: userUpdateMany,
     },
   } as unknown as PrismaService;
 
@@ -206,12 +214,44 @@ describe('UserService', () => {
         ),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
+
+    it('hashes and updates cashier password when provided by admin', async () => {
+      userFindFirst.mockResolvedValue({
+        id: 'csh-1',
+        businessId: 'biz-1',
+        role: Role.CASHIER,
+      });
+      userUpdate.mockResolvedValue({
+        id: 'csh-1',
+        fullName: 'Alex Rivera',
+        email: 'alex@example.com',
+      });
+
+      await service.updateCashier(
+        { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+        'csh-1',
+        { password: 'NewSecurePassword123' },
+      );
+
+      expect(userUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'csh-1' },
+          data: expect.objectContaining({
+            password: expect.any(String),
+          }),
+        }),
+      );
+    });
   });
 
   describe('deleteCashier', () => {
-    it('soft deletes cashier by setting deletedAt', async () => {
+    it('soft deletes cashier by setting deletedAt and unique suffixes', async () => {
+      shiftSessionFindFirst.mockResolvedValue(null);
       userFindFirst.mockResolvedValue({
         id: 'csh-1',
+        email: 'csh@store.com',
+        publicId: 'CSH-001',
+        phoneNumber: '01711111111',
         businessId: 'biz-1',
         role: Role.CASHIER,
       });
@@ -227,10 +267,38 @@ describe('UserService', () => {
 
       expect(result.id).toBe('csh-1');
       expect(result.deletedAt).toBeInstanceOf(Date);
-      expect(userUpdate).toHaveBeenCalledWith({
-        where: { id: 'csh-1' },
-        data: { deletedAt: expect.any(Date) },
+      expect(userUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'csh-1' },
+          data: expect.objectContaining({
+            deletedAt: expect.any(Date),
+            status: AccountStatus.SUSPENDED,
+            email: expect.stringMatching(/^csh@store\.com__del_\d+$/),
+            publicId: expect.stringMatching(/^CSH-001__del_\d+$/),
+            phoneNumber: expect.stringMatching(/^01711111111__del_\d+$/),
+          }),
+        }),
+      );
+    });
+
+    it('throws ConflictException when cashier has an active open shift', async () => {
+      userFindFirst.mockResolvedValue({
+        id: 'csh-1',
+        email: 'csh@store.com',
+        businessId: 'biz-1',
+        role: Role.CASHIER,
       });
+      shiftSessionFindFirst.mockResolvedValue({
+        id: 'shift-1',
+        status: ShiftStatus.OPEN,
+      });
+
+      await expect(
+        service.deleteCashier(
+          { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+          'csh-1',
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
     });
 
     it('throws NotFoundException when cashier to delete is not found', async () => {
@@ -242,6 +310,18 @@ describe('UserService', () => {
           'unknown',
         ),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('updateStatus', () => {
+    it('throws BadRequestException when admin attempts to suspend their own account', async () => {
+      await expect(
+        service.updateStatus(
+          { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+          'admin-1',
+          { status: AccountStatus.SUSPENDED },
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
     });
   });
 });

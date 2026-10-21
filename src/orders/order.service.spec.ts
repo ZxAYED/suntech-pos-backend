@@ -587,6 +587,19 @@ describe('OrdersService', () => {
         }),
       });
     });
+
+    it('throws ForbiddenException when admin actor has no businessId', async () => {
+      const adminWithoutBiz = {
+        sub: 'admin-nobiz',
+        role: Role.ADMIN,
+      };
+
+      await expect(
+        service.getOrders(adminWithoutBiz as any, { page: 1, limit: 10 }),
+      ).rejects.toThrow(
+        new ForbiddenException('Create a business before continuing'),
+      );
+    });
   });
 
   describe('Legacy checkoutWithin support', () => {

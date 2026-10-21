@@ -9,6 +9,12 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Idempotent } from '../common/decorators/idempotent.decorator';
@@ -23,6 +29,8 @@ import { ListShiftsQueryDto } from './dto/list-shifts.query';
 import { OpenShiftDto } from './dto/open-shift.dto';
 import { ShiftService } from './shift.service';
 
+@ApiTags('Shift Sessions & Cash Register')
+@ApiBearerAuth()
 @Controller('shifts')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.CASHIER, Role.ADMIN)
@@ -30,6 +38,18 @@ export class ShiftController {
   constructor(private readonly shifts: ShiftService) {}
 
   @Post('open')
+  @ApiOperation({
+    summary: 'Open a new register shift',
+    description:
+      'Opens a register shift with starting cash float. If a shift was left open on a previous calendar day (Dhaka timezone), set autoClosePrevious=true to reconcile and auto-close it.',
+  })
+  @ApiResponse({ status: 201, description: 'Shift opened successfully' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Previous shift was left open on a previous day and requires auto-close confirmation, or an active shift already exists today',
+  })
+  @ApiResponse({ status: 409, description: 'Conflict opening shift' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
@@ -39,6 +59,13 @@ export class ShiftController {
   }
 
   @Get('active')
+  @ApiOperation({
+    summary: 'Get active open shift session',
+    description:
+      'Retrieves current open shift details with real-time drawer metrics and advance subtractions.',
+  })
+  @ApiResponse({ status: 200, description: 'Active shift loaded' })
+  @ApiResponse({ status: 404, description: 'No active open shift found' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @ResponseMessage('Active shift loaded')
   getActive(@CurrentUser() actor: AccessTokenPayload) {
@@ -46,6 +73,13 @@ export class ShiftController {
   }
 
   @Post('close')
+  @ApiOperation({
+    summary: 'Close current active shift',
+    description:
+      'Reconciles counted drawer cash with expected cash (cash float + COD sales - COD refunds - advances).',
+  })
+  @ApiResponse({ status: 200, description: 'Shift closed successfully' })
+  @ApiResponse({ status: 404, description: 'No active shift found' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.OK)
@@ -58,6 +92,12 @@ export class ShiftController {
   }
 
   @Post(':id/close')
+  @ApiOperation({
+    summary: 'Close specific shift by ID',
+    description: 'Admin or shift owner closes a specific shift session by ID.',
+  })
+  @ApiResponse({ status: 200, description: 'Shift closed successfully' })
+  @ApiResponse({ status: 404, description: 'Shift not found' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.OK)
@@ -71,6 +111,18 @@ export class ShiftController {
   }
 
   @Post('advances')
+  @ApiOperation({
+    summary: 'Take cash advance from active shift drawer',
+    description:
+      'Withdraws physical cash advance for the cashier. Atomic check enforces that total pending advances cannot exceed monthlySalary and amount cannot exceed drawer cash.',
+  })
+  @ApiResponse({ status: 201, description: 'Shift advance recorded' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Advance amount exceeds remaining monthly salary limit or drawer cash',
+  })
+  @ApiResponse({ status: 404, description: 'No active open shift found' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
@@ -83,6 +135,12 @@ export class ShiftController {
   }
 
   @Get()
+  @ApiOperation({
+    summary: 'List shift history with filters',
+    description:
+      'Paginated shift session audit list. Cashier is restricted to own shifts; Admin can filter by location.',
+  })
+  @ApiResponse({ status: 200, description: 'Shifts loaded' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @ResponseMessage('Shifts loaded')
   list(

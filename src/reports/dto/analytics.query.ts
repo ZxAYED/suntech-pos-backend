@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsOptional, IsUUID } from 'class-validator';
+import { IsEnum, IsOptional } from 'class-validator';
+import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export class AnalyticsQueryDto {
   @ApiPropertyOptional({
@@ -11,8 +12,8 @@ export class AnalyticsQueryDto {
   @IsEnum(['daily', 'weekly', 'monthly', 'quarterly'])
   range?: 'daily' | 'weekly' | 'monthly' | 'quarterly' = 'monthly';
 
-  @ApiPropertyOptional({ description: 'Filter by store branch location UUID' })
+  @ApiPropertyOptional({ description: 'Filter by store branch location ID' })
   @IsOptional()
-  @IsUUID()
+  @IsEntityId()
   locationId?: string;
 }

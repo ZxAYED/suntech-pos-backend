@@ -173,6 +173,13 @@ export class AuthService {
 
   async forgotPassword(dto: ForgotPasswordDto): Promise<{ accepted: true }> {
     const user = await this.findRecoveryUser(dto.loginType, dto.identifier);
+
+    if (user.email.endsWith('@cashiers.suntech.internal')) {
+      throw new BadRequestException(
+        'No recovery email is configured for this cashier account. Please ask your Store Admin to reset your password.',
+      );
+    }
+
     const otp = randomInt(0, 1_000_000).toString().padStart(6, '0');
     const resetOtpHash = await bcrypt.hash(otp, BCRYPT_ROUNDS);
 

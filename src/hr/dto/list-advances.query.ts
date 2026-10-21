@@ -1,25 +1,18 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { AdvanceStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import {
-  IsEnum,
-  IsInt,
-  IsOptional,
-  IsString,
-  IsUUID,
-  Max,
-  Min,
-} from 'class-validator';
+import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export class ListAdvancesQueryDto {
-  @ApiPropertyOptional({ description: 'Filter by branch location UUID' })
+  @ApiPropertyOptional({ description: 'Filter by branch location ID' })
   @IsOptional()
-  @IsUUID()
+  @IsEntityId()
   locationId?: string;
 
   @ApiPropertyOptional({ description: 'Filter by employee / cashier ID' })
   @IsOptional()
-  @IsString()
+  @IsEntityId()
   cashierId?: string;
 
   @ApiPropertyOptional({ description: 'Month (1-12)' })

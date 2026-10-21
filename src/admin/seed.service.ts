@@ -78,7 +78,6 @@ export async function runDatabaseSeed(
     business = await prisma.business.update({
       where: { id: business.id },
       data: {
-        name: 'SunTech Retail',
         deletedAt: null,
       },
     });
@@ -155,7 +154,6 @@ export async function runDatabaseSeed(
         status: AccountStatus.ACTIVE,
         businessId: business.id,
         locationId: location.id,
-        monthlySalary: 35000,
         deletedAt: null,
       },
     });

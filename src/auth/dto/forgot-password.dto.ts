@@ -1,3 +1,4 @@
+import { ApiProperty } from '@nestjs/swagger';
 import {
   IsEnum,
   IsNotEmpty,
@@ -9,9 +10,18 @@ import {
 import { LoginType } from './login-type.enum';
 
 export class ForgotPasswordDto {
+  @ApiProperty({
+    enum: LoginType,
+    description: 'Login type (ADMIN or BUSINESS_USER)',
+    example: LoginType.ADMIN,
+  })
   @IsEnum(LoginType)
   loginType: LoginType;
 
+  @ApiProperty({
+    description: 'Email (for Admin) or Public ID (for Business User / Cashier)',
+    example: 'admin@suntech.pos',
+  })
   @IsString()
   @IsNotEmpty()
   @MaxLength(255)

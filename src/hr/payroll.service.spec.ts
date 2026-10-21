@@ -1,4 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { AdvanceStatus, PayrollStatus, Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PayrollService } from './payroll.service';
@@ -137,23 +141,18 @@ describe('PayrollService', () => {
     );
   });
 
-  it('allows a negative net when advances exceed salary', async () => {
+  it('rejects payroll processing if advances exceed base salary', async () => {
     userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 1000 });
     aggregate.mockResolvedValue({ _sum: { amount: 1500 } });
 
-    await service.processWithin(
-      tx as unknown as Prisma.TransactionClient,
-      'biz-1',
-      dto,
-    );
-
-    expect(payrollCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          netPaid: -500,
-        }) as Prisma.PayrollRecordCreateInput,
-      }),
-    );
+    await expect(
+      service.processWithin(
+        tx as unknown as Prisma.TransactionClient,
+        'biz-1',
+        dto,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(payrollCreate).not.toHaveBeenCalled();
   });
 
   it('rejects a second payroll for the same period before changing advances', async () => {
@@ -238,6 +237,23 @@ describe('PayrollService', () => {
     expect(res.disbursedCount).toBe(1); // only cashier-1 was pending
     expect(res.alreadyPaidCount).toBe(1);
     expect(payrollCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws BadRequestException in disburse if advances exceed base salary', async () => {
+    userFindMany.mockResolvedValue([{ id: 'cashier-1', monthlySalary: 35000 }]);
+    payrollRecordFindMany.mockResolvedValue([]);
+    aggregate.mockResolvedValue({ _sum: { amount: 40000 } });
+
+    await expect(
+      service.disburse(
+        { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+        { month: 10, year: 2026 },
+      ),
+    ).rejects.toThrow(
+      new BadRequestException(
+        'Total advances (40000) cannot exceed base salary (35000)',
+      ),
+    );
   });
 
   it('filters summary and disburse by locationId', async () => {

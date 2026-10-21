@@ -24,10 +24,10 @@ enum StockTransactionType {
 }
 
 model Category {
-  id          String    @id @default(cuid())
+  id          String    @id @default(uuid())
   businessId  String
   business    Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  name        String    @unique
+  name        String
   slug        String?
   description String?
   products    Product[]
@@ -36,14 +36,16 @@ model Category {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
+  @@unique([businessId, name])
+  @@unique([businessId, slug])
   @@index([businessId])
 }
 
 model Product {
-  id          String    @id @default(cuid())
+  id          String    @id @default(uuid())
   businessId  String
   business    Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  name        String    @unique
+  name        String
   description String?
   categoryId  String?
   category    Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
@@ -53,18 +55,19 @@ model Product {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
+  @@unique([businessId, name])
   @@index([businessId])
 }
 
 model Variant {
-  id         String   @id @default(cuid())
+  id         String   @id @default(uuid())
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   productId  String
   product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   name       String
-  sku        String   @unique
-  barcode    String?  @unique
+  sku        String
+  barcode    String?
 
   sellingPrice Int
   costPrice    Int?
@@ -81,11 +84,13 @@ model Variant {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
+  @@unique([businessId, sku])
+  @@unique([businessId, barcode])
   @@index([businessId])
 }
 
 model VariantImage {
-  id        String   @id @default(cuid())
+  id        String   @id @default(uuid())
   variantId String
   variant   Variant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
   url       String
@@ -158,7 +163,7 @@ model OrderLine {
 }
 
 model Refund {
-  id            String @id @default(cuid())
+  id            String @id @default(uuid())
   orderId       String
   order         Order  @relation(fields: [orderId], references: [id])
   processedById String
@@ -175,7 +180,7 @@ model Refund {
 }
 
 model RefundItem {
-  id           String    @id @default(cuid())
+  id           String    @id @default(uuid())
   refundId     String
   refund       Refund    @relation(fields: [refundId], references: [id], onDelete: Cascade)
   orderLineId  String
@@ -191,7 +196,7 @@ model RefundItem {
 }
 
 model StockTransaction {
-  id        String               @id @default(cuid())
+  id        String               @id @default(uuid())
   variantId String
   variant   Variant              @relation(fields: [variantId], references: [id], onDelete: Cascade)
   type      StockTransactionType

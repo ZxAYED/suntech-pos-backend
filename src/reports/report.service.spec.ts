@@ -226,6 +226,43 @@ describe('ReportService', () => {
     ]);
   });
 
+  it('subtracts partial refunds from line items when computing metrics', async () => {
+    orderCount.mockResolvedValue(1);
+    orderAggregate.mockResolvedValue({ _sum: { totalAmount: 1000 } });
+    refundAggregate.mockResolvedValue({ _sum: { totalRefund: 400 } });
+    orderGroupBy.mockResolvedValue([
+      { paymentMethod: PaymentMethod.COD, _sum: { totalAmount: 600 } },
+    ]);
+    orderLineFindMany.mockResolvedValue([
+      {
+        unitPrice: 400,
+        subtotal: 800,
+        quantity: 2,
+        variantId: 'var-1',
+        refundItems: [{ quantity: 1, refundAmount: 400 }],
+        variant: {
+          costPrice: 200,
+          product: { category: { name: 'Smartphones' } },
+        },
+      },
+    ]);
+
+    const res = await service.analytics(
+      { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+      { range: 'daily' },
+    );
+
+    // periodRevenue is 1000 - 400 = 600
+    expect(res.grossRevenue).toBe(600);
+    // net line: subtotal = 800 - 400 = 400, quantity = 2 - 1 = 1
+    // catalogRevenue = 400, catalogCost = 200 * 1 = 200
+    // grossMarginPercent = (400 - 200) / 400 * 100 = 50%
+    expect(res.grossMarginPercent).toBe(50);
+    expect(res.topCategories).toEqual([
+      { name: 'Smartphones', revenue: 400, percentage: 100 },
+    ]);
+  });
+
   it('filters transactions with location and search', async () => {
     orderCount.mockResolvedValue(1);
     orderFindMany.mockResolvedValue([

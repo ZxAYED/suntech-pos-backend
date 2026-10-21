@@ -29,4 +29,10 @@ export class UpdateCashierDto {
   @Min(0)
   @Max(2147483647)
   monthlySalary?: number;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(8)
+  @MaxLength(72)
+  password?: string;
 }

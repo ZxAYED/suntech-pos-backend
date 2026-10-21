@@ -168,6 +168,9 @@ export class OrdersService {
           error instanceof Prisma.PrismaClientKnownRequestError &&
           error.code === 'P2034'
         ) {
+          if (attempt < INVOICE_ATTEMPTS) {
+            continue;
+          }
           throw new ConflictException(
             'Checkout could not be completed. Retry.',
           );
@@ -180,12 +183,16 @@ export class OrdersService {
     throw new ConflictException('Could not assign a unique invoice number');
   }
 
-  async executeCatalogOrder(
+  private async resolveOrderExecutionContext(
     tx: Prisma.TransactionClient,
     actor: AccessTokenPayload | string,
-    dto: CreateCatalogOrderDto,
-    invoiceNumber: string,
-  ): Promise<PresentedOrder> {
+    dto: { locationId?: string; shiftId?: string },
+  ): Promise<{
+    userId: string;
+    businessId: string;
+    locationId: string;
+    shiftId: string | null;
+  }> {
     const userId = typeof actor === 'string' ? actor : actor.sub;
     const actorRole = typeof actor === 'string' ? undefined : actor.role;
     const actorLocationId =
@@ -206,6 +213,10 @@ export class OrdersService {
     const effectiveBusinessId =
       actorBusinessId ?? user.businessId ?? user.ownedBusiness?.id;
     const effectiveLocationId = actorLocationId ?? user.locationId;
+
+    if (effectiveRole !== Role.SUPER_ADMIN && !effectiveBusinessId) {
+      throw new ForbiddenException('Create a business before creating orders');
+    }
 
     let locationId = dto.locationId;
     if (effectiveRole === Role.CASHIER) {
@@ -247,11 +258,11 @@ export class OrdersService {
 
     const businessId = location.businessId;
 
-    let shiftId = dto.shiftId;
+    let shiftId = dto.shiftId ?? null;
     if (shiftId) {
       const shift = await tx.shiftSession.findFirst({
         where: { id: shiftId, businessId },
-        select: { id: true, status: true },
+        select: { id: true, status: true, locationId: true, cashierId: true },
       });
 
       if (!shift) {
@@ -261,7 +272,23 @@ export class OrdersService {
       if (shift.status !== ShiftStatus.OPEN) {
         throw new ConflictException('Shift is already closed');
       }
-    } else if (user.role === Role.CASHIER) {
+
+      if (shift.locationId && shift.locationId !== locationId) {
+        throw new ForbiddenException(
+          'Shift does not belong to the selected location',
+        );
+      }
+
+      if (
+        effectiveRole === Role.CASHIER &&
+        shift.cashierId &&
+        shift.cashierId !== user.id
+      ) {
+        throw new ForbiddenException(
+          'Cannot record orders under another cashier shift',
+        );
+      }
+    } else if (effectiveRole === Role.CASHIER || user.role === Role.CASHIER) {
       const activeShift = await tx.shiftSession.findFirst({
         where: {
           businessId,
@@ -276,6 +303,23 @@ export class OrdersService {
       }
       shiftId = activeShift.id;
     }
+
+    return {
+      userId,
+      businessId,
+      locationId,
+      shiftId,
+    };
+  }
+
+  async executeCatalogOrder(
+    tx: Prisma.TransactionClient,
+    actor: AccessTokenPayload | string,
+    dto: CreateCatalogOrderDto,
+    invoiceNumber: string,
+  ): Promise<PresentedOrder> {
+    const { userId, businessId, locationId, shiftId } =
+      await this.resolveOrderExecutionContext(tx, actor, dto);
 
     // 1. Validate Variants & Inventory
     const variantIds = [...new Set(dto.lines.map((l) => l.variantId))];
@@ -430,6 +474,9 @@ export class OrdersService {
           error instanceof Prisma.PrismaClientKnownRequestError &&
           error.code === 'P2034'
         ) {
+          if (attempt < INVOICE_ATTEMPTS) {
+            continue;
+          }
           throw new ConflictException(
             'Checkout could not be completed. Retry.',
           );
@@ -448,96 +495,8 @@ export class OrdersService {
     dto: CreateCustomOrderDto,
     invoiceNumber: string,
   ): Promise<PresentedOrder> {
-    const userId = typeof actor === 'string' ? actor : actor.sub;
-    const actorRole = typeof actor === 'string' ? undefined : actor.role;
-    const actorLocationId =
-      typeof actor === 'string' ? undefined : actor.locationId;
-    const actorBusinessId =
-      typeof actor === 'string' ? undefined : actor.businessId;
-
-    const user = await tx.user.findFirst({
-      where: { id: userId, deletedAt: null },
-      include: { ownedBusiness: true },
-    });
-
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
-    const effectiveRole = actorRole ?? user.role;
-    const effectiveBusinessId =
-      actorBusinessId ?? user.businessId ?? user.ownedBusiness?.id;
-    const effectiveLocationId = actorLocationId ?? user.locationId;
-
-    let locationId = dto.locationId;
-    if (effectiveRole === Role.CASHIER) {
-      locationId = effectiveLocationId ?? dto.locationId;
-      if (!locationId) {
-        throw new ForbiddenException(
-          'A cashier must be assigned to a location before creating orders',
-        );
-      }
-      if (
-        dto.locationId &&
-        effectiveLocationId &&
-        dto.locationId !== effectiveLocationId
-      ) {
-        throw new ForbiddenException(
-          'Cashiers can only create orders for their assigned location',
-        );
-      }
-    } else {
-      if (!locationId) {
-        locationId = effectiveLocationId ?? undefined;
-      }
-      if (!locationId) {
-        throw new BadRequestException('Location ID is required');
-      }
-    }
-
-    const location = await tx.location.findFirst({
-      where: { id: locationId, deletedAt: null },
-    });
-
-    if (!location) {
-      throw new NotFoundException('Location not found');
-    }
-
-    if (effectiveBusinessId && location.businessId !== effectiveBusinessId) {
-      throw new ForbiddenException('Location does not belong to your business');
-    }
-
-    const businessId = location.businessId;
-
-    let shiftId = dto.shiftId;
-    if (shiftId) {
-      const shift = await tx.shiftSession.findFirst({
-        where: { id: shiftId, businessId },
-        select: { id: true, status: true },
-      });
-
-      if (!shift) {
-        throw new NotFoundException('Shift not found');
-      }
-
-      if (shift.status !== ShiftStatus.OPEN) {
-        throw new ConflictException('Shift is already closed');
-      }
-    } else if (user.role === Role.CASHIER) {
-      const activeShift = await tx.shiftSession.findFirst({
-        where: {
-          businessId,
-          cashierId: user.id,
-          status: ShiftStatus.OPEN,
-        },
-        select: { id: true },
-      });
-
-      if (!activeShift) {
-        throw new ConflictException(OPEN_SHIFT_REQUIRED);
-      }
-      shiftId = activeShift.id;
-    }
+    const { userId, businessId, locationId, shiftId } =
+      await this.resolveOrderExecutionContext(tx, actor, dto);
 
     // 1. Bypass Catalog Lookup & Inventory:
     // Do NOT perform any database variant lookup.
@@ -634,7 +593,12 @@ export class OrdersService {
 
     const where: Prisma.OrderWhereInput = {};
 
-    if (actor?.businessId) {
+    if (actor && actor.role !== Role.SUPER_ADMIN) {
+      if (!actor.businessId) {
+        throw new ForbiddenException('Create a business before continuing');
+      }
+      where.location = { businessId: actor.businessId };
+    } else if (actor?.businessId) {
       where.location = { businessId: actor.businessId };
     }
 
@@ -744,6 +708,9 @@ export class OrdersService {
           error instanceof Prisma.PrismaClientKnownRequestError &&
           error.code === 'P2034'
         ) {
+          if (attempt < INVOICE_ATTEMPTS) {
+            continue;
+          }
           throw new ConflictException(
             'Checkout could not be completed. Retry.',
           );
@@ -804,6 +771,12 @@ export class OrdersService {
 
         if (!variant) {
           throw new NotFoundException('Variant not found');
+        }
+
+        if (variant.stock !== undefined && variant.stock < item.quantity) {
+          throw new BadRequestException(
+            `Insufficient stock for variant ${variant.id}`,
+          );
         }
 
         lines.push({

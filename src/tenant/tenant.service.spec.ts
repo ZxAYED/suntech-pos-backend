@@ -123,10 +123,12 @@ describe('TenantService', () => {
 
   describe('updateLocation', () => {
     it('updates location name and address', async () => {
-      locationFindFirst.mockResolvedValue({
-        id: 'loc-1',
-        businessId: 'biz-1',
-      });
+      locationFindFirst
+        .mockResolvedValueOnce({
+          id: 'loc-1',
+          businessId: 'biz-1',
+        })
+        .mockResolvedValueOnce(null);
       locationUpdate.mockResolvedValue({
         id: 'loc-1',
         name: 'Uttara New Branch',
@@ -160,8 +162,17 @@ describe('TenantService', () => {
   });
 
   describe('deleteLocation', () => {
-    it('soft deletes location by setting deletedAt', async () => {
-      locationUpdateMany.mockResolvedValue({ count: 1 });
+    it('soft deletes location by setting deletedAt and suffixing name', async () => {
+      locationFindFirst.mockResolvedValue({
+        id: 'loc-1',
+        name: 'Uttara Branch',
+        businessId: 'biz-1',
+      });
+      locationUpdate.mockResolvedValue({
+        id: 'loc-1',
+        name: 'Uttara Branch__del_123',
+        deletedAt: new Date(),
+      });
 
       const result = await service.deleteLocation(
         { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
@@ -170,14 +181,17 @@ describe('TenantService', () => {
 
       expect(result.id).toBe('loc-1');
       expect(result.deletedAt).toBeInstanceOf(Date);
-      expect(locationUpdateMany).toHaveBeenCalledWith({
-        where: { id: 'loc-1', businessId: 'biz-1', deletedAt: null },
-        data: { deletedAt: expect.any(Date) },
+      expect(locationUpdate).toHaveBeenCalledWith({
+        where: { id: 'loc-1' },
+        data: {
+          deletedAt: expect.any(Date),
+          name: expect.stringContaining('Uttara Branch__del_'),
+        },
       });
     });
 
     it('throws NotFoundException if location to delete is not found', async () => {
-      locationUpdateMany.mockResolvedValue({ count: 0 });
+      locationFindFirst.mockResolvedValue(null);
 
       await expect(
         service.deleteLocation(

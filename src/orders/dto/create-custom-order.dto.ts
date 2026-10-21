@@ -7,11 +7,12 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
-  IsUUID,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
 import { PaymentMethod } from '@prisma/client';
+import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export { PaymentMethod as PaymentType };
 
@@ -48,16 +49,16 @@ export class CustomOrderLineItemDto {
 }
 
 export class CreateCustomOrderDto {
-  @ApiPropertyOptional({ description: 'Optional shift register UUID' })
-  @IsUUID()
+  @ApiPropertyOptional({ description: 'Optional shift register ID' })
   @IsOptional()
+  @IsEntityId()
   shiftId?: string;
 
   @ApiPropertyOptional({
-    description: 'Store location UUID (optional for cashiers)',
+    description: 'Store location ID (optional for cashiers)',
   })
-  @IsUUID()
   @IsOptional()
+  @IsEntityId()
   locationId?: string;
 
   @ApiProperty({

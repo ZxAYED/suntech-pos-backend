@@ -25,8 +25,12 @@ export type PresentedProfile = Omit<UserProfile, 'email'> & {
 
 const INTERNAL_CASHIER_EMAIL_DOMAIN = '@cashiers.suntech.internal';
 
-export function presentEmail(email: string): string | null {
-  if (email.endsWith(INTERNAL_CASHIER_EMAIL_DOMAIN)) {
+export function presentEmail(email?: string | null): string | null {
+  if (
+    !email ||
+    typeof email !== 'string' ||
+    email.endsWith(INTERNAL_CASHIER_EMAIL_DOMAIN)
+  ) {
     return null;
   }
 

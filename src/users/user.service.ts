@@ -1,11 +1,12 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { AccountStatus, Prisma, Role } from '@prisma/client';
+import { AccountStatus, Prisma, Role, ShiftStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
@@ -206,6 +207,11 @@ export class UserService {
       }
     }
 
+    const passwordHash =
+      dto.password !== undefined
+        ? await bcrypt.hash(dto.password, BCRYPT_ROUNDS)
+        : undefined;
+
     try {
       const updated = await this.prisma.user.update({
         where: { id: cashierId },
@@ -222,6 +228,7 @@ export class UserService {
           ...(dto.monthlySalary !== undefined
             ? { monthlySalary: dto.monthlySalary }
             : {}),
+          ...(passwordHash !== undefined ? { password: passwordHash } : {}),
         },
         select: {
           ...userProfileSelect,
@@ -270,10 +277,36 @@ export class UserService {
       throw new NotFoundException('Cashier not found');
     }
 
+    if (this.prisma.shiftSession?.findFirst) {
+      const activeShift = await this.prisma.shiftSession.findFirst({
+        where: {
+          cashierId,
+          businessId,
+          status: ShiftStatus.OPEN,
+        },
+      });
+      if (activeShift) {
+        throw new ConflictException(
+          'Cannot delete a cashier with an active open shift',
+        );
+      }
+    }
+
+    const timestamp = Date.now();
     const deletedAt = new Date();
     await this.prisma.user.update({
       where: { id: cashierId },
-      data: { deletedAt },
+      data: {
+        deletedAt,
+        status: AccountStatus.SUSPENDED,
+        email: `${cashier.email}__del_${timestamp}`,
+        publicId: cashier.publicId
+          ? `${cashier.publicId}__del_${timestamp}`
+          : null,
+        phoneNumber: cashier.phoneNumber
+          ? `${cashier.phoneNumber}__del_${timestamp}`
+          : null,
+      },
     });
 
     return { id: cashierId, deletedAt };
@@ -285,6 +318,13 @@ export class UserService {
     dto: UpdateUserStatusDto,
   ): Promise<PresentedProfile> {
     const businessId = this.requireBusinessId(admin);
+
+    if (userId === admin.sub && dto.status !== AccountStatus.ACTIVE) {
+      throw new BadRequestException(
+        'You cannot suspend or reject your own admin account',
+      );
+    }
+
     const updated = await this.prisma.user.updateMany({
       where: {
         id: userId,

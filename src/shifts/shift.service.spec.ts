@@ -1,9 +1,14 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Role, ShiftStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { ShiftService } from './shift.service';
+import { isPreviousCalendarDay, ShiftService } from './shift.service';
 
 describe('ShiftService', () => {
+  const userFindFirst = jest.fn();
   const locationFindFirst = jest.fn();
   const shiftFindFirst = jest.fn();
   const shiftCreate = jest.fn();
@@ -31,6 +36,9 @@ describe('ShiftService', () => {
   );
   const prisma = {
     $transaction: transaction,
+    user: {
+      findFirst: userFindFirst,
+    },
     shiftSession: {
       findFirst: shiftFindFirst,
       updateMany: shiftUpdateMany,
@@ -56,6 +64,7 @@ describe('ShiftService', () => {
   };
 
   beforeEach(() => {
+    userFindFirst.mockReset();
     locationFindFirst.mockReset();
     shiftFindFirst.mockReset();
     shiftCreate.mockReset();
@@ -69,6 +78,7 @@ describe('ShiftService', () => {
     advanceFindMany.mockReset();
     advanceCreate.mockReset();
 
+    userFindFirst.mockResolvedValue(null);
     locationFindFirst.mockResolvedValue({ id: 'loc-1' });
     shiftFindFirst.mockResolvedValue(null);
     shiftCreate.mockImplementation(({ data }: { data: object }) =>
@@ -332,5 +342,51 @@ describe('ShiftService', () => {
       select: expect.any(Object),
     });
     expect(adv.amount).toBe(500);
+  });
+
+  it('rejects shift advance when requested amount exceeds remaining monthly salary limit', async () => {
+    shiftFindFirst.mockResolvedValue({ id: 'shift-1', startingAmount: 10000 });
+    userFindFirst.mockResolvedValue({ monthlySalary: 10000 });
+    advanceAggregate.mockResolvedValue({ _sum: { amount: 8000 } });
+
+    await expect(
+      service.addAdvance(cashier, {
+        amount: 3000,
+        reason: 'Over salary cap',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects shift advance when requested amount exceeds physical cash in drawer', async () => {
+    shiftFindFirst.mockResolvedValue({ id: 'shift-1', startingAmount: 1000 });
+    userFindFirst.mockResolvedValue({ monthlySalary: 50000 });
+    advanceAggregate.mockResolvedValueOnce({ _sum: { amount: 0 } }); // for pending monthly advances
+    orderAggregate.mockResolvedValue({ _sum: { totalAmount: 500 } });
+    advanceAggregate.mockResolvedValueOnce({ _sum: { amount: 200 } }); // for computeShiftMetrics advancesOut
+
+    await expect(
+      service.addAdvance(cashier, {
+        amount: 2000,
+        reason: 'Over drawer cash',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  describe('isPreviousCalendarDay', () => {
+    it('returns false when opened earlier on the same day in Asia/Dhaka even across UTC date boundary', () => {
+      // 2:00 AM on 2026-10-19 in Asia/Dhaka is 2026-10-18T20:00:00Z in UTC
+      const openedAt = new Date('2026-10-18T20:00:00Z');
+      // 4:00 PM on 2026-10-19 in Asia/Dhaka is 2026-10-19T10:00:00Z in UTC
+      const now = new Date('2026-10-19T10:00:00Z');
+      expect(isPreviousCalendarDay(openedAt, now)).toBe(false);
+    });
+
+    it('returns true when opened on a previous calendar day in Asia/Dhaka', () => {
+      // 11:00 PM on 2026-10-18 in Asia/Dhaka is 2026-10-18T17:00:00Z in UTC
+      const openedAt = new Date('2026-10-18T17:00:00Z');
+      // 4:00 PM on 2026-10-19 in Asia/Dhaka is 2026-10-19T10:00:00Z in UTC
+      const now = new Date('2026-10-19T10:00:00Z');
+      expect(isPreviousCalendarDay(openedAt, now)).toBe(true);
+    });
   });
 });
