@@ -122,7 +122,7 @@ export class ShiftService {
           if (openShift) {
             const isStale =
               isPreviousCalendarDay(openShift.openedAt) ||
-              dto.autoClosePrevious === true;
+              (actor.role === Role.ADMIN && dto.autoClosePrevious === true);
 
             if (isStale) {
               const refundPromise = tx.refund?.aggregate
@@ -333,77 +333,96 @@ export class ShiftService {
       select: { monthlySalary: true },
     });
 
-    const now = new Date();
-    const { start, end } = payrollPeriod(
-      now.getUTCFullYear(),
-      now.getUTCMonth() + 1,
-    );
-
-    let currentPending = 0;
-    if (this.prisma.employeeAdvance?.aggregate) {
-      const agg = await this.prisma.employeeAdvance.aggregate({
-        where: {
-          businessId,
-          cashierId: cashier.sub,
-          status: 'PENDING',
-          deletedAt: null,
-          takenAt: { gte: start, lt: end },
-        },
-        _sum: { amount: true },
-      });
-      currentPending = agg._sum?.amount ?? 0;
-    } else if (this.prisma.employeeAdvance?.findMany) {
-      const existing = await this.prisma.employeeAdvance.findMany({
-        where: {
-          businessId,
-          cashierId: cashier.sub,
-          status: 'PENDING',
-          deletedAt: null,
-          takenAt: { gte: start, lt: end },
-        },
-      });
-      currentPending = Array.isArray(existing)
-        ? existing.reduce((sum, item) => sum + (item.amount ?? 0), 0)
-        : 0;
-    }
-
     const maxSalary = user?.monthlySalary ?? 0;
-    if (maxSalary > 0 && currentPending + dto.amount > maxSalary) {
+    if (maxSalary <= 0) {
       throw new BadRequestException(
-        'Advance amount exceeds remaining monthly salary limit',
+        'Salary advances require a positive monthly salary configured on your account',
       );
     }
 
-    const { cashSales, advancesOut } = await this.computeShiftMetrics(
-      activeShift.id,
-      businessId,
-    );
-    const expectedCash =
-      (activeShift.startingAmount ?? 0) + cashSales - advancesOut;
-    if (dto.amount > expectedCash) {
-      throw new BadRequestException(
-        'Advance amount exceeds physical cash available in drawer',
-      );
+    const now = new Date();
+    const month = now.getUTCMonth() + 1;
+    const year = now.getUTCFullYear();
+    const { start, end } = payrollPeriod(year, month);
+
+    const executeInTx = async (tx: any) => {
+      const payrollDelegate =
+        tx.payrollRecord ?? (this.prisma as any).payrollRecord;
+      if (payrollDelegate?.findFirst) {
+        const settled = await payrollDelegate.findFirst({
+          where: {
+            businessId,
+            cashierId: cashier.sub,
+            month,
+            year,
+            status: 'PAID',
+          },
+        });
+        if (settled) {
+          throw new BadRequestException(
+            'Payroll for the current month has already been settled',
+          );
+        }
+      }
+
+      let currentPending = 0;
+      if (tx.employeeAdvance?.aggregate) {
+        const agg = await tx.employeeAdvance.aggregate({
+          where: {
+            businessId,
+            cashierId: cashier.sub,
+            status: 'PENDING',
+            deletedAt: null,
+            takenAt: { gte: start, lt: end },
+          },
+          _sum: { amount: true },
+        });
+        currentPending = agg._sum?.amount ?? 0;
+      } else if (tx.employeeAdvance?.findMany) {
+        const existing = await tx.employeeAdvance.findMany({
+          where: {
+            businessId,
+            cashierId: cashier.sub,
+            status: 'PENDING',
+            deletedAt: null,
+            takenAt: { gte: start, lt: end },
+          },
+        });
+        currentPending = Array.isArray(existing)
+          ? existing.reduce((sum: number, item: any) => sum + (item.amount ?? 0), 0)
+          : 0;
+      }
+
+      if (currentPending + dto.amount > maxSalary) {
+        throw new BadRequestException(
+          'Advance amount exceeds remaining monthly salary limit',
+        );
+      }
+
+      return tx.employeeAdvance.create({
+        data: {
+          businessId,
+          cashierId: cashier.sub,
+          shiftId: activeShift.id,
+          amount: dto.amount,
+          reason: dto.reason.trim(),
+        },
+        select: {
+          id: true,
+          amount: true,
+          reason: true,
+          takenAt: true,
+          status: true,
+        },
+      });
+    };
+
+    if (this.prisma.$transaction) {
+      return this.prisma.$transaction((tx) => executeInTx(tx), {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      });
     }
-
-    const advance = await this.prisma.employeeAdvance.create({
-      data: {
-        businessId,
-        cashierId: cashier.sub,
-        shiftId: activeShift.id,
-        amount: dto.amount,
-        reason: dto.reason.trim(),
-      },
-      select: {
-        id: true,
-        amount: true,
-        reason: true,
-        takenAt: true,
-        status: true,
-      },
-    });
-
-    return advance;
+    return executeInTx(this.prisma);
   }
 
   async list(user: AccessTokenPayload, query: ListShiftsQueryDto) {
@@ -442,6 +461,13 @@ export class ShiftService {
   }
 
   private async computeShiftMetrics(shiftId: string, businessId: string) {
+    const shift = this.prisma.shiftSession?.findFirst
+      ? await this.prisma.shiftSession.findFirst({
+          where: { id: shiftId, businessId },
+          select: { openedAt: true, closedAt: true, status: true },
+        })
+      : null;
+
     const refundPromise = this.prisma.refund?.aggregate
       ? this.prisma.refund.aggregate({
           where: {
@@ -449,6 +475,7 @@ export class ShiftService {
               shiftId,
               paymentMethod: PaymentMethod.COD,
             },
+            ...(shift?.closedAt ? { createdAt: { lte: shift.closedAt } } : {}),
           },
           _sum: { totalRefund: true },
         })

@@ -1,50 +1,39 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsEnum,
-  IsNotEmpty,
+  IsOptional,
   IsString,
   MaxLength,
-  ValidateBy,
-  ValidationArguments,
 } from 'class-validator';
 import { LoginType } from './login-type.enum';
 
 export class ForgotPasswordDto {
-  @ApiProperty({
+  @ApiPropertyOptional({
+    description: 'Admin registered email address',
+    example: 'admin@suntechpos.bd',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  email?: string;
+
+  @ApiPropertyOptional({
+    description: 'Admin email or identifier (backwards compatibility)',
+    example: 'admin@suntechpos.bd',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  identifier?: string;
+
+  @ApiPropertyOptional({
     enum: LoginType,
-    description: 'Login type (ADMIN or BUSINESS_USER)',
+    enumName: 'LoginType',
+    description:
+      'Login type (ADMIN). Note: Cashiers do not have email recovery; their passwords are reset directly by Store Admins.',
     example: LoginType.ADMIN,
   })
+  @IsOptional()
   @IsEnum(LoginType)
-  loginType: LoginType;
-
-  @ApiProperty({
-    description: 'Email (for Admin) or Public ID (for Business User / Cashier)',
-    example: 'admin@suntech.pos',
-  })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(255)
-  @ValidateBy({
-    name: 'isAdminIdentifierEmail',
-    validator: {
-      validate(value: unknown, args: ValidationArguments): boolean {
-        const dto = args.object as ForgotPasswordDto;
-
-        if (dto.loginType !== LoginType.ADMIN) {
-          return typeof value === 'string' && value.trim().length > 0;
-        }
-
-        return typeof value === 'string' && isEmail(value);
-      },
-      defaultMessage(): string {
-        return 'identifier must be an email address for admin recovery';
-      },
-    },
-  })
-  identifier: string;
-}
-
-function isEmail(value: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  loginType?: LoginType;
 }

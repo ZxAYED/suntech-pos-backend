@@ -22,6 +22,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { OrderStatus, OrderType, PaymentMethod } from '@prisma/client';
 import { CreateCatalogOrderDto } from './dto/create-catalog-order.dto';
 import { CreateCustomOrderDto } from './dto/create-custom-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
@@ -37,17 +38,26 @@ export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
   @Post('catalog')
+  @Roles('ADMIN', 'CASHIER')
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Catalog order created')
   @ApiOperation({
-    summary: 'Create catalog order',
+    summary: '[ADMIN, CASHIER] Create catalog order',
     description:
-      'Checkout enlisted catalog variants with inventory validation and stock decrement. Supports payment types: COD, BKASH, NAGAD, BANK.',
+      'Checkout enlisted catalog variants with inventory validation and stock decrement. Supports payment types: COD, BKASH, NAGAD, BANK. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({
     status: 201,
     description: 'Catalog order created successfully',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires CASHIER or ADMIN role',
   })
   @ApiResponse({
     status: 400,
@@ -69,17 +79,26 @@ export class OrdersController {
   }
 
   @Post('custom')
+  @Roles('ADMIN', 'CASHIER')
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Custom order created')
   @ApiOperation({
-    summary: 'Create custom / ad-hoc order',
+    summary: '[ADMIN, CASHIER] Create custom / ad-hoc order',
     description:
-      'High-velocity manual checkout for unlisted items and ad-hoc sales, bypassing catalog lookup and inventory decrement. Supports payment types: COD, BKASH, NAGAD, BANK.',
+      'High-velocity manual checkout for unlisted items and ad-hoc sales, bypassing catalog lookup and inventory decrement. Supports payment types: COD, BKASH, NAGAD, BANK. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({
     status: 201,
     description: 'Custom order created successfully',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires CASHIER or ADMIN role',
   })
   @ApiResponse({
     status: 400,
@@ -98,11 +117,18 @@ export class OrdersController {
   }
 
   @Get()
+  @Roles('ADMIN', 'CASHIER', 'SUPER_ADMIN')
   @ResponseMessage('Orders loaded')
   @ApiOperation({
-    summary: 'List unified orders',
+    summary: '[ADMIN, CASHIER, SUPER_ADMIN] List unified orders',
     description:
-      'Retrieve paginated orders across both CATALOG and CUSTOM channels, scoped by business tenant and optional location, status, range, or search filters.',
+      'Retrieve paginated orders across both CATALOG and CUSTOM channels, scoped by business tenant and optional location, status, range, or search filters. Accessible by ADMIN, CASHIER, and SUPER_ADMIN.',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    type: String,
+    description: 'Tenant business UUID (Required for Super Admin; optional for Admin with owned business)',
   })
   @ApiQuery({
     name: 'locationId',
@@ -113,14 +139,36 @@ export class OrdersController {
   @ApiQuery({
     name: 'orderType',
     required: false,
-    enum: ['CATALOG', 'CUSTOM'],
-    description: 'Filter by order flow type',
+    enum: OrderType,
+    enumName: 'OrderType',
+    description: 'Filter by order flow type (CATALOG or CUSTOM)',
   })
   @ApiQuery({
     name: 'search',
     required: false,
     type: String,
     description: 'Search invoice, receipt, customer or item name',
+  })
+  @ApiQuery({
+    name: 'paymentMethod',
+    required: false,
+    enum: PaymentMethod,
+    enumName: 'PaymentMethod',
+    description: 'Filter by payment method (COD, BKASH, NAGAD, BANK)',
+  })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: OrderStatus,
+    enumName: 'OrderStatus',
+    description: 'Filter by order status (PAID, CANCELLED, REFUNDED)',
+  })
+  @ApiQuery({
+    name: 'range',
+    required: false,
+    enum: ['today', 'yesterday', 'weekly', 'monthly'],
+    enumName: 'OrderDateRange',
+    description: 'Filter orders by period range',
   })
   @ApiQuery({
     name: 'page',
@@ -137,6 +185,10 @@ export class OrdersController {
     example: 20,
   })
   @ApiResponse({ status: 200, description: 'Orders loaded successfully' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   async getOrders(
     @CurrentUser() actor: AccessTokenPayload,
     @Query() query: GetOrdersQueryDto,
@@ -159,14 +211,24 @@ export class OrdersController {
 
   // Legacy route support
   @Post()
+  @Roles('ADMIN', 'CASHIER')
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Order completed')
   @ApiOperation({
-    summary: 'Legacy checkout order',
-    description: 'Backwards-compatible single-route checkout endpoint.',
+    summary: '[ADMIN, CASHIER] Legacy checkout order',
+    description:
+      'Backwards-compatible single-route checkout endpoint. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({ status: 201, description: 'Order completed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires CASHIER or ADMIN role',
+  })
   async checkout(
     @CurrentUser() actor: AccessTokenPayload,
     @Body() dto: CreateOrderDto,

@@ -15,6 +15,7 @@ import {
   ApiBody,
   ApiConsumes,
   ApiOperation,
+  ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -42,9 +43,11 @@ export class VariantImageController {
 
   @Post(':variantId/profile-image')
   @ApiOperation({
-    summary: 'Upload / update variant profile hero image',
-    description: 'Uploads and links primary display image for the variant.',
+    summary: '[ADMIN] Upload / update variant profile hero image',
+    description:
+      'Uploads and links primary display image for the variant. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'variantId', description: 'Variant ID' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
@@ -55,6 +58,11 @@ export class VariantImageController {
     },
   })
   @ApiResponse({ status: 200, description: 'Variant image updated' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @UseInterceptors(FileInterceptor('file', imageUploadOptions))
   @ResponseMessage('Variant image updated')
@@ -68,10 +76,17 @@ export class VariantImageController {
 
   @Delete(':variantId/profile-image')
   @ApiOperation({
-    summary: 'Remove variant profile hero image',
-    description: 'Clears primary display image for the variant.',
+    summary: '[ADMIN] Remove variant profile hero image',
+    description:
+      'Clears primary display image for the variant. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'variantId', description: 'Variant ID' })
   @ApiResponse({ status: 200, description: 'Variant image removed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @ResponseMessage('Variant image removed')
   clearProfileImage(
@@ -83,10 +98,17 @@ export class VariantImageController {
 
   @Get(':variantId/images')
   @ApiOperation({
-    summary: 'List variant gallery images',
-    description: 'Returns gallery image records associated with variant.',
+    summary: '[ADMIN] List variant gallery images',
+    description:
+      'Returns gallery image records associated with variant. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'variantId', description: 'Variant ID' })
   @ApiResponse({ status: 200, description: 'Variant images loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ResponseMessage('Variant images loaded')
   list(
     @CurrentUser() admin: AccessTokenPayload,
@@ -97,9 +119,11 @@ export class VariantImageController {
 
   @Post(':variantId/images')
   @ApiOperation({
-    summary: 'Upload multiple gallery images for variant',
-    description: 'Uploads up to MAX_VARIANT_IMAGES to the variant gallery.',
+    summary: '[ADMIN] Upload multiple gallery images for variant',
+    description:
+      'Uploads up to MAX_VARIANT_IMAGES to the variant gallery. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'variantId', description: 'Variant ID' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
@@ -113,6 +137,11 @@ export class VariantImageController {
     },
   })
   @ApiResponse({ status: 201, description: 'Variant images uploaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @UseInterceptors(
     FilesInterceptor('images', MAX_VARIANT_IMAGES, imageUploadOptions),
   )
@@ -127,10 +156,18 @@ export class VariantImageController {
 
   @Delete(':variantId/images/:imageId')
   @ApiOperation({
-    summary: 'Remove variant gallery image by image ID',
-    description: 'Deletes image from media storage and detaches from variant.',
+    summary: '[ADMIN] Remove variant gallery image by image ID',
+    description:
+      'Deletes image from media storage and detaches from variant. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'variantId', description: 'Variant ID' })
+  @ApiParam({ name: 'imageId', description: 'Image ID' })
   @ApiResponse({ status: 200, description: 'Variant image removed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({ status: 404, description: 'Image or variant not found' })
   @ResponseMessage('Variant image removed')
   removeImage(

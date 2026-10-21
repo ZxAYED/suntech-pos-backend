@@ -1,6 +1,6 @@
 # SunTech POS: Master Backend Architecture & API Specification
 
-> **Version:** 2.0.0  
+> **Version:** 2.1.0  
 > **Framework:** NestJS 11 + Express + Prisma ORM 6 + PostgreSQL 16  
 > **Status:** Production-Ready Core  
 > **Single Source of Truth:** Documents all architectural guardrails, data contracts, security mechanics, and edge case behaviors across all backend services.
@@ -59,22 +59,26 @@
 
 ### 1.4 Cryptography & Authentication Security
 
+- **Pre-Login Account Status Guard:**
+  - The authentication pipeline checks `user.deletedAt !== null` or `user.status !== AccountStatus.ACTIVE` (`SUSPENDED`, `REJECTED`, `PENDING_APPROVAL`) **prior** to running `bcrypt.compare()`.
+  - Rejects inactive or suspended accounts immediately (`403 Forbidden: "Account is suspended/pending"`), thwarting timing side-channel attacks, hash-burning denial-of-service, and credential enumeration against suspended accounts.
 - **Password Hashing:**
   - Uses `bcrypt` with `BCRYPT_ROUNDS = 10`.
-  - Protects against timing attacks using `bcrypt.compare()` constant-time checks.
   - Passwords must meet minimum complexity requirements (min 8 chars, uppercase, lowercase, number, special char).
 - **One-Time Passwords (OTP):**
   - Generated with cryptographically secure pseudo-random numbers via Node.js `crypto.randomInt(100000, 1000000).toString()` (6-digit numeric OTP).
   - Plaintext OTP is **never** saved in the database; it is hashed with `bcrypt` (`resetOtpHash`) and verified with `bcrypt.compare()`.
   - Strictly expires in 15 minutes (`OTP_TTL_MS = 15 * 60 * 1000`).
-- **JWT Token Lifecycles & Claims:**
+  - Cashier password resets are orchestrated directly by Store Admins via `PATCH /users/cashiers/:id` since cashiers may lack personal external emails.
+- **JWT Token Lifecycles, Claims & Cookie Delivery:**
   - `JWT_ACCESS_SECRET` / `JWT_ACCESS_TTL` (default `7d`).
   - `JWT_REFRESH_SECRET` / `JWT_REFRESH_TTL` (default `30d`).
-  - Claims by Role:
-    - `SUPER_ADMIN`: `{ sub, role: 'SUPER_ADMIN' }`
-    - `ADMIN`: `{ sub, role: 'ADMIN', businessId }`
-    - `CASHIER`: `{ sub, role: 'CASHIER', publicId, businessId, locationId }`
-  - Password Reset Token: short-lived (`10m`), signed with dedicated payload `{ sub, email, purpose: 'password-reset' }`. Only accepted by `POST /auth/reset-password`.
+  - **Token Delivery:** Refresh tokens are never exposed in JSON response bodies; they are transmitted exclusively via secure HTTP-Only cookies (`refreshToken`, `httpOnly: true`, `sameSite: 'lax'`, `path: '/api/v1/auth'`).
+  - **Role Claim Rules:**
+    - `SUPER_ADMIN`: `{ sub, role: 'SUPER_ADMIN' }` (no businessId or locationId embedded).
+    - `ADMIN`: `{ sub, role: 'ADMIN' }` (no businessId or locationId embedded in token; resolved from request or DB ownership).
+    - `CASHIER`: `{ sub, role: 'CASHIER', publicId, businessId, locationId }` (strictly bounded to assigned store location).
+  - **Database Active Check on Every JWT Request:** `JwtStrategy` validates against PostgreSQL on every authenticated request that the account exists, is active (`status: ACTIVE`), and has not been soft-deleted (`deletedAt: null`).
 
 ### 1.5 Rate Limiting (`ThrottlerGuard`)
 
@@ -84,14 +88,14 @@
   - Sensitive auth routes (`/auth/login`, `/auth/register`, `/auth/forgot-password`, `/auth/verify-otp`, `/auth/reset-password`): strictly throttled to 5 requests per minute (`@Throttle({ default: { limit: 5, ttl: 60_000 } })`).
   - Excess requests receive `429 Too Many Requests` (`"ThrottlerException: Too Many Requests"`).
 
-### 1.6 Salary Masking Interceptor (`SalaryMaskingInterceptor`)
+### 1.6 Management Masking Interceptor (`SalaryMaskingInterceptor`)
 
 - **File:** [`src/common/interceptors/salary-masking.interceptor.ts`](file:///d:/Project/SuntechPOS-backend/src/common/interceptors/salary-masking.interceptor.ts)
-- **Rule:** Cashiers must never observe salaries in any API response.
+- **Rule:** Cashiers must never observe salaries, wholesale costs, margins, or inventory value in any API response.
 - **Mechanism:**
   - Recursively walks response payloads (objects, arrays, nested relations).
-  - Whenever `request.user?.role === Role.CASHIER`, strips `monthlySalary` completely from the serialized JSON payload.
-  - Verified across direct user lookups, staff lists, and embedded relations.
+  - Whenever `request.user?.role === Role.CASHIER`, strips management-only keys: `monthlySalary`, `costPrice`, `marginPercent`, `inventoryValue`, `salesRevenue`, `salesCount`.
+  - For all roles, strips soft-delete suffixes matching `/__del_\d+$/` from all serialized string values so deleted staff, categories, or items never render with internal deletion timestamps in historical receipts or reports.
 
 ### 1.7 Integer Currency Discipline & Overflow Protection
 
@@ -154,34 +158,42 @@
 
 - **Files:** [`prisma/seed.ts`](file:///d:/Project/SuntechPOS-backend/prisma/seed.ts), [`src/admin/seed.service.ts`](file:///d:/Project/SuntechPOS-backend/src/admin/seed.service.ts).
 - **Execution:**
-  - CLI: `npm run prisma:seed` or `npx prisma db seed`.
+  - CLI: `npm run seed` or `npx prisma db seed`.
   - Runtime Bootstrap: `SeedService` runs on `OnModuleInit` if `process.env.NODE_ENV !== 'test'` and no `SUPER_ADMIN` exists in the database.
-- **Seeded Entities (Idempotent Upserts):**
-  1. `SUPER_ADMIN`: `superadmin@suntech.pos` (`ADM-SUPER`).
-  2. `ADMIN`: `admin@suntechpos.bd` (`ADM-8X9B2`).
-  3. `Business`: `"SunTech Retail"`.
-  4. `Location`: `"Uttara Doyel Branch"`.
-  5. `CASHIER`: `Alex Rivera` (`CSH-UTT01`, monthlySalary: 35000) assigned to `"Uttara Doyel Branch"`.
+- **Environment-Driven Bootstrapping:**
+  1. `SUPER_ADMIN`: Configured strictly via `SUPER_ADMIN_EMAIL` and `SUPER_ADMIN_PASSWORD` in `.env`.
+  2. Legacy test credentials (`superadmin@suntech.pos`, `admin@suntechpos.bd`, `CSH-UTT01`) are automatically purged from the database on seed execution.
+  3. Optional development stores/cashiers can be initialized via `DEFAULT_ADMIN_EMAIL`, `DEFAULT_ADMIN_PASSWORD`, and `DEFAULT_CASHIER_PASSWORD`. No plaintext credentials are ever stored in the codebase or exposed in Swagger documentation.
 
-### 1.13 Strict Advance Ledger Salary Cap & Cash Drawer Availability
+### 1.13 Strict Advance Ledger Salary Cap & Monthly Payroll Lockout
 
 - **Files:** [`src/hr/advance.service.ts`](file:///d:/Project/SuntechPOS-backend/src/hr/advance.service.ts), [`src/shifts/shift.service.ts`](file:///d:/Project/SuntechPOS-backend/src/shifts/shift.service.ts), [`src/hr/payroll.service.ts`](file:///d:/Project/SuntechPOS-backend/src/hr/payroll.service.ts).
 - **Hard Financial Constraint:** Total pending advances for an employee in the current payroll month can **never** exceed their `monthlySalary`:
   ```ts
   currentPendingAdvances + dto.amount <= monthlySalary;
   ```
+- **Salary & Settled Payroll Validation:**
+  - Salary advances act as emergency loans capped by `monthlySalary`.
+  - Employees with `monthlySalary <= 0` are blocked with `400 Bad Request: "Employee has no valid monthly salary configured"`.
+  - If the employee's payroll record for the current month is already marked as `PAID`, advance issuance is blocked with `400 Bad Request: "Payroll for current month is already settled"`.
+- **Serializable Concurrency Protection:**
+  - Both `AdvanceService.create` and `ShiftService.addAdvance` run inside `Serializable` database isolation transactions (`prisma.$transaction(..., { isolationLevel: 'Serializable' })`), eliminating race conditions where concurrent requests could exceed salary caps.
 - **Enforcement Points:**
-  1. **`AdvanceService.create`:** Calculates current UTC month payroll window (`payrollPeriod`), sums existing `PENDING` advances for that cashier, and throws `400 Bad Request: "Advance amount (${dto.amount}) exceeds remaining monthly salary limit (${remaining})"` if exceeded. If the cashier has an open register shift, links `shiftId` automatically.
-  2. **`ShiftService.addAdvance`:** Evaluates the identical salary cap. Additionally verifies cash drawer availability: `amount <= expectedCash`. Rejects with `400 Bad Request: "Advance amount exceeds physical cash available in drawer"` if drawer lacks cash.
+  1. **`AdvanceService.create`:** Calculates current UTC month payroll window (`payrollPeriod`), verifies `monthlySalary > 0`, checks for settled payroll, sums existing `PENDING` advances, and throws `400 Bad Request` if exceeded. If the cashier has an open register shift, links `shiftId` automatically.
+  2. **`ShiftService.addAdvance`:** Evaluates the identical salary cap and settled payroll checks within the open shift's serialized transaction.
   3. **`PayrollService.process`:** Settle payroll throws `400 Bad Request: "Total advances cannot exceed base salary"` if deductions exceed base salary, guaranteeing `netPaid >= 0`.
 
 ### 1.14 Dhaka Timezone Shift Auto-Close & Drawer Refund Accounting
 
 - **Files:** [`src/shifts/shift.service.ts`](file:///d:/Project/SuntechPOS-backend/src/shifts/shift.service.ts), [`src/orders/refund.service.ts`](file:///d:/Project/SuntechPOS-backend/src/orders/refund.service.ts).
 - **Timezone Integrity:** Shift day boundaries are evaluated strictly in `Asia/Dhaka` time using `Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' })`. A shift opened on a prior calendar day in Dhaka triggers the human-error auto-close protocol.
-- **Refund Drawer Deductions:**
-  - When computing shift cash sales (`cashSales`), includes COD orders with `status: { in: [PAID, REFUNDED] }` and subtracts all `Refund` amounts issued against those COD orders.
-  - `RefundService.create`: If order becomes fully refunded, updates `Order.status = REFUNDED`. For COD orders linked to a shift, decrements `ShiftSession.cashCollected`.
+- **Variance Protection (Same-Day Anti-Tamper):**
+  - Cashiers are strictly blocked from triggering auto-close on same-day shifts to wipe out drawer discrepancies or cash variance. Auto-closing shifts on the same Dhaka calendar day is restricted exclusively to `ADMIN`.
+- **Refund Drawer Deductions & Multi-Branch Restock:**
+  - `RefundService.create`: If order becomes fully refunded, updates `Order.status = REFUNDED`.
+  - For COD orders linked to a shift, decrements `ShiftSession.cashCollected` **only if the shift session is currently OPEN** via atomic `updateMany({ where: { id: shiftId, status: 'OPEN' } })`. Closed historical shifts remain immutable.
+  - Automatically restocks inventory across both global `Variant.stock` and branch-scoped `LocationStock` (`increment`), and logs a `StockTransaction` with the order's `locationId`.
+  - `ShiftService.computeShiftMetrics`: Shift drawer reconciliations only deduct refunds that were issued before or at `closedAt`, preventing post-close refunds from distorting historical shift records.
 
 ### 1.15 OpenAPI / Swagger Interactive Documentation
 
@@ -196,6 +208,55 @@
 
 - **Prisma UUID Standard:** All Prisma models utilize `@default(uuid())` for entity primary keys (`User`, `Business`, `Location`, `Category`, `Product`, `Variant`, `ShiftSession`, `EmployeeAdvance`, `Refund`, `Order`, `OrderLine`, etc.). All DTOs validate IDs using `@IsEntityId()` (`@IsString() @MinLength(1) @MaxLength(64)`), ensuring clean interoperability with standard UUIDv4 strings.
 - **ValidationPipe Whitelist:** All query and mutation DTOs are decorated with `@IsString()`, `@IsInt()`, etc., preventing `ValidationPipe({ whitelist: true })` from silently stripping query parameters such as `locationId`, `search`, and `range`.
+
+### 1.17 Immutable Audit Logging (`AuditLog` & `AuditService`)
+
+- **Files:** [`src/common/audit/audit.service.ts`](file:///d:/Project/SuntechPOS-backend/src/common/audit/audit.service.ts), `prisma/schema/pos.prisma`.
+- **Database Model:** `AuditLog` table with fields `id`, `businessId`, `actorId`, `action`, `entityType`, `entityId`, `metadata` (JSON), `createdAt`.
+- **Monitored Governance Actions:**
+  - `BRANCH_REASSIGNMENT`: Captures cashier transfers between store locations with previous and new `locationId`.
+  - `ADMIN_PASSWORD_RESET`: Captures store admin updating a cashier's credentials.
+  - `SALARY_UPDATE`: Captures base monthly salary adjustments.
+  - `ROLE_CHANGE`: Captures staff role promotions/demotions.
+  - `BUSINESS_STATUS_CHANGE`: Captures platform super admin approvals/suspensions.
+
+### 1.18 Asia/Dhaka Timezone Boundary Standardization
+
+- **File:** [`src/common/utils/timezone.util.ts`](file:///d:/Project/SuntechPOS-backend/src/common/utils/timezone.util.ts).
+- **Rule:** Every analytics period, shift day boundary, payroll month, and transaction log filter is calculated relative to Bangladesh Standard Time (`Asia/Dhaka`, UTC+6).
+- **Functions:** `getDhakaRange(range)` (`today`, `yesterday`, `weekly`, `monthly`), `getDhakaPeriod(range)` (`daily`, `weekly`, `monthly`, `quarterly`), `getDhakaMonthRange(year, month)`.
+- Eliminates multi-hour boundary skew that previously occurred when servers ran on UTC while stores operated in Dhaka.
+
+### 1.19 Catalog Active Entity Governance (`isActive`)
+
+- **Models:** `Category`, `Product`, `Variant` include `isActive Boolean @default(true)`.
+- **Role Visibility Filter:**
+  - Cashiers (`Role.CASHIER`) are strictly filtered to only query active catalog items (`where: { isActive: true }`). Inactive products and discontinued variants cannot be rung up at checkout.
+  - Admins can query all items, filter by `isActive`, and toggle active status via `PATCH` endpoints.
+
+### 1.20 Refund Drawer Historical Integrity & Dynamic Payout Routing
+
+- **Files:** [`src/orders/refund.service.ts`](file:///d:/Project/SuntechPOS-backend/src/orders/refund.service.ts), `prisma/schema/pos.prisma`.
+- **Rule:** Closed historical shifts are immutable and must never have their `cashCollected` decremented when refunds occur days or weeks later.
+- **Payout Routing:**
+  - Refunds include `payoutShiftId` linking to the cashier's currently active open shift session.
+  - Only active open shifts have their drawer balance adjusted for cash payouts. If no shift is open or refund was processed on digital payment, historical shift floats remain uncorrupted.
+
+### 1.21 Multi-Branch Inventory Tracking & Cost Snapshots
+
+- **Files:** [`src/catalog/variant.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/variant.service.ts), [`src/catalog/product.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/product.service.ts), [`src/catalog/category.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/category.service.ts), [`src/orders/order.service.ts`](file:///d:/Project/SuntechPOS-backend/src/orders/order.service.ts), `prisma/schema/pos.prisma`, `prisma/schema/tenant.prisma`.
+- **`LocationStock` Architecture:**
+  - Tracks physical inventory per branch using the composite key `@@id([variantId, locationId])`.
+  - Global `Variant.stock` represents the organization-wide total, while `LocationStock.stock` tracks quantities at individual store branches.
+  - Decremented atomically at checkout (`OrdersService.executeCatalogOrder`) and incremented during returns (`RefundService.create`).
+  - Stock transfer transactions include explicit `locationId` on `StockTransaction` for complete audit trails.
+- **Branch-Scoped Catalog Views:**
+  - Cashiers automatically view catalog stock scoped to their branch (`user.locationId`).
+  - Admins can query branch-specific stock by passing `locationId` in query parameters.
+- **Order Line Historical Snapshots:**
+  - `OrderLine` snapshots both `unitCost` (from `Variant.costPrice` at time of sale) and `categoryName` (from `Category.name` at time of sale).
+  - Profitability and COGS reporting in `ReportService` computes true gross profit `(unitPrice - unitCost) * quantity` even if future catalog prices change.
+  - Soft-delete suffixes (`/__del_\d+$/`) on category names are cleansed during reporting and in responses.
 
 ---
 
@@ -395,12 +456,17 @@ erDiagram
 
 - **Access:** `@Roles(Role.ADMIN)`
 - **DTO:** `fullName?: string`, `phoneNumber?: string`, `locationId?: string`, `monthlySalary?: number`, `password?: string`.
-- **Behavior:** Updates staff details, reassigns location, adjusts base salary, or hashes and resets cashier password (enabling recovery for cashiers with synthetic internal emails).
+- **Behavior & Edge Cases:**
+  - Updates staff details, reassigns location, adjusts base salary, or hashes and resets cashier password (enabling recovery for cashiers with synthetic internal emails).
+  - **Branch Reassignment Guard:** If `locationId` is being changed, verifies whether the cashier has an active `OPEN` shift. If an open shift exists, rejects with `409 Conflict: "Cannot reassign branch location while the cashier has an active open shift. Please close the shift first."`.
+  - **Audit Logging:** Emits immutable `AuditLog` records for `BRANCH_REASSIGNMENT`, `ADMIN_PASSWORD_RESET`, or `SALARY_UPDATE`.
 
 #### `DELETE /users/cashiers/:id`
 
 - **Access:** `@Roles(Role.ADMIN)`
-- **Behavior:** Soft-deletes cashier account (`deletedAt = new Date()`).
+- **Behavior & Edge Cases:**
+  - Soft-deletes cashier account (`deletedAt = new Date()`, `status = SUSPENDED`).
+  - **Shift Lock Guard:** Throws `409 Conflict: "Cannot delete a cashier with an active open shift"` if the cashier currently has an open shift session.
 
 ---
 
@@ -410,28 +476,31 @@ erDiagram
 
 - `GET /catalog/categories`: Allowed for `ADMIN`, `CASHIER`.
   - Query: `search?: string`.
+  - Cashiers strictly filtered to `isActive: true`.
   - Returns category tree with aggregated analytics: `productsCount`, `activeSkus`, `totalUnits`, `inventoryValue`, `salesCount`, `salesRevenue`.
 - `POST /catalog/categories` (`ADMIN`): Creates category. Unique on `name` within business.
-- `PATCH /catalog/categories/:id` (`ADMIN`): Updates name/description.
+- `PATCH /catalog/categories/:id` (`ADMIN`): Updates name, description, and `isActive` toggle.
 - `DELETE /catalog/categories/:id` (`ADMIN`): Soft delete suffixes `name` and `slug` with `__del_${timestamp}`.
 
 #### Products (`/catalog/products`)
 
 - `GET /catalog/products`: Allowed for `ADMIN`, `CASHIER`.
   - Query: `categoryId?: string`, `search?: string` (matches product name, description, variant SKU, or barcode).
+  - Cashiers strictly filtered to `isActive: true`.
   - Returns products with nested active variants and category info.
 - `POST /catalog/products` (`ADMIN`): Creates product within business and assigns optional `categoryId`.
-- `PATCH /catalog/products/:id` (`ADMIN`): Updates product details.
+- `PATCH /catalog/products/:id` (`ADMIN`): Updates product details including `isActive` toggle.
 - `DELETE /catalog/products/:id` (`ADMIN`): Soft delete suffixes `name` with `__del_${timestamp}`.
 
 #### Variants & Inventory (`/catalog/variants`)
 
 - `GET /catalog/variants`: Allowed for `ADMIN`, `CASHIER`.
   - Query: `categoryId?: string`, `productId?: string`, `search?: string`, `lowStockOnly?: boolean`.
+  - Cashiers strictly filtered to `isActive: true` on both variant and parent product.
   - Calculates `marginPercent = Math.round(((sellingPrice - costPrice) / sellingPrice) * 100)`.
   - `lowStockOnly=true` strictly filters items with `stock <= 5`.
 - `POST /catalog/variants` (`ADMIN`): Creates variant with `sku` (auto-generated or custom), `barcode`, `sellingPrice`, `costPrice`, `stock`.
-- `PATCH /catalog/variants/:id` (`ADMIN`): Updates pricing, barcode, or stock.
+- `PATCH /catalog/variants/:id` (`ADMIN`): Updates pricing, barcode, stock, and `isActive` status.
 - `DELETE /catalog/variants/:id` (`ADMIN`): Soft delete suffixes `sku` and non-null `barcode` with `__del_${timestamp}`.
 
 ---
@@ -473,9 +542,10 @@ erDiagram
   - `amount`: `@IsInt()`, `@Min(1)`
   - `reason`: `@IsString()`, `@IsNotEmpty()`
 - **Guardrails & Invariants:**
-  1. **Strict Salary Cap:** Queries cashier's `monthlySalary` and current month's `PENDING` advances. If `currentPendingAdvances + amount > cashier.monthlySalary`, rejects immediately with `400 Bad Request: "Advance amount exceeds remaining monthly salary limit"`.
-  2. **Physical Cash Drawer Limit:** Computes current shift expected drawer cash (`expectedCash`). If `amount > expectedCash`, rejects immediately with `400 Bad Request: "Advance amount exceeds physical cash available in drawer"`.
-  3. Records advance directly against the shift drawer and employee ledger.
+  1. **Strict Salary Cap & Ineligibility:** If cashier has no salary or `monthlySalary <= 0`, rejects with `400 Bad Request: "Employee is not eligible for advances (monthly salary not configured or zero)"`.
+  2. **Monthly Limit:** Queries cashier's `monthlySalary` and current month's `PENDING` advances. If `currentPendingAdvances + amount > cashier.monthlySalary`, rejects immediately with `400 Bad Request: "Advance amount exceeds remaining monthly salary limit"`.
+  3. **Physical Cash Drawer Limit:** Computes current shift expected drawer cash (`expectedCash`). If `amount > expectedCash`, rejects immediately with `400 Bad Request: "Advance amount exceeds physical cash available in drawer"`.
+  4. **Serializable Concurrency:** Executed in a `Serializable` database transaction to prevent simultaneous double-advance race conditions.
 
 #### `GET /shifts`
 
@@ -489,7 +559,8 @@ erDiagram
 
 #### `POST /orders/catalog`
 
-- **Access:** `@Roles(Role.CASHIER, Role.ADMIN, Role.SUPER_ADMIN)` (`@Idempotent()`)
+- **Access:** `@Roles(Role.ADMIN, Role.CASHIER)` (`@Idempotent()`)
+- **Super Admin Restriction:** Super Admins are strictly prohibited from transacting sales; only tenant Admins and Cashiers can execute retail checkouts.
 - **DTO Validation:**
   - `lines`: Array of `CatalogOrderLineItemDto`:
     - `variantId`: `@IsString()`, `@MinLength(1)`, `@MaxLength(64)` (CUID)
@@ -501,7 +572,7 @@ erDiagram
   - `shiftId?: string`: `@IsOptional()`, `@IsString()`, `@MinLength(1)`, `@MaxLength(64)`
   - `customerName?: string`, `customerPhone?: string`, `notes?: string`
 - **Transaction Execution:**
-  1. **DRY Execution Context (`resolveOrderExecutionContext`):** Centralizes user lookup, location verification, and shift ownership checks (`shift.locationId === locationId` and `shift.cashierId === user.id` for Cashiers) across both catalog and custom orders.
+  1. **DRY Execution Context (`resolveOrderExecutionContext`):** Centralizes user lookup, location verification, and shift ownership checks. **Strict Location Alignment:** Throws `403 Forbidden: "Active shift belongs to a different branch location. Orders cannot cross branch boundaries."` if `activeShift.locationId !== locationId`.
   2. **Active Stock Check:** Queries variants and validates active stock: throws `400 Bad Request` if `variant.stock < line.quantity`.
   3. **Atomic Stock Decrement:** Decrements variant stock atomically and writes `StockTransaction(type: SALE)`.
   4. **Invoice Assign & P2034 Conflict Retry:** Generates unique `invoiceNumber` (`INV-YYYYMMDD-XXXX`). Automatically retries up to `INVOICE_ATTEMPTS = 3` on PostgreSQL transaction serialization conflicts (`P2034`) before throwing `409 Conflict`.
@@ -510,18 +581,8 @@ erDiagram
 
 #### `POST /orders/custom`
 
-- **Access:** `@Roles(Role.CASHIER, Role.ADMIN, Role.SUPER_ADMIN)` (`@Idempotent()`)
-- **DTO Validation:**
-  - `lines`: Array of `CustomOrderLineItemDto`:
-    - `productName`: `@IsString()`, `@IsNotEmpty()`
-    - `variantName?: string`: `@IsOptional()`, `@IsString()`
-    - `quantity`: `@IsInt()`, `@Min(1)`
-    - `unitPrice`: `@IsInt()`, `@Min(0)`
-  - `paymentMethod` (or `paymentType`): `COD` | `BKASH` | `NAGAD` | `BANK`
-  - `tenderedAmount`: `@IsInt()`, `@Min(0)`
-  - `locationId?: string`, `shiftId?: string`
-  - `customerName?: string`, `customerPhone?: string`, `notes?: string`
-- **Behavior:** Handles unlisted retail accessories, repair services, or custom ad-hoc orders. Bypasses inventory stock deduction while recording full financial and shift ledger data.
+- **Access:** `@Roles(Role.ADMIN, Role.CASHIER)` (`@Idempotent()`)
+- **Behavior:** Handles unlisted retail accessories, repair services, or custom ad-hoc orders. Bypasses inventory stock deduction while strictly enforcing shift-location alignment and recording full financial and shift ledger data.
 
 #### `GET /orders`
 
@@ -531,8 +592,9 @@ erDiagram
   - `paymentMethod?: PaymentMethod`
   - `status?: OrderStatus`
   - `orderType?: OrderType`
-  - `range?: 'today' | 'yesterday' | 'weekly' | 'monthly'`
+  - `range?: 'today' | 'yesterday' | 'weekly' | 'monthly'` (standardized on Asia/Dhaka calendar time)
   - `locationId?: string`
+  - `businessId?: string` (for multi-tenant admin filtering)
   - `page?: number = 1`, `limit?: number = 20`
 
 #### `POST /orders/:id/refunds`
@@ -543,12 +605,12 @@ erDiagram
   - `items`: Array of `RefundLineDto`:
     - `orderItemId`: `@IsString()`, `@MinLength(1)` (OrderLine CUID)
     - `quantity`: `@IsInt()`, `@Min(1)`
-- **Behavior & Drawer Math:**
+- **Behavior & Drawer Safety:**
   - Validates returned quantities do not exceed unrefunded order line quantities.
   - Restores variant inventory stock and records `StockTransaction(type: REFUND)`.
   - Creates `Refund` record with auditor `processedById = actor.sub`.
   - If 100% of order lines are returned, marks `Order.status = REFUNDED`.
-  - **COD Drawer Sychronization:** If the order was paid via `COD` and has an associated `shiftId`, decrements `ShiftSession.cashCollected` atomically.
+  - **Settled Shift Protection:** If the order was paid via `COD`, historical closed shifts are NEVER decremented. If a cashier has an active open shift at the refund location, the refund cash payout is decremented from the active shift float and linked via `payoutShiftId`.
 
 ---
 
@@ -556,12 +618,16 @@ erDiagram
 
 #### `POST /advances`
 
-- **Access:** `@Roles(Role.ADMIN, Role.CASHIER)` (`@Idempotent()`)
+- **Access:** `@Roles(Role.ADMIN)` (`@Idempotent()`)
+- **Segregation of Duties:** Off-register administrative advances are strictly restricted to `ADMIN` users. Cashiers must use `POST /shifts/advances` for register drawer advances.
 - **DTO Validation:**
   - `amount`: `@IsInt()`, `@Min(1)`
+  - `cashierId`: `@IsString()`
   - `reason?: string`: `@IsOptional()`, `@IsString()`
-  - `cashierId?: string`: `@IsOptional()`, required for Admin
-- **Behavior:** Enforces the strict salary cap: `currentPendingAdvances + dto.amount <= cashier.monthlySalary`. Automatically links caller's active open `shiftId` if request originates from Cashier.
+- **Guards & Concurrency:**
+  - Verifies employee has a configured salary (`monthlySalary > 0`); rejects with `400 Bad Request` if zero or unset.
+  - Enforces the strict salary cap: `currentPendingAdvances + dto.amount <= cashier.monthlySalary`.
+  - Wrapped inside a `Serializable` transaction to eliminate concurrent race condition bypasses.
 
 #### `GET /advances`
 
@@ -759,7 +825,7 @@ All code commits must satisfy the following zero-error verification standard:
    ```bash
    npm test
    ```
-   - _Status:_ 22 / 22 test suites passing, 129 / 129 tests passing (100% green).
+   - _Status:_ 22 / 22 test suites passing, 144 / 144 tests passing (100% green).
 3. **TypeScript Compilation:**
    ```bash
    npm run build

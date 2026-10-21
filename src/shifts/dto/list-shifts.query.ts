@@ -12,6 +12,7 @@ export class ListShiftsQueryDto {
 
   @ApiPropertyOptional({
     enum: ShiftStatus,
+    enumName: 'ShiftStatus',
     description: 'Filter by shift status',
   })
   @IsOptional()

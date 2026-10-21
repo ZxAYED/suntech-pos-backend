@@ -10,8 +10,9 @@ export class AppController {
 
   @Get()
   @ApiOperation({
-    summary: 'Health check probe',
-    description: 'Returns base system health status.',
+    summary: '[PUBLIC] Health check probe',
+    description:
+      'Returns base system health status. No authentication required.',
   })
   @ApiResponse({ status: 200, description: 'Service is running' })
   @ResponseMessage('Service is running')

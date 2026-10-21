@@ -15,8 +15,11 @@ import {
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
+  ApiBody,
   ApiConsumes,
   ApiOperation,
+  ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -48,13 +51,19 @@ export class TenantController {
 
   @Post('business')
   @ApiOperation({
-    summary: 'Create business tenant profile',
-    description: 'Initializes business profile for authenticated store admin.',
+    summary: '[ADMIN] Create business tenant profile',
+    description:
+      'Initializes business profile for authenticated store admin. Requires ADMIN role.',
   })
   @ApiResponse({
     status: 201,
     description: 'Business created, new JWT token returned',
   })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
     description: 'User already has a business registered',
@@ -72,10 +81,15 @@ export class TenantController {
 
   @Get('business')
   @ApiOperation({
-    summary: 'Get business tenant profile',
-    description: 'Returns business profile details for the active business.',
+    summary: '[ADMIN, CASHIER] Get business tenant profile',
+    description:
+      'Returns business profile details for the active business. Accessible by ADMIN and CASHIER.',
   })
   @ApiResponse({ status: 200, description: 'Business profile returned' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Business profile loaded')
   getBusiness(@CurrentUser() actor: AccessTokenPayload) {
@@ -85,11 +99,16 @@ export class TenantController {
 
   @Post('locations')
   @ApiOperation({
-    summary: 'Create branch location',
+    summary: '[ADMIN] Create branch location',
     description:
-      'Creates a new branch location scoped to the business (tenant-scoped unique name).',
+      'Creates a new branch location scoped to the business (tenant-scoped unique name). Requires ADMIN role.',
   })
   @ApiResponse({ status: 201, description: 'Location created' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
     description: 'Location with that name already exists in your business',
@@ -107,11 +126,27 @@ export class TenantController {
 
   @Get('locations')
   @ApiOperation({
-    summary: 'List store branch locations',
+    summary: '[ADMIN, CASHIER] List store branch locations',
     description:
-      'Returns locations for the business. Cashiers are scoped to their assigned branch.',
+      'Returns locations for the business. Cashiers are scoped to their assigned branch. Accessible by ADMIN and CASHIER.',
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter by specific branch location UUID',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiQuery({
+    name: 'search',
+    required: false,
+    description: 'Search location by branch name or address',
+    example: 'Uttara',
   })
   @ApiResponse({ status: 200, description: 'Locations list returned' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Locations loaded')
   getLocations(
@@ -129,11 +164,17 @@ export class TenantController {
 
   @Patch('locations/:id')
   @ApiOperation({
-    summary: 'Update branch location',
+    summary: '[ADMIN] Update branch location',
     description:
-      'Updates location name or address with tenant uniqueness checks.',
+      'Updates location name or address with tenant uniqueness checks. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Branch location UUID' })
   @ApiResponse({ status: 200, description: 'Location updated' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
     description: 'A location with that name already exists',
@@ -150,11 +191,17 @@ export class TenantController {
 
   @Delete('locations/:id')
   @ApiOperation({
-    summary: 'Delete branch location',
+    summary: '[ADMIN] Delete branch location',
     description:
-      'Soft-deletes location if no open shifts exist at that location.',
+      'Soft-deletes location if no open shifts exist at that location. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Branch location UUID' })
   @ApiResponse({ status: 200, description: 'Location deleted' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
     description: 'Cannot delete location with an active open shift',
@@ -170,11 +217,25 @@ export class TenantController {
 
   @Post('business/profile-image')
   @ApiOperation({
-    summary: 'Upload business logo/image',
-    description: 'Uploads and links business logo to Cloudinary.',
+    summary: '[ADMIN] Upload business logo/image',
+    description:
+      'Uploads and links business logo to Cloudinary. Requires ADMIN role.',
   })
   @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+    },
+  })
   @ApiResponse({ status: 201, description: 'Business logo uploaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @Roles(Role.ADMIN)
   @UseInterceptors(FileInterceptor('file', imageUploadOptions))
   @ResponseMessage('Business image updated')
@@ -187,10 +248,15 @@ export class TenantController {
 
   @Delete('business/profile-image')
   @ApiOperation({
-    summary: 'Remove business logo/image',
-    description: 'Deletes business logo from Cloudinary.',
+    summary: '[ADMIN] Remove business logo/image',
+    description: 'Deletes business logo from Cloudinary. Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Business logo removed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Business image removed')
   clearBusinessProfileImage(@CurrentUser() admin: AccessTokenPayload) {

@@ -1,9 +1,10 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { OrderStatus } from '@prisma/client';
+import { OrderStatus, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { requireBusinessId } from '../hr/require-business-id';
@@ -38,11 +39,35 @@ const NAME_TAKEN = 'A category with that name already exists';
 export class CategoryService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async resolveBusinessId(
+    actor: AccessTokenPayload,
+    requestedBusinessId?: string,
+  ): Promise<string> {
+    if (actor.role === Role.CASHIER) {
+      if (!actor.businessId) {
+        throw new ForbiddenException('Business context is required');
+      }
+      return actor.businessId;
+    }
+    let businessId = requestedBusinessId?.trim() || actor.businessId;
+    if (!businessId && actor.role === Role.ADMIN) {
+      const user = await this.prisma.user.findFirst({
+        where: { id: actor.sub, deletedAt: null },
+        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+      });
+      businessId = user?.businessId || user?.ownedBusiness?.id;
+    }
+    if (!businessId) {
+      throw new ForbiddenException('Create a business before continuing');
+    }
+    return businessId;
+  }
+
   async create(
     admin: AccessTokenPayload,
     dto: CreateCategoryDto,
   ): Promise<PresentedCategory> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     const name = dto.name.trim();
     await this.assertNameAvailable(businessId, name);
 
@@ -101,8 +126,9 @@ export class CategoryService {
   async list(
     admin: AccessTokenPayload,
     search?: string,
+    locationId?: string,
   ): Promise<PresentedCategory[]> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     const searchFilter = search?.trim()
       ? {
           OR: [
@@ -120,7 +146,12 @@ export class CategoryService {
       : {};
 
     const categories = await this.prisma.category.findMany({
-      where: { businessId, deletedAt: null, ...searchFilter },
+      where: {
+        businessId,
+        deletedAt: null,
+        ...(admin.role === Role.CASHIER ? { isActive: true } : {}),
+        ...searchFilter,
+      },
       select: {
         id: true,
         name: true,
@@ -138,6 +169,12 @@ export class CategoryService {
                 id: true,
                 stock: true,
                 sellingPrice: true,
+                locationStocks: {
+                  select: {
+                    locationId: true,
+                    stock: true,
+                  },
+                },
               },
             },
           },
@@ -202,11 +239,32 @@ export class CategoryService {
       }
     }
 
+    const effectiveLocationId =
+      admin.role === Role.CASHIER
+        ? admin.locationId
+        : locationId?.trim() || undefined;
+
     return categories.map((cat) => {
       const variants = cat.products.flatMap((p) => p.variants);
-      const totalUnits = variants.reduce((sum, v) => sum + v.stock, 0);
+      const getVariantStock = (v: any) => {
+        if (
+          effectiveLocationId &&
+          v.locationStocks &&
+          v.locationStocks.length > 0
+        ) {
+          const match = v.locationStocks.find(
+            (ls: any) => ls.locationId === effectiveLocationId,
+          );
+          return match ? match.stock : 0;
+        }
+        return v.stock;
+      };
+      const totalUnits = variants.reduce(
+        (sum, v) => sum + getVariantStock(v),
+        0,
+      );
       const inventoryValue = variants.reduce(
-        (sum, v) => sum + v.stock * v.sellingPrice,
+        (sum, v) => sum + getVariantStock(v) * v.sellingPrice,
         0,
       );
       const salesCount = variants.reduce(
@@ -248,7 +306,7 @@ export class CategoryService {
     admin: AccessTokenPayload,
     categoryId: string,
   ): Promise<PresentedCategory> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
 
     const cat = await this.prisma.category.findFirst({
       where: { id: categoryId, businessId, deletedAt: null },
@@ -355,7 +413,7 @@ export class CategoryService {
     categoryId: string,
     dto: UpdateCategoryDto,
   ): Promise<PresentedCategory> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     await this.findCategory(businessId, categoryId);
     const name = dto.name?.trim();
 
@@ -381,6 +439,7 @@ export class CategoryService {
           ...(dto.description !== undefined
             ? { description: dto.description.trim() || null }
             : {}),
+          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
         },
       });
 
@@ -402,7 +461,7 @@ export class CategoryService {
     admin: AccessTokenPayload,
     categoryId: string,
   ): Promise<{ id: string; deletedAt: Date }> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     const category = await this.prisma.category.findFirst({
       where: { id: categoryId, businessId, deletedAt: null },
       select: { id: true, name: true, slug: true },

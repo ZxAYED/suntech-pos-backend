@@ -14,6 +14,7 @@ import {
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -39,10 +40,16 @@ export class ProductController {
 
   @Post()
   @ApiOperation({
-    summary: 'Create product in catalog',
-    description: 'Creates a product with tenant-scoped uniqueness on name.',
+    summary: '[ADMIN] Create product in catalog',
+    description:
+      'Creates a product with tenant-scoped uniqueness on name. Requires ADMIN role.',
   })
   @ApiResponse({ status: 201, description: 'Product created' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
     description: 'Product with that name already exists in this business',
@@ -60,13 +67,17 @@ export class ProductController {
 
   @Get()
   @ApiOperation({
-    summary: 'List products with filters & pagination',
+    summary: '[ADMIN, CASHIER] List products with filters & pagination',
     description:
-      'List products with optional search, category, lowStock, and pagination. Available to Admin and Cashier.',
+      'List products with optional search, category, lowStock, and pagination. Accessible by ADMIN and CASHIER.',
   })
   @ApiResponse({
     status: 200,
     description: 'Products list and pagination meta returned',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
   })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Products loaded')
@@ -79,10 +90,16 @@ export class ProductController {
 
   @Get(':id')
   @ApiOperation({
-    summary: 'Get single product details with variants',
-    description: 'Returns product details including all non-deleted variants.',
+    summary: '[ADMIN, CASHIER] Get single product details with variants',
+    description:
+      'Returns product details including all non-deleted variants. Accessible by ADMIN and CASHIER.',
   })
+  @ApiParam({ name: 'id', description: 'Product UUID' })
   @ApiResponse({ status: 200, description: 'Product details returned' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @ApiResponse({ status: 404, description: 'Product not found' })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Product loaded')
@@ -92,10 +109,17 @@ export class ProductController {
 
   @Patch(':id')
   @ApiOperation({
-    summary: 'Update product',
-    description: 'Updates product name, description, or categoryId.',
+    summary: '[ADMIN] Update product',
+    description:
+      'Updates product name, description, or categoryId. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Product UUID' })
   @ApiResponse({ status: 200, description: 'Product updated' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
     description: 'Product with that name already exists',
@@ -112,10 +136,16 @@ export class ProductController {
 
   @Delete(':id')
   @ApiOperation({
-    summary: 'Delete product',
-    description: 'Soft-deletes product and its variants.',
+    summary: '[ADMIN] Delete product',
+    description: 'Soft-deletes product and its variants. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Product UUID' })
   @ApiResponse({ status: 200, description: 'Product deleted' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({ status: 404, description: 'Product not found' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Product removed')

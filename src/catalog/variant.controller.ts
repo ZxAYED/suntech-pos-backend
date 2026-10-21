@@ -14,6 +14,7 @@ import {
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -39,11 +40,16 @@ export class VariantController {
 
   @Post()
   @ApiOperation({
-    summary: 'Create variant in catalog',
+    summary: '[ADMIN] Create variant in catalog',
     description:
-      'Creates a product variant with tenant-scoped SKU and Barcode uniqueness.',
+      'Creates a product variant with tenant-scoped SKU and Barcode uniqueness. Requires ADMIN role.',
   })
   @ApiResponse({ status: 201, description: 'Variant created' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
     description: 'SKU or Barcode already exists in this business',
@@ -61,11 +67,15 @@ export class VariantController {
 
   @Get()
   @ApiOperation({
-    summary: 'List variants with filters',
+    summary: '[ADMIN, CASHIER] List variants with filters',
     description:
       'Accessible by both ADMIN and CASHIER. Supports filtering by category, product, search, and low stock.',
   })
   @ApiResponse({ status: 200, description: 'Variants loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Variants loaded')
   list(
@@ -77,10 +87,15 @@ export class VariantController {
 
   @Get(':id')
   @ApiOperation({
-    summary: 'Get variant details by ID',
+    summary: '[ADMIN, CASHIER] Get variant details by ID',
     description: 'Accessible by both ADMIN and CASHIER.',
   })
+  @ApiParam({ name: 'id', description: 'Variant UUID' })
   @ApiResponse({ status: 200, description: 'Variant loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Variant loaded')
@@ -90,11 +105,17 @@ export class VariantController {
 
   @Patch(':id')
   @ApiOperation({
-    summary: 'Update variant',
+    summary: '[ADMIN] Update variant',
     description:
-      'Updates variant name, prices, SKU, barcode, or stock. Admin only.',
+      'Updates variant name, prices, SKU, barcode, or stock. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Variant UUID' })
   @ApiResponse({ status: 200, description: 'Variant updated' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @ApiResponse({ status: 409, description: 'SKU or Barcode conflict' })
   @Roles(Role.ADMIN)
@@ -109,10 +130,16 @@ export class VariantController {
 
   @Delete(':id')
   @ApiOperation({
-    summary: 'Delete variant',
-    description: 'Soft-deletes a variant from catalog. Admin only.',
+    summary: '[ADMIN] Delete variant',
+    description: 'Soft-deletes a variant from catalog. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Variant UUID' })
   @ApiResponse({ status: 200, description: 'Variant removed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Variant removed')

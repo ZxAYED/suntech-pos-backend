@@ -1,3 +1,4 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
@@ -13,23 +14,43 @@ import {
 } from 'class-validator';
 
 export class OrderLineDto {
+  @ApiPropertyOptional({
+    description: 'Catalog variant ID (omit if custom item)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @IsOptional()
   @IsString()
   @MinLength(1)
   variantId?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Name of ad-hoc/custom item (required if variantId is not provided)',
+    example: 'Custom service fee',
+  })
   @ValidateIf((line: OrderLineDto) => !line.variantId?.trim())
   @IsString()
   @MinLength(1)
   @MaxLength(120)
   customItemName?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Price for custom item (in cents/paisa, required if variantId is not provided)',
+    minimum: 0,
+    example: 500,
+  })
   @ValidateIf((line: OrderLineDto) => !line.variantId?.trim())
   @Type(() => Number)
   @IsInt()
   @Min(0)
   price?: number;
 
+  @ApiProperty({
+    description: 'Quantity of items',
+    minimum: 1,
+    example: 1,
+  })
   @Type(() => Number)
   @IsInt()
   @Min(1)
@@ -37,11 +58,19 @@ export class OrderLineDto {
 }
 
 export class CreateOrderDto {
+  @ApiPropertyOptional({
+    description: 'Customer contact phone number',
+    example: '01711111111',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(40)
   customerNumber?: string;
 
+  @ApiProperty({
+    type: [OrderLineDto],
+    description: 'List of order line items',
+  })
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })

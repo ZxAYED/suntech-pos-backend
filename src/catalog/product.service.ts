@@ -1,9 +1,10 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { requireBusinessId } from '../hr/require-business-id';
@@ -21,6 +22,12 @@ const variantSelect = {
   costPrice: true,
   stock: true,
   profileImageUrl: true,
+  locationStocks: {
+    select: {
+      locationId: true,
+      stock: true,
+    },
+  },
 } satisfies Prisma.VariantSelect;
 
 const productSelect = {
@@ -52,11 +59,35 @@ const NAME_TAKEN = 'A product with that name already exists';
 export class ProductService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async resolveBusinessId(
+    actor: AccessTokenPayload,
+    requestedBusinessId?: string,
+  ): Promise<string> {
+    if (actor.role === Role.CASHIER) {
+      if (!actor.businessId) {
+        throw new ForbiddenException('Business context is required');
+      }
+      return actor.businessId;
+    }
+    let businessId = requestedBusinessId?.trim() || actor.businessId;
+    if (!businessId && actor.role === Role.ADMIN) {
+      const user = await this.prisma.user.findFirst({
+        where: { id: actor.sub, deletedAt: null },
+        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+      });
+      businessId = user?.businessId || user?.ownedBusiness?.id;
+    }
+    if (!businessId) {
+      throw new ForbiddenException('Create a business before continuing');
+    }
+    return businessId;
+  }
+
   async create(
     admin: AccessTokenPayload,
     dto: CreateProductDto,
   ): Promise<PresentedProduct> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     const name = dto.name.trim();
     await this.assertNameAvailable(businessId, name);
 
@@ -89,7 +120,7 @@ export class ProductService {
     actor: AccessTokenPayload,
     query?: ListProductsQueryDto,
   ): Promise<PresentedProduct[]> {
-    const businessId = requireBusinessId(actor);
+    const businessId = await this.resolveBusinessId(actor);
     const search = query?.search?.trim();
 
     const searchFilter = search
@@ -127,21 +158,30 @@ export class ProductService {
       where: {
         businessId,
         deletedAt: null,
+        ...(actor.role === Role.CASHIER ? { isActive: true } : {}),
         ...(query?.categoryId ? { categoryId: query.categoryId } : {}),
         ...searchFilter,
       },
       select: productSelect,
       orderBy: { name: 'asc' },
     });
-    return products.map(presentProduct);
+    const effectiveLocationId =
+      actor.role === Role.CASHIER
+        ? actor.locationId
+        : query?.locationId?.trim() || undefined;
+    return products.map((p) => presentProduct(p, effectiveLocationId));
   }
 
   async get(
     actor: AccessTokenPayload,
     productId: string,
   ): Promise<PresentedProduct> {
+    const businessId = await this.resolveBusinessId(actor);
+    const effectiveLocationId =
+      actor.role === Role.CASHIER ? actor.locationId : undefined;
     return presentProduct(
-      await this.findProduct(requireBusinessId(actor), productId),
+      await this.findProduct(businessId, productId),
+      effectiveLocationId,
     );
   }
 
@@ -150,7 +190,7 @@ export class ProductService {
     productId: string,
     dto: UpdateProductDto,
   ): Promise<PresentedProduct> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     await this.findProduct(businessId, productId);
     const name = dto.name?.trim();
 
@@ -168,6 +208,7 @@ export class ProductService {
         ? { description: dto.description.trim() || null }
         : {}),
       ...(dto.categoryId !== undefined ? { categoryId: dto.categoryId } : {}),
+      ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
     };
 
     try {
@@ -194,7 +235,7 @@ export class ProductService {
     admin: AccessTokenPayload,
     productId: string,
   ): Promise<{ id: string; deletedAt: Date }> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     const product = await this.prisma.product.findFirst({
       where: { id: productId, businessId, deletedAt: null },
       select: { id: true, name: true },
@@ -267,11 +308,32 @@ export class ProductService {
   }
 }
 
-function presentProduct(product: ProductRow): PresentedProduct {
+export function presentProduct(
+  product: ProductRow,
+  effectiveLocationId?: string | null,
+): PresentedProduct {
   const category =
     product.category && !product.category.deletedAt
       ? { id: product.category.id, name: product.category.name }
       : null;
 
-  return { ...product, category };
+  const variants = (product.variants ?? []).map((v) => {
+    let stock = v.stock;
+    if (
+      effectiveLocationId &&
+      (v as any).locationStocks &&
+      (v as any).locationStocks.length > 0
+    ) {
+      const match = (v as any).locationStocks.find(
+        (ls: any) => ls.locationId === effectiveLocationId,
+      );
+      stock = match ? match.stock : 0;
+    }
+    return {
+      ...v,
+      stock,
+    };
+  });
+
+  return { ...product, variants, category };
 }

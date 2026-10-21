@@ -6,14 +6,15 @@ model Business {
   profileImagePublicId String?
   owner                User    @relation("BusinessOwner", fields: [ownerId], references: [id])
 
-  locations  Location[]
-  users      User[]            @relation("BusinessStaff")
-  categories Category[]
-  products   Product[]
-  variants   Variant[]
-  advances   EmployeeAdvance[]
-  shifts     ShiftSession[]
-  payroll    PayrollRecord[]
+  locations      Location[]
+  users          User[]            @relation("BusinessStaff")
+  categories     Category[]
+  products       Product[]
+  variants       Variant[]
+  locationStocks LocationStock[]
+  advances       EmployeeAdvance[]
+  shifts         ShiftSession[]
+  payroll        PayrollRecord[]
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())
@@ -27,9 +28,10 @@ model Location {
   name       String
   address    String?
 
-  users  User[]         @relation("LocationStaff")
-  shifts ShiftSession[]
-  orders Order[]
+  users          User[]            @relation("LocationStaff")
+  shifts         ShiftSession[]
+  orders         Order[]
+  locationStocks LocationStock[]
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())

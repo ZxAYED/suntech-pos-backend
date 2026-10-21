@@ -215,6 +215,31 @@ describe('UserService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
+    it('throws ConflictException when cashier has an active open shift during branch reassignment', async () => {
+      userFindFirst.mockResolvedValue({
+        id: 'csh-1',
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+        role: Role.CASHIER,
+      });
+      locationFindFirst.mockResolvedValue({
+        id: 'loc-2',
+        businessId: 'biz-1',
+      });
+      shiftSessionFindFirst.mockResolvedValue({
+        id: 'shift-1',
+        status: ShiftStatus.OPEN,
+      });
+
+      await expect(
+        service.updateCashier(
+          { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+          'csh-1',
+          { locationId: 'loc-2' },
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
     it('hashes and updates cashier password when provided by admin', async () => {
       userFindFirst.mockResolvedValue({
         id: 'csh-1',
@@ -322,6 +347,21 @@ describe('UserService', () => {
           { status: AccountStatus.SUSPENDED },
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('throws ConflictException when suspending a staff member with an active open shift', async () => {
+      shiftSessionFindFirst.mockResolvedValue({
+        id: 'shift-1',
+        status: ShiftStatus.OPEN,
+      });
+
+      await expect(
+        service.updateStatus(
+          { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+          'staff-1',
+          { status: AccountStatus.SUSPENDED },
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
     });
   });
 });

@@ -5,6 +5,14 @@ import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export class GetOrdersQueryDto {
+  @ApiPropertyOptional({
+    description:
+      'Filter by business UUID (for Admin/SuperAdmin to scope orders to a specific business. Automatically extracted from token for Cashiers)',
+  })
+  @IsOptional()
+  @IsEntityId()
+  businessId?: string;
+
   @ApiPropertyOptional({ description: 'Filter by store location ID' })
   @IsOptional()
   @IsEntityId()
@@ -12,6 +20,7 @@ export class GetOrdersQueryDto {
 
   @ApiPropertyOptional({
     enum: OrderType,
+    enumName: 'OrderType',
     description: 'Filter by order flow type (CATALOG or CUSTOM)',
   })
   @IsOptional()
@@ -28,6 +37,7 @@ export class GetOrdersQueryDto {
 
   @ApiPropertyOptional({
     enum: PaymentMethod,
+    enumName: 'PaymentMethod',
     description: 'Filter by payment method (COD, BKASH, NAGAD, BANK)',
   })
   @IsOptional()
@@ -36,6 +46,7 @@ export class GetOrdersQueryDto {
 
   @ApiPropertyOptional({
     enum: OrderStatus,
+    enumName: 'OrderStatus',
     description: 'Filter by order status (PAID, CANCELLED, REFUNDED)',
   })
   @IsOptional()
@@ -44,6 +55,7 @@ export class GetOrdersQueryDto {
 
   @ApiPropertyOptional({
     enum: ['today', 'yesterday', 'weekly', 'monthly'],
+    enumName: 'OrderDateRange',
     description: 'Filter orders by period range',
   })
   @IsOptional()

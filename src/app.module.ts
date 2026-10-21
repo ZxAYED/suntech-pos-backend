@@ -18,6 +18,7 @@ import { ReportsModule } from './reports/reports.module';
 import { ShiftModule } from './shifts/shift.module';
 import { TenantModule } from './tenant/tenant.module';
 import { UserModule } from './users/user.module';
+import { AuditModule } from './common/audit/audit.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 
@@ -41,6 +42,7 @@ import { AppService } from './app.service';
     OrdersModule,
     ReportsModule,
     HrModule,
+    AuditModule,
   ],
   controllers: [AppController],
   providers: [

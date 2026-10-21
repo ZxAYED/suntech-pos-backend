@@ -14,6 +14,8 @@ import { IdGeneratorService } from '../identity/id-generator.service';
 import { CloudinaryService } from '../media/cloudinary.service';
 import { UploadedImage } from '../media/uploaded-image';
 import { PrismaService } from '../prisma/prisma.service';
+import { Optional } from '@nestjs/common';
+import { AuditService } from '../common/audit/audit.service';
 import { CreateCashierDto } from './dto/create-cashier.dto';
 import { ListCashiersQueryDto } from './dto/list-cashiers.query';
 import { UpdateCashierDto } from './dto/update-cashier.dto';
@@ -42,6 +44,7 @@ export class UserService {
     private readonly prisma: PrismaService,
     private readonly idGenerator: IdGeneratorService,
     private readonly cloudinary: CloudinaryService,
+    @Optional() private readonly auditService?: AuditService,
   ) {}
 
   async getMe(userId: string): Promise<PresentedProfile> {
@@ -61,7 +64,7 @@ export class UserService {
     admin: AccessTokenPayload,
     query: ListCashiersQueryDto,
   ): Promise<PresentedCashier[]> {
-    const businessId = this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin, query.businessId);
     const cashiers = await this.prisma.user.findMany({
       where: {
         businessId,
@@ -124,7 +127,7 @@ export class UserService {
     admin: AccessTokenPayload,
     dto: CreateCashierDto,
   ): Promise<PresentedProfile> {
-    const businessId = this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin);
     const location = await this.prisma.location.findFirst({
       where: {
         id: dto.locationId,
@@ -178,7 +181,7 @@ export class UserService {
     cashierId: string,
     dto: UpdateCashierDto,
   ): Promise<PresentedCashier> {
-    const businessId = this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin);
 
     const cashier = await this.prisma.user.findFirst({
       where: {
@@ -193,7 +196,7 @@ export class UserService {
       throw new NotFoundException('Cashier not found');
     }
 
-    if (dto.locationId) {
+    if (dto.locationId && dto.locationId !== cashier.locationId) {
       const location = await this.prisma.location.findFirst({
         where: {
           id: dto.locationId,
@@ -204,6 +207,23 @@ export class UserService {
 
       if (!location) {
         throw new NotFoundException('Location not found');
+      }
+
+      // Block branch reassignment while cashier has an active open shift
+      if (this.prisma.shiftSession?.findFirst) {
+        const activeShift = await this.prisma.shiftSession.findFirst({
+          where: {
+            cashierId,
+            businessId,
+            status: ShiftStatus.OPEN,
+          },
+        });
+
+        if (activeShift) {
+          throw new ConflictException(
+            'Cannot reassign branch location while the cashier has an active open shift',
+          );
+        }
       }
     }
 
@@ -243,6 +263,44 @@ export class UserService {
         },
       });
 
+      if (dto.locationId && dto.locationId !== cashier.locationId) {
+        await this.auditService?.log({
+          actorId: admin.sub,
+          businessId,
+          action: 'BRANCH_REASSIGNMENT',
+          entityType: 'USER',
+          entityId: cashierId,
+          metadata: {
+            previousLocationId: cashier.locationId,
+            newLocationId: dto.locationId,
+          },
+        });
+      }
+
+      if (dto.password !== undefined) {
+        await this.auditService?.log({
+          actorId: admin.sub,
+          businessId,
+          action: 'ADMIN_PASSWORD_RESET',
+          entityType: 'USER',
+          entityId: cashierId,
+        });
+      }
+
+      if (dto.monthlySalary !== undefined && dto.monthlySalary !== cashier.monthlySalary) {
+        await this.auditService?.log({
+          actorId: admin.sub,
+          businessId,
+          action: 'SALARY_UPDATE',
+          entityType: 'USER',
+          entityId: cashierId,
+          metadata: {
+            previousSalary: cashier.monthlySalary,
+            newSalary: dto.monthlySalary,
+          },
+        });
+      }
+
       return {
         ...updated,
         email: presentEmail(updated.email),
@@ -262,7 +320,7 @@ export class UserService {
     admin: AccessTokenPayload,
     cashierId: string,
   ): Promise<{ id: string; deletedAt: Date }> {
-    const businessId = this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin);
 
     const cashier = await this.prisma.user.findFirst({
       where: {
@@ -317,12 +375,31 @@ export class UserService {
     userId: string,
     dto: UpdateUserStatusDto,
   ): Promise<PresentedProfile> {
-    const businessId = this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin);
 
     if (userId === admin.sub && dto.status !== AccountStatus.ACTIVE) {
       throw new BadRequestException(
         'You cannot suspend or reject your own admin account',
       );
+    }
+
+    if (
+      dto.status !== AccountStatus.ACTIVE &&
+      this.prisma.shiftSession?.findFirst
+    ) {
+      const activeShift = await this.prisma.shiftSession.findFirst({
+        where: {
+          cashierId: userId,
+          businessId,
+          status: ShiftStatus.OPEN,
+        },
+      });
+
+      if (activeShift) {
+        throw new ConflictException(
+          'Cannot suspend or deactivate a staff member with an active open shift',
+        );
+      }
     }
 
     const updated = await this.prisma.user.updateMany({
@@ -355,24 +432,26 @@ export class UserService {
     return this.clearProfileImage({ id: userId });
   }
 
-  setStaffProfileImage(
+  async setStaffProfileImage(
     admin: AccessTokenPayload,
     userId: string,
     file: UploadedImage,
   ): Promise<PresentedProfile> {
+    const businessId = await this.requireBusinessId(admin);
     return this.replaceProfileImage(
-      { id: userId, businessId: this.requireBusinessId(admin) },
+      { id: userId, businessId },
       file,
     );
   }
 
-  clearStaffProfileImage(
+  async clearStaffProfileImage(
     admin: AccessTokenPayload,
     userId: string,
   ): Promise<PresentedProfile> {
+    const businessId = await this.requireBusinessId(admin);
     return this.clearProfileImage({
       id: userId,
-      businessId: this.requireBusinessId(admin),
+      businessId,
     });
   }
 
@@ -443,11 +522,28 @@ export class UserService {
     }
   }
 
-  private requireBusinessId(admin: AccessTokenPayload): string {
-    if (!admin.businessId) {
+  private async requireBusinessId(
+    admin: AccessTokenPayload,
+    requestedBusinessId?: string,
+  ): Promise<string> {
+    let businessId = requestedBusinessId?.trim() || admin.businessId;
+
+    if (!businessId && admin.role === Role.ADMIN) {
+      const user = await this.prisma.user.findFirst({
+        where: { id: admin.sub, deletedAt: null },
+        select: {
+          businessId: true,
+          ownedBusiness: { select: { id: true } },
+        },
+      });
+
+      businessId = user?.businessId || user?.ownedBusiness?.id || undefined;
+    }
+
+    if (!businessId) {
       throw new ForbiddenException('Create a business before managing staff');
     }
 
-    return admin.businessId;
+    return businessId;
   }
 }

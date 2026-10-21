@@ -21,6 +21,7 @@ describe('ShiftService', () => {
   const advanceAggregate = jest.fn();
   const advanceFindMany = jest.fn();
   const advanceCreate = jest.fn();
+  const payrollRecordFindFirst = jest.fn();
 
   const transaction = jest.fn((callback: (tx: unknown) => unknown) =>
     callback({
@@ -31,7 +32,8 @@ describe('ShiftService', () => {
         update: shiftUpdate,
       },
       order: { aggregate: orderAggregate },
-      employeeAdvance: { aggregate: advanceAggregate },
+      employeeAdvance: { aggregate: advanceAggregate, create: advanceCreate },
+      payrollRecord: { findFirst: payrollRecordFindFirst },
     }),
   );
   const prisma = {
@@ -53,6 +55,9 @@ describe('ShiftService', () => {
       aggregate: advanceAggregate,
       findMany: advanceFindMany,
       create: advanceCreate,
+    },
+    payrollRecord: {
+      findFirst: payrollRecordFindFirst,
     },
   } as unknown as PrismaService;
   const service = new ShiftService(prisma);
@@ -77,10 +82,12 @@ describe('ShiftService', () => {
     advanceAggregate.mockReset();
     advanceFindMany.mockReset();
     advanceCreate.mockReset();
+    payrollRecordFindFirst.mockReset();
 
-    userFindFirst.mockResolvedValue(null);
+    userFindFirst.mockResolvedValue({ monthlySalary: 50000 });
     locationFindFirst.mockResolvedValue({ id: 'loc-1' });
     shiftFindFirst.mockResolvedValue(null);
+    payrollRecordFindFirst.mockResolvedValue(null);
     shiftCreate.mockImplementation(({ data }: { data: object }) =>
       Promise.resolve({ id: 'shift-1', ...data }),
     );
@@ -169,7 +176,23 @@ describe('ShiftService', () => {
     expect(result.autoClosedPreviousShiftId).toBe('shift-yesterday');
   });
 
-  it('automatically closes today shift if autoClosePrevious is explicitly requested', async () => {
+  it('rejects a cashier from auto-closing a same-day shift even if autoClosePrevious is true', async () => {
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-today',
+      startingAmount: 1000,
+      openedAt: new Date(),
+    });
+
+    await expect(
+      service.open(cashier, {
+        startingAmount: 2000,
+        autoClosePrevious: true,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(shiftUpdate).not.toHaveBeenCalled();
+  });
+
+  it('allows an admin to auto-close today shift if autoClosePrevious is explicitly requested', async () => {
     shiftFindFirst.mockResolvedValue({
       id: 'shift-today',
       startingAmount: 1000,
@@ -178,7 +201,13 @@ describe('ShiftService', () => {
     orderAggregate.mockResolvedValue({ _sum: { totalAmount: 4000 } });
     advanceAggregate.mockResolvedValue({ _sum: { amount: 0 } });
 
-    const result = await service.open(cashier, {
+    const admin = {
+      sub: 'admin-1',
+      role: Role.ADMIN,
+      businessId: 'biz-1',
+      locationId: 'loc-1',
+    };
+    const result = await service.open(admin, {
       startingAmount: 2000,
       autoClosePrevious: true,
     });
@@ -357,17 +386,45 @@ describe('ShiftService', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('rejects shift advance when requested amount exceeds physical cash in drawer', async () => {
+  it('allows shift advance when within monthlySalary even if exceeding drawer cash', async () => {
     shiftFindFirst.mockResolvedValue({ id: 'shift-1', startingAmount: 1000 });
     userFindFirst.mockResolvedValue({ monthlySalary: 50000 });
-    advanceAggregate.mockResolvedValueOnce({ _sum: { amount: 0 } }); // for pending monthly advances
-    orderAggregate.mockResolvedValue({ _sum: { totalAmount: 500 } });
-    advanceAggregate.mockResolvedValueOnce({ _sum: { amount: 200 } }); // for computeShiftMetrics advancesOut
+    advanceAggregate.mockResolvedValue({ _sum: { amount: 0 } });
+    advanceCreate.mockResolvedValue({
+      id: 'adv-new',
+      amount: 2000,
+      reason: 'Exceeds drawer cash but allowed by salary',
+      status: 'PENDING',
+    });
+
+    const adv = await service.addAdvance(cashier, {
+      amount: 2000,
+      reason: 'Exceeds drawer cash but allowed by salary',
+    });
+    expect(adv.amount).toBe(2000);
+  });
+
+  it('rejects shift advance when cashier has no positive monthly salary configured', async () => {
+    shiftFindFirst.mockResolvedValue({ id: 'shift-1', startingAmount: 10000 });
+    userFindFirst.mockResolvedValue({ monthlySalary: 0 });
 
     await expect(
       service.addAdvance(cashier, {
-        amount: 2000,
-        reason: 'Over drawer cash',
+        amount: 1000,
+        reason: 'No salary',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects shift advance when current month payroll is already settled', async () => {
+    shiftFindFirst.mockResolvedValue({ id: 'shift-1', startingAmount: 10000 });
+    userFindFirst.mockResolvedValue({ monthlySalary: 30000 });
+    payrollRecordFindFirst.mockResolvedValue({ id: 'pr-1', status: 'PAID' });
+
+    await expect(
+      service.addAdvance(cashier, {
+        amount: 1000,
+        reason: 'Settled month',
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });

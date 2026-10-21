@@ -1,11 +1,42 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsString, MaxLength, MinLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Length,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 export class ResetPasswordDto {
-  @ApiProperty({ description: 'Reset token obtained from verify-otp' })
+  @ApiPropertyOptional({
+    description: 'Admin registered email address',
+    example: 'admin@suntechpos.bd',
+  })
+  @IsOptional()
   @IsString()
-  @MinLength(1)
-  resetToken: string;
+  @MaxLength(255)
+  email?: string;
+
+  @ApiPropertyOptional({
+    description: 'Admin email or identifier (backwards compatibility)',
+    example: 'admin@suntechpos.bd',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  identifier?: string;
+
+  @ApiProperty({
+    description: '6-digit OTP code received via email',
+    example: '123456',
+  })
+  @IsString()
+  @IsNotEmpty()
+  @Length(6, 6)
+  @Matches(/^\d{6}$/, { message: 'OTP must be exactly 6 digits' })
+  otp: string;
 
   @ApiProperty({
     description: 'New password (minimum 8 characters)',
@@ -17,4 +48,11 @@ export class ResetPasswordDto {
   @MinLength(8)
   @MaxLength(72)
   newPassword: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional legacy reset token (if previously generated)',
+  })
+  @IsOptional()
+  @IsString()
+  resetToken?: string;
 }

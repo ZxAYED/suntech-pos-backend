@@ -76,4 +76,12 @@ export class CreateVariantDto {
   @IsInt()
   @Min(0)
   stock?: number;
+
+  @ApiPropertyOptional({
+    description: 'Target branch location UUID for initial branch stock',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsString()
+  locationId?: string;
 }

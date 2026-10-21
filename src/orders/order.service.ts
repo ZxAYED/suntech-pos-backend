@@ -17,6 +17,7 @@ import {
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { requireBusinessId } from '../hr/require-business-id';
+import { getDhakaReportDateRange } from '../common/utils/timezone.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCatalogOrderDto } from './dto/create-catalog-order.dto';
 import { CreateCustomOrderDto } from './dto/create-custom-order.dto';
@@ -34,6 +35,8 @@ export const orderLineSelect = {
   variantId: true,
   productName: true,
   variantName: true,
+  categoryName: true,
+  unitCost: true,
   quantity: true,
   unitPrice: true,
   subtotal: true,
@@ -295,11 +298,17 @@ export class OrdersService {
           cashierId: user.id,
           status: ShiftStatus.OPEN,
         },
-        select: { id: true },
+        select: { id: true, locationId: true },
       });
 
       if (!activeShift) {
         throw new ConflictException(OPEN_SHIFT_REQUIRED);
+      }
+
+      if (activeShift.locationId && activeShift.locationId !== locationId) {
+        throw new ForbiddenException(
+          'Active shift belongs to a different branch location. Orders cannot cross branch boundaries.',
+        );
       }
       shiftId = activeShift.id;
     }
@@ -334,7 +343,16 @@ export class OrdersService {
         },
       },
       include: {
-        product: { select: { name: true } },
+        product: {
+          select: {
+            name: true,
+            category: { select: { name: true } },
+          },
+        },
+        locationStocks: {
+          where: { locationId },
+          select: { id: true, stock: true },
+        },
       },
     });
 
@@ -356,7 +374,9 @@ export class OrdersService {
 
     for (const [vId, totalQty] of requiredStock.entries()) {
       const variant = variantMap.get(vId)!;
-      if (variant.stock < totalQty) {
+      const available =
+        (variant as any).locationStocks?.[0]?.stock ?? variant.stock;
+      if (available < totalQty) {
         throw new BadRequestException(`Insufficient stock for variant ${vId}`);
       }
     }
@@ -369,9 +389,12 @@ export class OrdersService {
 
       return {
         variantId: variant.id,
-        productName: variant.product.name,
+        productName: (variant as any).product?.name ?? 'Catalog Item',
         variantName: variant.name ?? null,
         unitPrice,
+        unitCost: variant.costPrice ?? null,
+        categoryName:
+          (variant as any).product?.category?.name ?? 'Uncategorized',
         quantity: line.quantity,
         subtotal,
       };
@@ -388,6 +411,29 @@ export class OrdersService {
 
     // 3. Database Transaction: stock decrement & transactions
     for (const [vId, totalQty] of requiredStock.entries()) {
+      const variant = variantMap.get(vId);
+      const locStock = (variant as any)?.locationStocks?.[0];
+
+      if (locStock && (tx as any).locationStock) {
+        await (tx as any).locationStock.update({
+          where: { id: locStock.id },
+          data: { stock: { decrement: totalQty } },
+        });
+      } else if ((tx as any).locationStock && locationId) {
+        await (tx as any).locationStock.upsert({
+          where: {
+            locationId_variantId: { locationId, variantId: vId },
+          },
+          update: { stock: { decrement: totalQty } },
+          create: {
+            businessId,
+            locationId,
+            variantId: vId,
+            stock: (variant?.stock ?? 0) - totalQty,
+          },
+        });
+      }
+
       await tx.variant.update({
         where: { id: vId },
         data: { stock: { decrement: totalQty } },
@@ -396,6 +442,7 @@ export class OrdersService {
       await tx.stockTransaction.create({
         data: {
           variantId: vId,
+          locationId: locationId ?? null,
           type: StockTransactionType.SALE,
           quantity: totalQty,
           notes: invoiceNumber,
@@ -516,6 +563,8 @@ export class OrdersService {
         productName,
         variantName: line.variantName?.trim() || null,
         unitPrice,
+        unitCost: null,
+        categoryName: 'Uncategorized',
         quantity: line.quantity,
         subtotal,
       };
@@ -594,10 +643,20 @@ export class OrdersService {
     const where: Prisma.OrderWhereInput = {};
 
     if (actor && actor.role !== Role.SUPER_ADMIN) {
-      if (!actor.businessId) {
+      let businessId = query.businessId || actor.businessId;
+      if (!businessId && actor.role === Role.ADMIN) {
+        const user = await this.prisma.user?.findFirst({
+          where: { id: actor.sub, deletedAt: null },
+          select: { businessId: true, ownedBusiness: { select: { id: true } } },
+        });
+        businessId = user?.businessId || user?.ownedBusiness?.id;
+      }
+      if (!businessId) {
         throw new ForbiddenException('Create a business before continuing');
       }
-      where.location = { businessId: actor.businessId };
+      where.location = { businessId };
+    } else if (actor?.role === Role.SUPER_ADMIN && query.businessId) {
+      where.location = { businessId: query.businessId };
     } else if (actor?.businessId) {
       where.location = { businessId: actor.businessId };
     }
@@ -623,7 +682,7 @@ export class OrdersService {
     }
 
     if (query.range) {
-      const dateRange = getDateRange(query.range);
+      const dateRange = getDhakaReportDateRange(query.range);
       if (dateRange) {
         where.createdAt = dateRange;
       }
@@ -671,7 +730,17 @@ export class OrdersService {
     actor: AccessTokenPayload,
     dto: CreateOrderDto,
   ): Promise<PresentedOrder> {
-    const businessId = requireBusinessId(actor);
+    let businessId = actor.businessId;
+    if (!businessId && actor.role === Role.ADMIN) {
+      const user = await this.prisma.user.findFirst({
+        where: { id: actor.sub, deletedAt: null },
+        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+      });
+      businessId = user?.businessId || user?.ownedBusiness?.id;
+    }
+    if (!businessId) {
+      throw new ForbiddenException('Create a business before continuing');
+    }
     const location = await this.prisma.location.findFirst({
       where: { businessId, deletedAt: null },
       select: { id: true },
@@ -731,6 +800,11 @@ export class OrdersService {
     receiptNumber: string,
     fallbackLocationId?: string,
   ): Promise<PresentedOrder> {
+    const locationId = actor.locationId ?? fallbackLocationId;
+    if (!locationId) {
+      throw new BadRequestException('Location ID is required');
+    }
+
     let shiftId: string | null = null;
     if (actor.role === Role.CASHIER) {
       const shift = await tx.shiftSession.findFirst({
@@ -739,18 +813,60 @@ export class OrdersService {
           cashierId: actor.sub,
           status: ShiftStatus.OPEN,
         },
-        select: { id: true },
+        select: { id: true, locationId: true },
       });
 
       if (!shift) {
         throw new ConflictException(OPEN_SHIFT_REQUIRED);
       }
+      if (shift.locationId && shift.locationId !== locationId) {
+        throw new ForbiddenException(
+          'Active shift belongs to a different branch location. Orders cannot cross branch boundaries.',
+        );
+      }
       shiftId = shift.id;
     }
 
-    const locationId = actor.locationId ?? fallbackLocationId;
-    if (!locationId) {
-      throw new BadRequestException('Location ID is required');
+    const variantStockMap = new Map<string, number>();
+    for (const item of dto.items) {
+      if (item.variantId?.trim()) {
+        const vId = item.variantId.trim();
+        variantStockMap.set(
+          vId,
+          (variantStockMap.get(vId) ?? 0) + item.quantity,
+        );
+      }
+    }
+
+    for (const [vId, totalQty] of variantStockMap.entries()) {
+      const variant = await tx.variant.findFirst({
+        where: {
+          id: vId,
+          businessId,
+          deletedAt: null,
+          product: { businessId, deletedAt: null },
+        },
+        select: {
+          id: true,
+          stock: true,
+          locationStocks: {
+            where: { locationId },
+            select: { id: true, stock: true },
+          },
+        },
+      });
+
+      if (!variant) {
+        throw new NotFoundException('Variant not found');
+      }
+
+      const available =
+        (variant as any).locationStocks?.[0]?.stock ?? variant.stock;
+      if (available !== undefined && available < totalQty) {
+        throw new BadRequestException(
+          `Insufficient stock for variant ${variant.id}`,
+        );
+      }
     }
 
     const lines = [];
@@ -766,17 +882,18 @@ export class OrdersService {
             deletedAt: null,
             product: { businessId, deletedAt: null },
           },
-          include: { product: { select: { name: true } } },
+          include: {
+            product: {
+              select: {
+                name: true,
+                category: { select: { name: true } },
+              },
+            },
+          },
         });
 
         if (!variant) {
           throw new NotFoundException('Variant not found');
-        }
-
-        if (variant.stock !== undefined && variant.stock < item.quantity) {
-          throw new BadRequestException(
-            `Insufficient stock for variant ${variant.id}`,
-          );
         }
 
         lines.push({
@@ -786,6 +903,9 @@ export class OrdersService {
             (variant as any).name ??
             'Catalog Item',
           variantName: (variant as any).name ?? null,
+          unitCost: variant.costPrice ?? null,
+          categoryName:
+            (variant as any).product?.category?.name ?? 'Uncategorized',
           unitPrice: variant.sellingPrice,
           price: variant.sellingPrice,
           quantity: item.quantity,
@@ -804,6 +924,8 @@ export class OrdersService {
         variantId: null,
         productName: customItemName,
         variantName: null,
+        unitCost: null,
+        categoryName: 'Uncategorized',
         unitPrice: item.price,
         price: item.price,
         quantity: item.quantity,
@@ -811,14 +933,22 @@ export class OrdersService {
       });
     }
 
-    for (const line of lines) {
-      if (!line.variantId) {
-        continue;
+    for (const [vId, totalQty] of variantStockMap.entries()) {
+      if ((tx as any).locationStock && locationId) {
+        const locStock = await (tx as any).locationStock.findUnique({
+          where: { locationId_variantId: { locationId, variantId: vId } },
+        });
+        if (locStock) {
+          await (tx as any).locationStock.update({
+            where: { id: locStock.id },
+            data: { stock: { decrement: totalQty } },
+          });
+        }
       }
 
       const decremented = await tx.variant.updateMany({
-        where: { id: line.variantId, businessId },
-        data: { stock: { decrement: line.quantity } },
+        where: { id: vId, businessId },
+        data: { stock: { decrement: totalQty } },
       });
 
       if (decremented.count === 0) {
@@ -827,9 +957,10 @@ export class OrdersService {
 
       await tx.stockTransaction.create({
         data: {
-          variantId: line.variantId,
+          variantId: vId,
+          locationId: locationId ?? null,
           type: StockTransactionType.SALE,
-          quantity: line.quantity,
+          quantity: totalQty,
           notes: receiptNumber,
         },
       });
@@ -869,6 +1000,8 @@ export class OrdersService {
             variantId: l.variantId,
             productName: l.productName,
             variantName: l.variantName,
+            unitCost: l.unitCost,
+            categoryName: l.categoryName,
             quantity: l.quantity,
             unitPrice: l.unitPrice,
             subtotal: l.subtotal,

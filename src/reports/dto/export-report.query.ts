@@ -22,12 +22,17 @@ export enum ReportFormat {
 }
 
 export class ExportReportQueryDto {
-  @ApiProperty({ enum: ReportType, description: 'Type of report to export' })
+  @ApiProperty({
+    enum: ReportType,
+    enumName: 'ReportType',
+    description: 'Type of report to export',
+  })
   @IsEnum(ReportType)
   type: ReportType;
 
   @ApiProperty({
     enum: ReportFormat,
+    enumName: 'ReportFormat',
     description: 'Format of the exported file',
   })
   @IsEnum(ReportFormat)

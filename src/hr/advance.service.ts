@@ -58,67 +58,102 @@ export class AdvanceService {
       now.getUTCMonth() + 1,
     );
 
-    let currentPending = 0;
-    if (this.prisma.employeeAdvance?.aggregate) {
-      const agg = await this.prisma.employeeAdvance.aggregate({
-        where: {
-          businessId,
-          cashierId,
-          status: AdvanceStatus.PENDING,
-          deletedAt: null,
-          takenAt: { gte: start, lt: end },
-        },
-        _sum: { amount: true },
-      });
-      currentPending = agg._sum?.amount ?? 0;
-    } else if (this.prisma.employeeAdvance?.findMany) {
-      const existing = await this.prisma.employeeAdvance.findMany({
-        where: {
-          businessId,
-          cashierId,
-          status: AdvanceStatus.PENDING,
-          deletedAt: null,
-          takenAt: { gte: start, lt: end },
-        },
-      });
-      currentPending = Array.isArray(existing)
-        ? existing.reduce((sum, item) => sum + (item.amount ?? 0), 0)
-        : 0;
-    }
-
-    const maxSalary = cashier.monthlySalary ?? 0;
-    if (maxSalary > 0 && currentPending + dto.amount > maxSalary) {
-      const remaining = Math.max(0, maxSalary - currentPending);
-      throw new BadRequestException(
-        `Advance amount (${dto.amount}) exceeds remaining monthly salary limit (${remaining})`,
-      );
-    }
-
-    let shiftId: string | undefined = undefined;
-    if (actor.role === Role.CASHIER && this.prisma.shiftSession?.findFirst) {
-      const activeShift = await this.prisma.shiftSession.findFirst({
-        where: {
-          cashierId: actor.sub,
-          businessId,
-          status: 'OPEN',
-        },
-      });
-      if (activeShift) {
-        shiftId = activeShift.id;
+    const executeInTx = async (tx: any) => {
+      const maxSalary = cashier.monthlySalary ?? 0;
+      if (maxSalary <= 0) {
+        throw new BadRequestException(
+          'Salary advances require a positive monthly salary configured on your account',
+        );
       }
-    }
 
-    return this.prisma.employeeAdvance.create({
-      data: {
-        businessId,
-        cashierId,
-        amount: dto.amount,
-        reason: dto.reason?.trim() || null,
-        status: AdvanceStatus.PENDING,
-        ...(shiftId ? { shiftId } : {}),
-      },
-      select: advanceSelect,
-    });
+      if (tx.payrollRecord?.findFirst) {
+        const settled = await tx.payrollRecord.findFirst({
+          where: {
+            businessId,
+            cashierId,
+            month: now.getUTCMonth() + 1,
+            year: now.getUTCFullYear(),
+            status: 'PAID',
+          },
+        });
+        if (settled) {
+          throw new BadRequestException(
+            'Payroll for this month has already been settled',
+          );
+        }
+      }
+
+      let currentPending = 0;
+      if (tx.employeeAdvance?.aggregate) {
+        const agg = await tx.employeeAdvance.aggregate({
+          where: {
+            businessId,
+            cashierId,
+            status: AdvanceStatus.PENDING,
+            deletedAt: null,
+            takenAt: { gte: start, lt: end },
+          },
+          _sum: { amount: true },
+        });
+        currentPending = agg._sum?.amount ?? 0;
+      } else if (tx.employeeAdvance?.findMany) {
+        const existing = await tx.employeeAdvance.findMany({
+          where: {
+            businessId,
+            cashierId,
+            status: AdvanceStatus.PENDING,
+            deletedAt: null,
+            takenAt: { gte: start, lt: end },
+          },
+        });
+        currentPending = Array.isArray(existing)
+          ? existing.reduce(
+              (sum: number, item: any) => sum + (item.amount ?? 0),
+              0,
+            )
+          : 0;
+      }
+
+      if (currentPending + dto.amount > maxSalary) {
+        const remaining = Math.max(0, maxSalary - currentPending);
+        throw new BadRequestException(
+          `Advance amount (${dto.amount}) exceeds remaining monthly salary limit (${remaining})`,
+        );
+      }
+
+      let shiftId: string | undefined = undefined;
+      if (actor.role === Role.CASHIER && tx.shiftSession?.findFirst) {
+        const activeShift = await tx.shiftSession.findFirst({
+          where: {
+            cashierId: actor.sub,
+            businessId,
+            status: 'OPEN',
+          },
+        });
+        if (activeShift) {
+          shiftId = activeShift.id;
+        }
+      }
+
+      return tx.employeeAdvance.create({
+        data: {
+          businessId,
+          cashierId,
+          amount: dto.amount,
+          reason: dto.reason?.trim() || null,
+          status: AdvanceStatus.PENDING,
+          ...(shiftId ? { shiftId } : {}),
+        },
+        select: advanceSelect,
+      });
+    };
+
+    if (this.prisma.$transaction) {
+      return this.prisma.$transaction((tx) => executeInTx(tx), {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      });
+    }
+    return executeInTx(this.prisma);
   }
 
   async remove(

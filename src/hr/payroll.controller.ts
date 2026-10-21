@@ -37,11 +37,16 @@ export class PayrollController {
 
   @Get('summary')
   @ApiOperation({
-    summary: 'Get monthly payroll disbursement summary',
+    summary: '[ADMIN] Get monthly payroll disbursement summary',
     description:
-      'Pre-flight calculation of total base salary, deducted advances, and net payable for eligible active cashiers.',
+      'Pre-flight calculation of total base salary, deducted advances, and net payable for eligible active cashiers. Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Payroll summary loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ResponseMessage('Payroll summary loaded')
   summary(
     @CurrentUser() admin: AccessTokenPayload,
@@ -52,11 +57,16 @@ export class PayrollController {
 
   @Post('disburse')
   @ApiOperation({
-    summary: 'Batch disburse monthly payroll',
+    summary: '[ADMIN] Batch disburse monthly payroll',
     description:
-      'Processes payroll for all active cashiers (or filtered by locationId). Deducts pending advances and generates paid payroll ledger entries.',
+      'Processes payroll for all active cashiers (or filtered by locationId). Deducts pending advances and generates paid payroll ledger entries. Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Payroll disbursed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({ status: 400, description: 'Disbursement validation error' })
   @Idempotent()
   @HttpCode(HttpStatus.OK)
@@ -70,11 +80,16 @@ export class PayrollController {
 
   @Post('process')
   @ApiOperation({
-    summary: 'Process single cashier payroll',
+    summary: '[ADMIN] Process single cashier payroll',
     description:
-      'Processes and settles payroll and advances for an individual cashier for the specified month.',
+      'Processes and settles payroll and advances for an individual cashier for the specified month. Requires ADMIN role.',
   })
   @ApiResponse({ status: 201, description: 'Payroll processed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 400,
     description: 'Advances exceed salary or already processed',
@@ -92,11 +107,16 @@ export class PayrollController {
 
   @Get('history')
   @ApiOperation({
-    summary: 'Get historical payroll records',
+    summary: '[ADMIN] Get historical payroll records',
     description:
-      'Lists finalized payroll records with filters for month, year, and location.',
+      'Lists finalized payroll records with filters for month, year, and location. Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Payroll history loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ResponseMessage('Payroll history loaded')
   history(
     @CurrentUser() admin: AccessTokenPayload,
@@ -107,10 +127,15 @@ export class PayrollController {
 
   @Get()
   @ApiOperation({
-    summary: 'List historical payroll records',
-    description: 'Alias route for payroll history.',
+    summary: '[ADMIN] List historical payroll records',
+    description: 'Alias route for payroll history. Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Payroll history loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ResponseMessage('Payroll history loaded')
   list(
     @CurrentUser() admin: AccessTokenPayload,

@@ -13,6 +13,7 @@ import { LoginType } from './login-type.enum';
 export class LoginDto {
   @ApiProperty({
     enum: LoginType,
+    enumName: 'LoginType',
     description: 'Login type (ADMIN or BUSINESS_USER)',
     example: LoginType.ADMIN,
   })

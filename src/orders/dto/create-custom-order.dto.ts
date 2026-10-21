@@ -72,6 +72,7 @@ export class CreateCustomOrderDto {
 
   @ApiPropertyOptional({
     enum: PaymentMethod,
+    enumName: 'PaymentMethod',
     default: PaymentMethod.COD,
     description: 'Payment method / type (COD, BKASH, NAGAD, BANK)',
   })
@@ -81,6 +82,7 @@ export class CreateCustomOrderDto {
 
   @ApiPropertyOptional({
     enum: PaymentMethod,
+    enumName: 'PaymentMethod',
     description: 'Alias for paymentMethod',
   })
   @IsOptional()

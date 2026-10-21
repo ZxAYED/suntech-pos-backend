@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -8,6 +9,8 @@ import {
   OrderStatus,
   PaymentMethod,
   Prisma,
+  Role,
+  ShiftStatus,
   StockTransactionType,
 } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
@@ -51,7 +54,17 @@ export class RefundService {
     orderId: string,
     dto: CreateRefundDto,
   ): Promise<PresentedRefund> {
-    const businessId = requireBusinessId(admin);
+    let businessId = admin.businessId;
+    if (!businessId && admin.role === Role.ADMIN) {
+      const user = await this.prisma.user.findFirst({
+        where: { id: admin.sub, deletedAt: null },
+        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+      });
+      businessId = user?.businessId || user?.ownedBusiness?.id;
+    }
+    if (!businessId) {
+      throw new ForbiddenException('Create a business before continuing');
+    }
 
     try {
       return await this.prisma.$transaction(
@@ -81,6 +94,7 @@ export class RefundService {
       where: { id: orderId, cashier: { businessId } },
       select: {
         id: true,
+        locationId: true,
         invoiceNumber: true,
         receiptNumber: true,
         shiftId: true,
@@ -172,14 +186,58 @@ export class RefundService {
         continue;
       }
 
+      if ((tx as any).locationStock && order.locationId) {
+        await (tx as any).locationStock.upsert({
+          where: {
+            locationId_variantId: {
+              locationId: order.locationId,
+              variantId: line.variantId,
+            },
+          },
+          update: { stock: { increment: line.quantity } },
+          create: {
+            businessId,
+            locationId: order.locationId,
+            variantId: line.variantId,
+            stock: line.quantity,
+          },
+        });
+      }
+
       await tx.stockTransaction.create({
         data: {
           variantId: line.variantId,
+          locationId: order.locationId ?? null,
           type: StockTransactionType.REFUND,
           quantity: line.quantity,
           notes: order.invoiceNumber ?? order.receiptNumber ?? undefined,
         },
       });
+    }
+
+    let payoutShiftId: string | null = null;
+    if (order.shiftId && tx.shiftSession?.findFirst) {
+      const orderShift = await tx.shiftSession.findFirst({
+        where: { id: order.shiftId },
+        select: { id: true, status: true },
+      });
+      if (orderShift?.status === ShiftStatus.OPEN) {
+        payoutShiftId = orderShift.id;
+      }
+    }
+
+    if (!payoutShiftId && order.locationId && tx.shiftSession?.findFirst) {
+      const activeShift = await tx.shiftSession.findFirst({
+        where: {
+          locationId: order.locationId,
+          businessId,
+          status: ShiftStatus.OPEN,
+        },
+        select: { id: true },
+      });
+      if (activeShift) {
+        payoutShiftId = activeShift.id;
+      }
     }
 
     const refund = await tx.refund.create({
@@ -188,6 +246,7 @@ export class RefundService {
         processedById: adminId,
         totalRefund: sumMoney(requested.map((line) => line.refundAmount)),
         reason: dto.reason?.trim() || null,
+        payoutShiftId: payoutShiftId ?? null,
         items: {
           create: requested.map((line) => ({
             orderLineId: line.orderItemId,
@@ -220,17 +279,13 @@ export class RefundService {
       });
     }
 
-    if (
-      order.shiftId &&
-      order.paymentMethod === PaymentMethod.COD &&
-      tx.shiftSession?.update
-    ) {
-      await tx.shiftSession.update({
-        where: { id: order.shiftId },
-        data: {
-          cashCollected: { decrement: refund.totalRefund },
-        },
-      });
+    if (order.shiftId && order.paymentMethod === PaymentMethod.COD) {
+      if (tx.shiftSession?.updateMany) {
+        await tx.shiftSession.updateMany({
+          where: { id: order.shiftId, status: ShiftStatus.OPEN },
+          data: { cashCollected: { decrement: refund.totalRefund } },
+        });
+      }
     }
 
     return {

@@ -45,6 +45,7 @@ describe('OrdersService', () => {
 
   const prisma = {
     $transaction: jest.fn((callback) => callback(tx)),
+    user: { findFirst: userFindFirst },
     order: { count: orderCount, findMany: orderFindMany },
   };
 
@@ -73,6 +74,7 @@ describe('OrdersService', () => {
   const openShift = {
     id: 'shift-1',
     businessId: 'biz-1',
+    locationId: 'loc-1',
     cashierId: 'user-cashier-1',
     status: ShiftStatus.OPEN,
   };
@@ -127,7 +129,18 @@ describe('OrdersService', () => {
           deletedAt: null,
           product: { businessId: 'biz-1', deletedAt: null },
         },
-        include: { product: { select: { name: true } } },
+        include: {
+          product: {
+            select: {
+              name: true,
+              category: { select: { name: true } },
+            },
+          },
+          locationStocks: {
+            where: { locationId: 'loc-1' },
+            select: { id: true, stock: true },
+          },
+        },
       });
 
       // Verify stock was decremented
@@ -140,6 +153,7 @@ describe('OrdersService', () => {
       expect(stockCreate).toHaveBeenCalledWith({
         data: {
           variantId: 'variant-1',
+          locationId: 'loc-1',
           type: StockTransactionType.SALE,
           quantity: 2,
           notes: expect.stringMatching(/^INV-\d{8}-[A-Z0-9]{4}$/),
@@ -175,8 +189,10 @@ describe('OrdersService', () => {
                   variantId: 'variant-1',
                   productName: 'iPhone 15',
                   variantName: '128GB Black',
-                  quantity: 2,
                   unitPrice: 1500,
+                  unitCost: null,
+                  categoryName: 'Uncategorized',
+                  quantity: 2,
                   subtotal: 3000,
                 },
               ],
@@ -423,16 +439,20 @@ describe('OrdersService', () => {
                   variantId: null,
                   productName: 'Screen Protector',
                   variantName: 'Matte Finish',
-                  quantity: 2,
                   unitPrice: 250,
+                  unitCost: null,
+                  categoryName: 'Uncategorized',
+                  quantity: 2,
                   subtotal: 500,
                 },
                 {
                   variantId: null,
                   productName: 'Quick Back Cover Installation',
                   variantName: null,
-                  quantity: 1,
                   unitPrice: 500,
+                  unitCost: null,
+                  categoryName: 'Uncategorized',
+                  quantity: 1,
                   subtotal: 500,
                 },
               ],
@@ -589,6 +609,7 @@ describe('OrdersService', () => {
     });
 
     it('throws ForbiddenException when admin actor has no businessId', async () => {
+      userFindFirst.mockResolvedValueOnce(null);
       const adminWithoutBiz = {
         sub: 'admin-nobiz',
         role: Role.ADMIN,

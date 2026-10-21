@@ -5,6 +5,7 @@ import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 export class AnalyticsQueryDto {
   @ApiPropertyOptional({
     enum: ['daily', 'weekly', 'monthly', 'quarterly'],
+    enumName: 'AnalyticsDateRange',
     description: 'Filter period analytics by range (default monthly)',
     default: 'monthly',
   })
@@ -16,4 +17,9 @@ export class AnalyticsQueryDto {
   @IsOptional()
   @IsEntityId()
   locationId?: string;
+
+  @ApiPropertyOptional({ description: 'Filter by business tenant UUID' })
+  @IsOptional()
+  @IsEntityId()
+  businessId?: string;
 }

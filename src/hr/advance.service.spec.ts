@@ -252,6 +252,31 @@ describe('AdvanceService', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('rejects advance when cashier has no positive monthly salary configured', async () => {
+    userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 0 });
+
+    await expect(
+      service.create(
+        { sub: 'cashier-1', role: Role.CASHIER, businessId: 'biz-1' },
+        { amount: 500, reason: 'No salary' },
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects advance when payroll for the current month is already settled', async () => {
+    userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 20000 });
+    (prisma as any).payrollRecord = {
+      findFirst: jest.fn().mockResolvedValue({ id: 'pr-1', status: 'PAID' }),
+    };
+
+    await expect(
+      service.create(
+        { sub: 'cashier-1', role: Role.CASHIER, businessId: 'biz-1' },
+        { amount: 500, reason: 'Settled month' },
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
   describe('remove', () => {
     it('throws BadRequestException when trying to delete an already deducted advance', async () => {
       advanceFindFirst.mockResolvedValue({

@@ -10,12 +10,14 @@ export interface LocationScope {
 export function resolveLocationScope(
   actor: AccessTokenPayload,
   requestedLocationId?: string,
+  requestedBusinessId?: string,
 ): LocationScope {
-  if (!actor?.businessId || typeof actor.businessId !== 'string') {
-    throw new ForbiddenException('Business context is required');
-  }
+  const effectiveBusinessId = requestedBusinessId?.trim() || actor?.businessId;
 
   if (actor.role === Role.CASHIER) {
+    if (!actor.businessId || typeof actor.businessId !== 'string') {
+      throw new ForbiddenException('Business context is required');
+    }
     if (!actor.locationId || typeof actor.locationId !== 'string') {
       throw new ForbiddenException(
         'Cashier account must be assigned to an active business and branch location',
@@ -35,15 +37,12 @@ export function resolveLocationScope(
     };
   }
 
-  if (actor.role === Role.ADMIN) {
-    return {
-      businessId: actor.businessId,
-      locationId: requestedLocationId?.trim() || undefined,
-    };
+  if (!effectiveBusinessId || typeof effectiveBusinessId !== 'string') {
+    throw new ForbiddenException('Business context is required');
   }
 
   return {
-    businessId: actor.businessId,
+    businessId: effectiveBusinessId,
     locationId: requestedLocationId?.trim() || undefined,
   };
 }

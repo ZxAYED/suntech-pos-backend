@@ -95,6 +95,7 @@ describe('RefundService', () => {
     expect(stockCreate).toHaveBeenCalledWith({
       data: {
         variantId: 'variant-1',
+        locationId: null,
         type: StockTransactionType.REFUND,
         quantity: 1,
         notes: 'RCPT-TEST',

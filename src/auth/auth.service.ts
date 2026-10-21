@@ -13,7 +13,6 @@ import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import {
   AccessTokenPayload,
-  PasswordResetTokenPayload,
   RefreshTokenPayload,
 } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
@@ -37,8 +36,6 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 
 const BCRYPT_ROUNDS = 10;
-const OTP_TTL_MS = 15 * 60 * 1000;
-const RESET_TOKEN_TTL = '10m';
 const INVALID_LOGIN_MODE = 'Invalid login mode';
 const INVALID_CREDENTIALS = 'Invalid credentials';
 
@@ -91,6 +88,7 @@ export class AuthService {
         : await this.findByPublicId(dto.publicId ?? '');
 
     this.assertLoginMode(dto.loginType, found.role);
+    this.assertAccountActive(found.status);
 
     const passwordMatches = await bcrypt.compare(dto.password, found.password);
 
@@ -98,7 +96,6 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
 
-    this.assertAccountActive(found.status);
     const user = await this.attachOwnedBusiness(found);
 
     if (user.role === Role.CASHIER) {
@@ -171,10 +168,27 @@ export class AuthService {
     return this.jwtService.signAsync(this.buildAccessPayload(user));
   }
 
-  async forgotPassword(dto: ForgotPasswordDto): Promise<{ accepted: true }> {
-    const user = await this.findRecoveryUser(dto.loginType, dto.identifier);
+  private getOtpTtlMs(): number {
+    const rawMinutes = this.configService.get<string>('OTP_TTL_MINUTES', '15');
+    const minutes = Number(rawMinutes);
+    return (Number.isFinite(minutes) && minutes > 0 ? minutes : 15) * 60 * 1000;
+  }
 
-    if (user.email.endsWith('@cashiers.suntech.internal')) {
+  async forgotPassword(dto: ForgotPasswordDto): Promise<{ accepted: true }> {
+    const identifier = (dto.email || dto.identifier || '').trim();
+    if (!identifier) {
+      throw new BadRequestException('Email address is required');
+    }
+
+    const user = await this.findRecoveryUser(
+      dto.loginType ?? LoginType.ADMIN,
+      identifier,
+    );
+
+    if (
+      user.role === Role.CASHIER ||
+      user.email.endsWith('@cashiers.suntech.internal')
+    ) {
       throw new BadRequestException(
         'No recovery email is configured for this cashier account. Please ask your Store Admin to reset your password.',
       );
@@ -187,7 +201,7 @@ export class AuthService {
       where: { id: user.id },
       data: {
         resetOtpHash,
-        otpExpiry: new Date(Date.now() + OTP_TTL_MS),
+        otpExpiry: new Date(Date.now() + this.getOtpTtlMs()),
       },
     });
 
@@ -210,8 +224,16 @@ export class AuthService {
     return { accepted: true };
   }
 
-  async verifyOtp(dto: VerifyOtpDto): Promise<{ resetToken: string }> {
-    const user = await this.findRecoveryUser(dto.loginType, dto.identifier);
+  async verifyOtp(dto: VerifyOtpDto): Promise<{ verified: true }> {
+    const identifier = (dto.email || dto.identifier || '').trim();
+    if (!identifier) {
+      throw new BadRequestException('Email address is required');
+    }
+
+    const user = await this.findRecoveryUser(
+      dto.loginType ?? LoginType.ADMIN,
+      identifier,
+    );
 
     if (!user.resetOtpHash || !user.otpExpiry) {
       throw new BadRequestException('No reset code is active');
@@ -221,39 +243,38 @@ export class AuthService {
       throw new BadRequestException('Reset code has expired');
     }
 
-    const matches = await bcrypt.compare(dto.otp, user.resetOtpHash);
+    const matches = await bcrypt.compare(dto.otp.trim(), user.resetOtpHash);
 
     if (!matches) {
       throw new BadRequestException('Reset code is invalid');
     }
 
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { resetOtpHash: null, otpExpiry: null },
-    });
-
-    const resetToken = await this.jwtService.signAsync(
-      {
-        sub: user.id,
-        purpose: 'password-reset',
-      } satisfies PasswordResetTokenPayload,
-      { expiresIn: RESET_TOKEN_TTL },
-    );
-
-    return { resetToken };
+    return { verified: true };
   }
 
   async resetPassword(dto: ResetPasswordDto): Promise<{ updated: true }> {
-    const payload = await this.readResetToken(dto.resetToken);
-    const password = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
-
-    const user = await this.prisma.user.findFirst({
-      where: { id: payload.sub, deletedAt: null },
-    });
-
-    if (!user) {
-      throw new NotFoundException('Account not found');
+    const identifier = (dto.email || dto.identifier || '').trim();
+    if (!identifier) {
+      throw new BadRequestException('Email address is required');
     }
+
+    const user = await this.findRecoveryUser(LoginType.ADMIN, identifier);
+
+    if (!user.resetOtpHash || !user.otpExpiry) {
+      throw new BadRequestException('No reset code is active for this account');
+    }
+
+    if (user.otpExpiry.getTime() <= Date.now()) {
+      throw new BadRequestException('Reset code has expired');
+    }
+
+    const matches = await bcrypt.compare(dto.otp.trim(), user.resetOtpHash);
+
+    if (!matches) {
+      throw new BadRequestException('Reset code is invalid');
+    }
+
+    const password = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -341,26 +362,27 @@ export class AuthService {
       throw new ForbiddenException('Account is pending approval');
     }
 
+    if (status === AccountStatus.SUSPENDED) {
+      throw new ForbiddenException(
+        'Account is suspended. Please contact administrator.',
+      );
+    }
+
+    if (status === AccountStatus.REJECTED) {
+      throw new ForbiddenException('Account application was rejected');
+    }
+
     throw new ForbiddenException('Account is not active');
   }
 
   private buildAccessPayload(user: User): AccessTokenPayload {
-    const payload: AccessTokenPayload = {
+    return {
       sub: user.id,
       role: user.role,
+      publicId: user.publicId,
+      businessId: user.businessId,
+      locationId: user.locationId,
     };
-
-    if (user.role === Role.ADMIN && user.businessId) {
-      payload.businessId = user.businessId;
-    }
-
-    if (user.role === Role.CASHIER) {
-      payload.publicId = user.publicId;
-      payload.businessId = user.businessId;
-      payload.locationId = user.locationId;
-    }
-
-    return payload;
   }
 
   private toPublicUser(user: User): PresentedPublicUser {
@@ -429,27 +451,6 @@ export class AuthService {
       }
 
       throw new UnauthorizedException('Refresh token is invalid or expired');
-    }
-  }
-
-  private async readResetToken(
-    token: string,
-  ): Promise<PasswordResetTokenPayload> {
-    try {
-      const payload =
-        await this.jwtService.verifyAsync<PasswordResetTokenPayload>(token);
-
-      if (payload.purpose !== 'password-reset' || !payload.sub) {
-        throw new UnauthorizedException('Reset token is invalid or expired');
-      }
-
-      return payload;
-    } catch (error) {
-      if (error instanceof UnauthorizedException) {
-        throw error;
-      }
-
-      throw new UnauthorizedException('Reset token is invalid or expired');
     }
   }
 }

@@ -13,8 +13,10 @@ import {
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
+  ApiBody,
   ApiConsumes,
   ApiOperation,
+  ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -46,10 +48,15 @@ export class UserController {
 
   @Get('me')
   @ApiOperation({
-    summary: 'Get current user profile',
-    description: 'Returns profile details for the authenticated user.',
+    summary: '[AUTHENTICATED] Get current user profile',
+    description:
+      'Returns profile details for the authenticated user (Admin, Cashier, or Super Admin).',
   })
   @ApiResponse({ status: 200, description: 'Profile returned' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @ResponseMessage('Profile loaded')
   getMe(@CurrentUser() user: AccessTokenPayload) {
     return this.userService.getMe(user.sub);
@@ -57,11 +64,24 @@ export class UserController {
 
   @Post('me/profile-image')
   @ApiOperation({
-    summary: 'Upload current user profile image',
-    description: 'Uploads and links profile image to Cloudinary.',
+    summary: '[AUTHENTICATED] Upload current user profile image',
+    description:
+      'Uploads and links profile image to Cloudinary for current authenticated user.',
   })
   @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+    },
+  })
   @ApiResponse({ status: 201, description: 'Profile image updated' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @UseInterceptors(FileInterceptor('file', imageUploadOptions))
   @ResponseMessage('Profile image updated')
   setMyProfileImage(
@@ -73,10 +93,15 @@ export class UserController {
 
   @Delete('me/profile-image')
   @ApiOperation({
-    summary: 'Remove current user profile image',
-    description: 'Deletes profile image from Cloudinary and clears reference.',
+    summary: '[AUTHENTICATED] Remove current user profile image',
+    description:
+      'Deletes profile image from Cloudinary and clears reference for current authenticated user.',
   })
   @ApiResponse({ status: 200, description: 'Profile image removed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @ResponseMessage('Profile image removed')
   clearMyProfileImage(@CurrentUser() user: AccessTokenPayload) {
     return this.userService.clearOwnProfileImage(user.sub);
@@ -84,11 +109,16 @@ export class UserController {
 
   @Post('cashiers')
   @ApiOperation({
-    summary: 'Create new cashier staff account',
+    summary: '[ADMIN] Create new cashier staff account',
     description:
-      'Creates a cashier account for the business. Auto-generates publicId (CSH-XXXXX) and synthetic internal email if omitted.',
+      'Creates a cashier account for the business. Auto-generates publicId (CSH-XXXXX) and synthetic internal email if omitted. Requires ADMIN role.',
   })
   @ApiResponse({ status: 201, description: 'Cashier created successfully' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
     description: 'Phone number already in use within this business',
@@ -105,11 +135,16 @@ export class UserController {
 
   @Get('cashiers')
   @ApiOperation({
-    summary: 'List cashiers in business',
+    summary: '[ADMIN] List cashiers in business',
     description:
-      'Returns all non-deleted cashiers with optional location/search filters.',
+      'Returns all non-deleted cashiers with optional location/search filters. Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Cashiers list returned' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Cashiers loaded')
   listCashiers(
@@ -121,11 +156,17 @@ export class UserController {
 
   @Patch('cashiers/:id')
   @ApiOperation({
-    summary: 'Update cashier account details',
+    summary: '[ADMIN] Update cashier account details',
     description:
-      'Update name, phone, branch location, salary, or reset password.',
+      'Update name, phone, branch location, salary, or reset password. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Cashier user UUID' })
   @ApiResponse({ status: 200, description: 'Cashier updated' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({ status: 404, description: 'Cashier not found' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Cashier updated')
@@ -139,11 +180,17 @@ export class UserController {
 
   @Delete('cashiers/:id')
   @ApiOperation({
-    summary: 'Soft-delete cashier account',
+    summary: '[ADMIN] Soft-delete cashier account',
     description:
-      'Soft-deletes cashier account (verifying no active open shift). Suffixes phone and email to release uniqueness.',
+      'Soft-deletes cashier account (verifying no active open shift). Suffixes phone and email to release uniqueness. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Cashier user UUID' })
   @ApiResponse({ status: 200, description: 'Cashier soft-deleted' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
     description: 'Cannot delete cashier with active open shift',
@@ -159,12 +206,18 @@ export class UserController {
 
   @Patch(':id/status')
   @ApiOperation({
-    summary: 'Update employee account status',
+    summary: '[ADMIN] Update employee account status',
     description:
-      'Updates account status (ACTIVE, SUSPENDED, REJECTED). Prevents self-suspension.',
+      'Updates account status (ACTIVE, SUSPENDED, REJECTED). Prevents self-suspension. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Employee user UUID' })
   @ApiResponse({ status: 200, description: 'Status updated' })
   @ApiResponse({ status: 400, description: 'Cannot suspend own admin account' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @Roles(Role.ADMIN)
   @ResponseMessage('User status updated')
   updateStatus(
@@ -177,11 +230,25 @@ export class UserController {
 
   @Post(':id/profile-image')
   @ApiOperation({
-    summary: 'Upload staff profile image',
-    description: 'Uploads profile photo for an employee.',
+    summary: '[ADMIN] Upload staff profile image',
+    description: 'Uploads profile photo for an employee. Requires ADMIN role.',
   })
   @ApiConsumes('multipart/form-data')
+  @ApiParam({ name: 'id', description: 'Employee user UUID' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+    },
+  })
   @ApiResponse({ status: 201, description: 'Profile image updated' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @Roles(Role.ADMIN)
   @UseInterceptors(FileInterceptor('file', imageUploadOptions))
   @ResponseMessage('Profile image updated')
@@ -195,10 +262,17 @@ export class UserController {
 
   @Delete(':id/profile-image')
   @ApiOperation({
-    summary: 'Remove staff profile image',
-    description: 'Deletes profile image from Cloudinary for an employee.',
+    summary: '[ADMIN] Remove staff profile image',
+    description:
+      'Deletes profile image from Cloudinary for an employee. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Employee user UUID' })
   @ApiResponse({ status: 200, description: 'Profile image removed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Profile image removed')
   clearStaffProfileImage(

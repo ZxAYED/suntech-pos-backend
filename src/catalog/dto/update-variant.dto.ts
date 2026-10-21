@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsInt,
   IsOptional,
   IsString,
@@ -86,4 +87,20 @@ export class UpdateVariantDto {
   @IsInt()
   @Min(0)
   stock?: number;
+
+  @ApiPropertyOptional({
+    description: 'Variant active status for sales and display',
+    example: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Target branch location UUID for branch stock adjustment',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsString()
+  locationId?: string;
 }

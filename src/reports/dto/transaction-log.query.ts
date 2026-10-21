@@ -32,6 +32,11 @@ export class TransactionLogQueryDto {
   @IsEntityId()
   locationId?: string;
 
+  @ApiPropertyOptional({ description: 'Filter by business tenant UUID' })
+  @IsOptional()
+  @IsEntityId()
+  businessId?: string;
+
   @ApiPropertyOptional({ description: 'Search matching order or cashier' })
   @IsOptional()
   @IsString()
@@ -41,6 +46,7 @@ export class TransactionLogQueryDto {
   @ApiPropertyOptional({
     description: 'Date range filter (e.g. today, weekly, monthly)',
     enum: ['today', 'yesterday', 'daily', 'weekly', 'monthly', 'quarterly'],
+    enumName: 'TransactionLogDateRange',
   })
   @IsOptional()
   @IsIn(['today', 'yesterday', 'daily', 'weekly', 'monthly', 'quarterly'])

@@ -26,11 +26,15 @@ export class ReportController {
 
   @Get('dashboard')
   @ApiOperation({
-    summary: 'Get executive dashboard metrics',
+    summary: '[ADMIN, CASHIER] Get executive dashboard metrics',
     description:
-      'Aggregates gross sales, net sales, refund deductions, order count, and payment method breakdown across today, yesterday, weekly, or monthly periods.',
+      'Aggregates gross sales, net sales, refund deductions, order count, and payment method breakdown across today, yesterday, weekly, or monthly periods. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({ status: 200, description: 'Dashboard loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Dashboard loaded')
   dashboard(
@@ -42,11 +46,16 @@ export class ReportController {
 
   @Get('analytics')
   @ApiOperation({
-    summary: 'Get business analytics & category performance',
+    summary: '[ADMIN] Get business analytics & category performance',
     description:
-      'Provides gross margin, revenue breakdown by payment method, top-selling categories, and period-over-period growth metrics (filtered by PAID orders only).',
+      'Provides gross margin, revenue breakdown by payment method, top-selling categories, and period-over-period growth metrics (filtered by PAID orders only). Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Analytics loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Analytics loaded')
   analytics(
@@ -58,11 +67,16 @@ export class ReportController {
 
   @Get('transactions')
   @ApiOperation({
-    summary: 'Get consolidated transaction log',
+    summary: '[ADMIN] Get consolidated transaction log',
     description:
-      'Paginated chronological audit log of all orders, refunds, and tender methods across business locations.',
+      'Paginated chronological audit log of all orders, refunds, and tender methods across business locations. Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Transactions loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Transactions loaded')
   transactions(

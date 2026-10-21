@@ -81,6 +81,7 @@ model ShiftSession {
 
   orders   Order[]
   advances EmployeeAdvance[]
+  refunds  Refund[]          @relation("ShiftRefunds")
 
   @@index([businessId])
   @@index([locationId])

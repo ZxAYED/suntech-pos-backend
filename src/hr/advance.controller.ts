@@ -13,6 +13,7 @@ import {
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -38,16 +39,24 @@ export class AdvanceController {
 
   @Post()
   @ApiOperation({
-    summary: 'Request / issue employee salary advance',
+    summary: '[ADMIN] Issue off-register employee salary advance',
     description:
-      'Creates an advance request for cashier. Enforces atomic salary cap check: total pending advances for current payroll month cannot exceed employee monthlySalary.',
+      'Creates an off-register advance for cashier. (In-shift register drawer cash advances must use /shifts/advances). Enforces atomic salary cap check: total pending advances for current payroll month cannot exceed employee monthlySalary. Accessible by ADMIN only.',
   })
   @ApiResponse({ status: 201, description: 'Advance recorded' })
   @ApiResponse({
-    status: 400,
-    description: 'Advance amount exceeds remaining monthly salary limit',
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
   })
-  @Roles(Role.ADMIN, Role.CASHIER)
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires ADMIN role',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Advance amount exceeds remaining monthly salary limit or cashier has no salary configured',
+  })
+  @Roles(Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Advance recorded')
@@ -60,11 +69,15 @@ export class AdvanceController {
 
   @Get()
   @ApiOperation({
-    summary: 'List employee advances with filters',
+    summary: '[ADMIN, CASHIER] List employee advances with filters',
     description:
-      'Cashiers see only their own advances; Admins see business-wide advances filterable by branch location, cashier, month, and year.',
+      'Cashiers see only their own advances; Admins see business-wide advances filterable by branch location, cashier, month, and year. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({ status: 200, description: 'Advances loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Advances loaded')
   list(
@@ -76,11 +89,15 @@ export class AdvanceController {
 
   @Get('summary')
   @ApiOperation({
-    summary: 'Get monthly advance summary',
+    summary: '[ADMIN, CASHIER] Get monthly advance summary',
     description:
-      'Calculates total approved and deducted advance amounts for a given month and year.',
+      'Calculates total approved and deducted advance amounts for a given month and year. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({ status: 200, description: 'Advance summary loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Advance summary loaded')
   summary(
@@ -92,11 +109,17 @@ export class AdvanceController {
 
   @Delete(':id')
   @ApiOperation({
-    summary: 'Cancel pending advance',
+    summary: '[ADMIN] Cancel pending advance',
     description:
-      'Admin cancels a pending advance that has not yet been deducted in payroll.',
+      'Admin cancels a pending advance that has not yet been deducted in payroll. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Advance ID' })
   @ApiResponse({ status: 200, description: 'Advance removed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 400,
     description: 'Cannot delete already deducted advance',

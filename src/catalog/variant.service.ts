@@ -1,12 +1,12 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
-import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateVariantDto } from './dto/create-variant.dto';
 import { ListVariantsQueryDto } from './dto/list-variants.query';
@@ -37,6 +37,14 @@ const variantSelect = {
       category: { select: { id: true, name: true } },
     },
   },
+  locationStocks: {
+    select: {
+      id: true,
+      locationId: true,
+      stock: true,
+      location: { select: { id: true, name: true } },
+    },
+  },
 } satisfies Prisma.VariantSelect;
 
 type VariantRow = Prisma.VariantGetPayload<{
@@ -55,7 +63,10 @@ const CODE_TAKEN = 'A variant with that SKU or barcode already exists';
 const SKU_ATTEMPTS = 3;
 const LOW_STOCK_THRESHOLD = 5;
 
-export function presentVariant(variant: VariantRow): PresentedVariant {
+export function presentVariant(
+  variant: VariantRow,
+  effectiveLocationId?: string | null,
+): PresentedVariant {
   const sellingPrice = variant.sellingPrice ?? 0;
   const costPrice = variant.costPrice;
   const marginPercent =
@@ -63,8 +74,19 @@ export function presentVariant(variant: VariantRow): PresentedVariant {
       ? Math.round(((sellingPrice - costPrice) / sellingPrice) * 100)
       : null;
 
+  let stock = variant.stock;
+  if (effectiveLocationId) {
+    if (variant.locationStocks && variant.locationStocks.length > 0) {
+      const match = variant.locationStocks.find(
+        (ls) => ls.locationId === effectiveLocationId,
+      );
+      stock = match ? match.stock : 0;
+    }
+  }
+
   return {
     ...variant,
+    stock,
     productName: variant.product?.name ?? '',
     categoryId:
       variant.product?.category?.id ?? variant.product?.categoryId ?? null,
@@ -78,11 +100,35 @@ export function presentVariant(variant: VariantRow): PresentedVariant {
 export class VariantService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async resolveBusinessId(
+    actor: AccessTokenPayload,
+    requestedBusinessId?: string,
+  ): Promise<string> {
+    if (actor.role === Role.CASHIER) {
+      if (!actor.businessId) {
+        throw new ForbiddenException('Business context is required');
+      }
+      return actor.businessId;
+    }
+    let businessId = requestedBusinessId?.trim() || actor.businessId;
+    if (!businessId && actor.role === Role.ADMIN) {
+      const user = await this.prisma.user.findFirst({
+        where: { id: actor.sub, deletedAt: null },
+        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+      });
+      businessId = user?.businessId || user?.ownedBusiness?.id;
+    }
+    if (!businessId) {
+      throw new ForbiddenException('Create a business before continuing');
+    }
+    return businessId;
+  }
+
   async create(
     admin: AccessTokenPayload,
     dto: CreateVariantDto,
   ): Promise<PresentedVariant> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     await this.assertProduct(businessId, dto.productId);
     const requestedSku = dto.sku?.trim();
     const barcode = dto.barcode?.trim() || null;
@@ -114,7 +160,54 @@ export class VariantService {
           select: variantSelect,
         });
 
-        return presentVariant(created);
+        if (dto.stock !== undefined && dto.stock !== null) {
+          let targetLocationId = dto.locationId?.trim();
+          if (!targetLocationId && this.prisma.location?.findFirst) {
+            const loc = await this.prisma.location.findFirst({
+              where: { businessId, deletedAt: null },
+              select: { id: true },
+              orderBy: { createdAt: 'asc' },
+            });
+            if (loc) {
+              targetLocationId = loc.id;
+            }
+          }
+
+          if (targetLocationId && this.prisma.locationStock?.upsert) {
+            await this.prisma.locationStock.upsert({
+              where: {
+                locationId_variantId: {
+                  locationId: targetLocationId,
+                  variantId: created.id,
+                },
+              },
+              create: {
+                businessId,
+                locationId: targetLocationId,
+                variantId: created.id,
+                stock: dto.stock,
+              },
+              update: {
+                stock: dto.stock,
+              },
+            });
+
+            if (this.prisma.locationStock.aggregate) {
+              const agg = await this.prisma.locationStock.aggregate({
+                where: { variantId: created.id },
+                _sum: { stock: true },
+              });
+              const totalStock = agg._sum.stock ?? dto.stock;
+              await this.prisma.variant.update({
+                where: { id: created.id },
+                data: { stock: totalStock },
+              });
+              created.stock = totalStock;
+            }
+          }
+        }
+
+        return presentVariant(created, dto.locationId);
       } catch (error) {
         if (!isUniqueConstraintError(error)) {
           throw error;
@@ -135,7 +228,7 @@ export class VariantService {
     actor: AccessTokenPayload,
     query?: ListVariantsQueryDto,
   ): Promise<PresentedVariant[]> {
-    const businessId = requireBusinessId(actor);
+    const businessId = await this.resolveBusinessId(actor);
     const isLowStock = query?.lowStockOnly === 'true';
     const search = query?.search?.trim();
 
@@ -158,9 +251,11 @@ export class VariantService {
       where: {
         businessId,
         deletedAt: null,
+        ...(actor.role === Role.CASHIER ? { isActive: true } : {}),
         product: {
           businessId,
           deletedAt: null,
+          ...(actor.role === Role.CASHIER ? { isActive: true } : {}),
           ...(query?.categoryId ? { categoryId: query.categoryId } : {}),
         },
         ...(query?.productId ? { productId: query.productId } : {}),
@@ -171,14 +266,22 @@ export class VariantService {
       orderBy: { name: 'asc' },
     });
 
-    return variants.map(presentVariant);
+    const effectiveLocationId =
+      actor.role === Role.CASHIER
+        ? actor.locationId
+        : query?.locationId?.trim() || undefined;
+
+    return variants.map((v) => presentVariant(v, effectiveLocationId));
   }
 
   async get(
     actor: AccessTokenPayload,
     variantId: string,
   ): Promise<PresentedVariant> {
-    return this.findVariant(requireBusinessId(actor), variantId);
+    const businessId = await this.resolveBusinessId(actor);
+    const effectiveLocationId =
+      actor.role === Role.CASHIER ? actor.locationId : undefined;
+    return this.findVariant(businessId, variantId, effectiveLocationId);
   }
 
   async update(
@@ -186,7 +289,7 @@ export class VariantService {
     variantId: string,
     dto: UpdateVariantDto,
   ): Promise<PresentedVariant> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     const current = await this.findVariant(businessId, variantId);
 
     if (dto.productId) {
@@ -218,11 +321,58 @@ export class VariantService {
             : {}),
           ...(dto.costPrice !== undefined ? { costPrice: dto.costPrice } : {}),
           ...(dto.stock !== undefined ? { stock: dto.stock } : {}),
+          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
         },
       });
 
       if (updated.count === 0) {
         throw new NotFoundException('Variant not found');
+      }
+
+      if (dto.stock !== undefined && dto.stock !== null) {
+        let targetLocationId = dto.locationId?.trim();
+        if (!targetLocationId && this.prisma.location?.findFirst) {
+          const loc = await this.prisma.location.findFirst({
+            where: { businessId, deletedAt: null },
+            select: { id: true },
+            orderBy: { createdAt: 'asc' },
+          });
+          if (loc) {
+            targetLocationId = loc.id;
+          }
+        }
+
+        if (targetLocationId && this.prisma.locationStock?.upsert) {
+          await this.prisma.locationStock.upsert({
+            where: {
+              locationId_variantId: {
+                locationId: targetLocationId,
+                variantId: current.id,
+              },
+            },
+            create: {
+              businessId,
+              locationId: targetLocationId,
+              variantId: current.id,
+              stock: dto.stock,
+            },
+            update: {
+              stock: dto.stock,
+            },
+          });
+
+          if (this.prisma.locationStock.aggregate) {
+            const agg = await this.prisma.locationStock.aggregate({
+              where: { variantId: current.id },
+              _sum: { stock: true },
+            });
+            const totalStock = agg._sum.stock ?? dto.stock;
+            await this.prisma.variant.update({
+              where: { id: current.id },
+              data: { stock: totalStock },
+            });
+          }
+        }
       }
     } catch (error) {
       if (isUniqueConstraintError(error)) {
@@ -232,14 +382,14 @@ export class VariantService {
       throw error;
     }
 
-    return this.findVariant(businessId, variantId);
+    return this.findVariant(businessId, variantId, dto.locationId);
   }
 
   async remove(
     admin: AccessTokenPayload,
     variantId: string,
   ): Promise<{ id: string; deletedAt: Date }> {
-    const businessId = requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin);
     const variant = await this.prisma.variant.findFirst({
       where: { id: variantId, businessId, deletedAt: null },
       select: { id: true, sku: true, barcode: true },
@@ -276,7 +426,11 @@ export class VariantService {
     };
   }
 
-  private async findVariant(businessId: string, variantId: string) {
+  private async findVariant(
+    businessId: string,
+    variantId: string,
+    effectiveLocationId?: string | null,
+  ) {
     const variant = await this.prisma.variant.findFirst({
       where: { id: variantId, ...this.visibleWhere(businessId) },
       select: variantSelect,
@@ -286,7 +440,7 @@ export class VariantService {
       throw new NotFoundException('Variant not found');
     }
 
-    return presentVariant(variant);
+    return presentVariant(variant, effectiveLocationId);
   }
 
   private async assertProduct(

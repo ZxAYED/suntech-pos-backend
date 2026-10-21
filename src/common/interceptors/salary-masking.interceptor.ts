@@ -8,6 +8,17 @@ import { Role } from '@prisma/client';
 import { Observable, map } from 'rxjs';
 import { AccessTokenPayload } from '../types/access-token-payload';
 
+const CASHIER_HIDDEN_KEYS = new Set([
+  'monthlySalary',
+  'costPrice',
+  'marginPercent',
+  'inventoryValue',
+  'salesRevenue',
+  'salesCount',
+]);
+
+const SOFT_DELETE_REGEX = /__del_\d+$/;
+
 @Injectable()
 export class SalaryMaskingInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
@@ -15,17 +26,24 @@ export class SalaryMaskingInterceptor implements NestInterceptor {
       user?: AccessTokenPayload;
     }>();
 
-    if (request.user?.role !== Role.CASHIER) {
-      return next.handle();
-    }
+    const isCashier = request.user?.role === Role.CASHIER;
 
-    return next.handle().pipe(map((data) => stripMonthlySalary(data)));
+    return next
+      .handle()
+      .pipe(map((data) => sanitizeResponseData(data, isCashier)));
   }
 }
 
-export function stripMonthlySalary(value: unknown): unknown {
+export function sanitizeResponseData(
+  value: unknown,
+  isCashier: boolean,
+): unknown {
+  if (typeof value === 'string') {
+    return value.replace(SOFT_DELETE_REGEX, '');
+  }
+
   if (Array.isArray(value)) {
-    return value.map((item) => stripMonthlySalary(item));
+    return value.map((item) => sanitizeResponseData(item, isCashier));
   }
 
   if (!isPlainObject(value)) {
@@ -35,14 +53,18 @@ export function stripMonthlySalary(value: unknown): unknown {
   const copy: Record<string, unknown> = {};
 
   for (const [key, nested] of Object.entries(value)) {
-    if (key === 'monthlySalary') {
+    if (isCashier && CASHIER_HIDDEN_KEYS.has(key)) {
       continue;
     }
 
-    copy[key] = stripMonthlySalary(nested);
+    copy[key] = sanitizeResponseData(nested, isCashier);
   }
 
   return copy;
+}
+
+export function stripMonthlySalary(value: unknown): unknown {
+  return sanitizeResponseData(value, true);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

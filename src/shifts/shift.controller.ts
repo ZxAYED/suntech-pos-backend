@@ -12,6 +12,7 @@ import {
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -39,11 +40,19 @@ export class ShiftController {
 
   @Post('open')
   @ApiOperation({
-    summary: 'Open a new register shift',
+    summary: '[ADMIN, CASHIER] Open a new register shift',
     description:
-      'Opens a register shift with starting cash float. If a shift was left open on a previous calendar day (Dhaka timezone), set autoClosePrevious=true to reconcile and auto-close it.',
+      'Opens a register shift with starting cash float. If a shift was left open on a previous calendar day (Dhaka timezone), set autoClosePrevious=true to reconcile and auto-close it. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({ status: 201, description: 'Shift opened successfully' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires CASHIER or ADMIN role',
+  })
   @ApiResponse({
     status: 400,
     description:
@@ -60,11 +69,19 @@ export class ShiftController {
 
   @Get('active')
   @ApiOperation({
-    summary: 'Get active open shift session',
+    summary: '[ADMIN, CASHIER] Get active open shift session',
     description:
-      'Retrieves current open shift details with real-time drawer metrics and advance subtractions.',
+      'Retrieves current open shift details with real-time drawer metrics and advance subtractions. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({ status: 200, description: 'Active shift loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires CASHIER or ADMIN role',
+  })
   @ApiResponse({ status: 404, description: 'No active open shift found' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @ResponseMessage('Active shift loaded')
@@ -74,11 +91,19 @@ export class ShiftController {
 
   @Post('close')
   @ApiOperation({
-    summary: 'Close current active shift',
+    summary: '[ADMIN, CASHIER] Close current active shift',
     description:
-      'Reconciles counted drawer cash with expected cash (cash float + COD sales - COD refunds - advances).',
+      'Reconciles counted drawer cash with expected cash (cash float + COD sales - COD refunds - advances). Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({ status: 200, description: 'Shift closed successfully' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires CASHIER or ADMIN role',
+  })
   @ApiResponse({ status: 404, description: 'No active shift found' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @Idempotent()
@@ -93,10 +118,20 @@ export class ShiftController {
 
   @Post(':id/close')
   @ApiOperation({
-    summary: 'Close specific shift by ID',
-    description: 'Admin or shift owner closes a specific shift session by ID.',
+    summary: '[ADMIN, CASHIER] Close specific shift by ID',
+    description:
+      'Admin or shift owner closes a specific shift session by ID. Accessible by CASHIER and ADMIN.',
   })
+  @ApiParam({ name: 'id', description: 'Shift ID' })
   @ApiResponse({ status: 200, description: 'Shift closed successfully' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires CASHIER or ADMIN role',
+  })
   @ApiResponse({ status: 404, description: 'Shift not found' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @Idempotent()
@@ -112,11 +147,19 @@ export class ShiftController {
 
   @Post('advances')
   @ApiOperation({
-    summary: 'Take cash advance from active shift drawer',
+    summary: '[ADMIN, CASHIER] Take cash advance from active shift drawer',
     description:
-      'Withdraws physical cash advance for the cashier. Atomic check enforces that total pending advances cannot exceed monthlySalary and amount cannot exceed drawer cash.',
+      'Withdraws physical cash advance for the cashier. Atomic check enforces that total pending advances cannot exceed monthlySalary and amount cannot exceed drawer cash. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({ status: 201, description: 'Shift advance recorded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires CASHIER or ADMIN role',
+  })
   @ApiResponse({
     status: 400,
     description:
@@ -136,11 +179,19 @@ export class ShiftController {
 
   @Get()
   @ApiOperation({
-    summary: 'List shift history with filters',
+    summary: '[ADMIN, CASHIER] List shift history with filters',
     description:
-      'Paginated shift session audit list. Cashier is restricted to own shifts; Admin can filter by location.',
+      'Paginated shift session audit list. Cashier is restricted to own shifts; Admin can filter by location. Accessible by CASHIER and ADMIN.',
   })
   @ApiResponse({ status: 200, description: 'Shifts loaded' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires CASHIER or ADMIN role',
+  })
   @Roles(Role.CASHIER, Role.ADMIN)
   @ResponseMessage('Shifts loaded')
   list(

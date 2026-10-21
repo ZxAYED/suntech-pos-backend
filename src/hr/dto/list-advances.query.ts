@@ -33,6 +33,7 @@ export class ListAdvancesQueryDto {
 
   @ApiPropertyOptional({
     enum: AdvanceStatus,
+    enumName: 'AdvanceStatus',
     description: 'Filter by advance status (PENDING, DEDUCTED)',
   })
   @IsOptional()

@@ -33,4 +33,12 @@ export class ListVariantsQueryDto {
   @IsOptional()
   @IsString()
   lowStockOnly?: string;
+
+  @ApiPropertyOptional({
+    description: 'Filter stock counts for a specific branch location UUID',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsString()
+  locationId?: string;
 }

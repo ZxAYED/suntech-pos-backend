@@ -10,6 +10,7 @@ import {
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -33,11 +34,19 @@ export class AdminController {
 
   @Get()
   @ApiOperation({
-    summary: 'List admin registration requests',
+    summary: '[SUPER_ADMIN] List admin registration requests',
     description:
-      'Super Admin list of registered Admin accounts with status filter (PENDING_APPROVAL, ACTIVE, etc.).',
+      'Super Admin list of registered Admin accounts with status filter (PENDING_APPROVAL, ACTIVE, etc.). Requires SUPER_ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Admin accounts returned' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires SUPER_ADMIN role',
+  })
   @ResponseMessage('Admin accounts loaded')
   list(@Query() query: ListAdminUsersQueryDto) {
     return this.adminService.list(query);
@@ -45,13 +54,22 @@ export class AdminController {
 
   @Patch(':id/approve')
   @ApiOperation({
-    summary: 'Approve pending admin registration',
+    summary: '[SUPER_ADMIN] Approve pending admin registration',
     description:
-      'Approves pending admin, generates their publicId (ADM-XXXXX), and activates their account.',
+      'Approves pending admin, generates their publicId (ADM-XXXXX), and activates their account. Requires SUPER_ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Admin user UUID to approve' })
   @ApiResponse({
     status: 200,
     description: 'Admin account approved and activated',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires SUPER_ADMIN role',
   })
   @ApiResponse({ status: 404, description: 'Pending admin account not found' })
   @Idempotent()
@@ -62,11 +80,20 @@ export class AdminController {
 
   @Patch(':id/status')
   @ApiOperation({
-    summary: 'Update admin account status',
+    summary: '[SUPER_ADMIN] Update admin account status',
     description:
-      'Update status of an admin account (SUSPENDED, REJECTED, ACTIVE).',
+      'Update status of an admin account (SUSPENDED, REJECTED, ACTIVE). Requires SUPER_ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Admin user UUID' })
   @ApiResponse({ status: 200, description: 'Admin account status updated' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires SUPER_ADMIN role',
+  })
   @ApiResponse({ status: 404, description: 'Admin account not found' })
   @ResponseMessage('Admin status updated')
   updateStatus(@Param('id') id: string, @Body() dto: UpdateUserStatusDto) {

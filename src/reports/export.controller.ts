@@ -24,11 +24,16 @@ export class ExportController {
 
   @Get('export')
   @ApiOperation({
-    summary: 'Export report data to CSV or PDF',
+    summary: '[ADMIN] Export report data to CSV or PDF',
     description:
-      'Generates tabular CSV or structured PDF export for sales or payroll report types.',
+      'Generates tabular CSV or structured PDF export for sales or payroll report types. Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'File exported successfully' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({ status: 400, description: 'Invalid export parameters' })
   exportReport(
     @CurrentUser() admin: AccessTokenPayload,

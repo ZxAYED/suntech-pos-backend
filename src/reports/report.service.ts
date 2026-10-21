@@ -2,6 +2,11 @@ import { ForbiddenException, Injectable } from '@nestjs/common';
 import { OrderStatus, PaymentMethod, Prisma, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { resolveLocationScope } from '../common/utils/location-scope';
+import {
+  getDhakaMonthBounds,
+  getDhakaReportDateRange,
+  getDhakaStartOfDay,
+} from '../common/utils/timezone.util';
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { AnalyticsQueryDto } from './dto/analytics.query';
@@ -90,57 +95,7 @@ export function getReportDateRange(
   range?: string,
   now = new Date(),
 ): { gte: Date; lte?: Date } {
-  const startOfToday = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-  );
-  const endOfToday = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-    23,
-    59,
-    59,
-    999,
-  );
-
-  switch (range?.toLowerCase()) {
-    case 'yesterday': {
-      const startOfYesterday = new Date(
-        now.getFullYear(),
-        now.getMonth(),
-        now.getDate() - 1,
-      );
-      const endOfYesterday = new Date(
-        now.getFullYear(),
-        now.getMonth(),
-        now.getDate() - 1,
-        23,
-        59,
-        59,
-        999,
-      );
-      return { gte: startOfYesterday, lte: endOfYesterday };
-    }
-    case 'today':
-    case 'daily': {
-      return { gte: startOfToday, lte: endOfToday };
-    }
-    case 'weekly': {
-      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      return { gte: sevenDaysAgo, lte: endOfToday };
-    }
-    case 'quarterly': {
-      const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
-      return { gte: ninetyDaysAgo, lte: endOfToday };
-    }
-    case 'monthly':
-    default: {
-      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-      return { gte: thirtyDaysAgo, lte: endOfToday };
-    }
-  }
+  return getDhakaReportDateRange(range, now);
 }
 
 const transactionLineSelect = {
@@ -157,11 +112,39 @@ const transactionLineSelect = {
 export class ReportService {
   constructor(private readonly prisma: PrismaService) {}
 
-  dashboard(
+  private async resolveReportBusinessId(
+    actor: AccessTokenPayload,
+    requestedBusinessId?: string,
+  ): Promise<string> {
+    if (actor.role === Role.CASHIER) {
+      if (!actor.businessId) {
+        throw new ForbiddenException('Business context is required');
+      }
+      return actor.businessId;
+    }
+    let businessId = requestedBusinessId?.trim() || actor.businessId;
+    if (!businessId && actor.role === Role.ADMIN) {
+      const user = await this.prisma.user.findFirst({
+        where: { id: actor.sub, deletedAt: null },
+        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+      });
+      businessId = user?.businessId || user?.ownedBusiness?.id;
+    }
+    if (!businessId) {
+      throw new ForbiddenException('Business context is required');
+    }
+    return businessId;
+  }
+
+  async dashboard(
     actor: AccessTokenPayload,
     query?: DashboardQueryDto,
   ): Promise<CashierDashboard | AdminDashboard> {
-    const scope = resolveLocationScope(actor, query?.locationId);
+    const businessId = await this.resolveReportBusinessId(
+      actor,
+      query?.businessId,
+    );
+    const scope = resolveLocationScope(actor, query?.locationId, businessId);
 
     if (actor.role === Role.CASHIER) {
       return this.cashierDashboard(
@@ -188,7 +171,11 @@ export class ReportService {
     admin: AccessTokenPayload,
     query?: AnalyticsQueryDto,
   ): Promise<PeriodAnalytics> {
-    const scope = resolveLocationScope(admin, query?.locationId);
+    const businessId = await this.resolveReportBusinessId(
+      admin,
+      query?.businessId,
+    );
+    const scope = resolveLocationScope(admin, query?.locationId, businessId);
     const range = query?.range ?? 'monthly';
     const metrics = await this.computePeriodMetrics(
       scope.businessId,
@@ -209,7 +196,11 @@ export class ReportService {
   }
 
   async transactions(actor: AccessTokenPayload, query: TransactionLogQueryDto) {
-    const scope = resolveLocationScope(actor, query?.locationId);
+    const businessId = await this.resolveReportBusinessId(
+      actor,
+      query?.businessId,
+    );
+    const scope = resolveLocationScope(actor, query?.locationId, businessId);
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const where: Prisma.OrderWhereInput = {
@@ -410,7 +401,7 @@ export class ReportService {
     const lineDelegate =
       (this.prisma as any).orderLine ?? (this.prisma as any).orderItem;
 
-    const [periodRevenue, ordersCount, paymentGroups, lines] =
+    const [periodRevenue, ordersCount, paymentGroups, lines, periodRefunds] =
       await Promise.all([
         this.netRevenue(periodOrderWhere),
         this.prisma.order.count
@@ -426,7 +417,7 @@ export class ReportService {
               by: ['paymentMethod'],
               where: {
                 ...periodOrderWhere,
-                status: OrderStatus.PAID,
+                status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
               },
               _sum: { totalAmount: true },
             })
@@ -436,11 +427,13 @@ export class ReportService {
               where: {
                 order: {
                   ...periodOrderWhere,
-                  status: OrderStatus.PAID,
+                  status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
                 },
               },
               select: {
                 unitPrice: true,
+                unitCost: true,
+                categoryName: true,
                 subtotal: true,
                 quantity: true,
                 variantId: true,
@@ -462,6 +455,15 @@ export class ReportService {
               },
             })
           : Promise.resolve([]),
+        this.prisma.refund.findMany
+          ? this.prisma.refund.findMany({
+              where: { order: periodOrderWhere },
+              select: {
+                totalRefund: true,
+                order: { select: { paymentMethod: true } },
+              },
+            })
+          : Promise.resolve([]),
       ]);
 
     const averageTicketValue =
@@ -477,6 +479,12 @@ export class ReportService {
       if (group.paymentMethod && group.paymentMethod in byMethod) {
         byMethod[group.paymentMethod as PaymentMethod] =
           group._sum.totalAmount ?? 0;
+      }
+    }
+    for (const ref of periodRefunds || []) {
+      const pm = (ref.order as any)?.paymentMethod as PaymentMethod;
+      if (pm && pm in byMethod) {
+        byMethod[pm] = Math.max(0, byMethod[pm] - ref.totalRefund);
       }
     }
     const cashAmount = byMethod.COD;
@@ -509,13 +517,21 @@ export class ReportService {
         continue;
       }
 
-      if (line.variantId && line.variant?.costPrice != null) {
+      const unitCost =
+        (line as any).unitCost != null
+          ? (line as any).unitCost
+          : line.variant?.costPrice;
+
+      if (line.variantId && unitCost != null) {
         catalogRevenue += subtotal;
-        catalogCost += line.variant.costPrice * quantity;
+        catalogCost += unitCost * quantity;
       }
 
-      const categoryName =
-        line.variant?.product?.category?.name || 'Uncategorized';
+      const rawCategoryName =
+        (line as any).categoryName ||
+        line.variant?.product?.category?.name ||
+        'Uncategorized';
+      const categoryName = rawCategoryName.replace(/__del_\d+$/, '');
       categoryRevenueMap.set(
         categoryName,
         (categoryRevenueMap.get(categoryName) ?? 0) + subtotal,
@@ -747,7 +763,7 @@ export class ReportService {
   ): Promise<
     Array<{ variantLabel: string; totalRevenue: number; totalQuantity: number }>
   > {
-    const businessId = requireBusinessId(actor);
+    const businessId = await this.resolveReportBusinessId(actor);
     const lineDelegate = (this.prisma as any).orderLine;
     if (!lineDelegate) {
       return [];
@@ -789,9 +805,7 @@ export class ReportService {
 }
 
 function utcDay(now = new Date()): { gte: Date; lt: Date } {
-  const gte = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
+  const gte = getDhakaStartOfDay(now);
 
   return {
     gte,
@@ -800,8 +814,10 @@ function utcDay(now = new Date()): { gte: Date; lt: Date } {
 }
 
 function utcMonth(now = new Date()): { gte: Date; lt: Date } {
+  const { start, end } = getDhakaMonthBounds();
+
   return {
-    gte: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
-    lt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)),
+    gte: start,
+    lt: end,
   };
 }

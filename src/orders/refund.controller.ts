@@ -10,6 +10,7 @@ import {
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -34,11 +35,17 @@ export class RefundController {
 
   @Post(':id/refunds')
   @ApiOperation({
-    summary: 'Process partial or full order refund',
+    summary: '[ADMIN] Process partial or full order refund',
     description:
-      'Refunds specified order items. If order becomes fully refunded, marks Order.status = REFUNDED. For COD orders associated with a shift, decrements drawer cashCollected.',
+      'Refunds specified order items. If order becomes fully refunded, marks Order.status = REFUNDED. For COD orders associated with a shift, decrements drawer cashCollected. Requires ADMIN role.',
   })
+  @ApiParam({ name: 'id', description: 'Order ID' })
   @ApiResponse({ status: 201, description: 'Refund completed' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 400,
     description: 'Invalid refund quantities or order not refundable',
