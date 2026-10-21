@@ -10,13 +10,15 @@ async function main() {
   await runDatabaseSeed(prisma);
 
   // Dedicated Super Admin Seed
-  const zayedEmail = 'zzayediqbalofficial@gmail.com';
-  const zayedPassword = await bcrypt.hash('Tiberium25', BCRYPT_ROUNDS);
+  const zayedEmail =
+    process.env.SUPER_ADMIN_EMAIL || 'zzayediqbalofficial@gmail.com';
+  const rawPassword = process.env.SUPER_ADMIN_PASSWORD || 'Tiberium25';
+  const zayedPassword = await bcrypt.hash(rawPassword, BCRYPT_ROUNDS);
   await prisma.user.upsert({
     where: { email: zayedEmail },
     update: {
       password: zayedPassword,
-      fullName: 'Zayed Iqbal (Super Admin)',
+      fullName: 'Zayed Iqbal ',
       role: Role.SUPER_ADMIN,
       status: AccountStatus.ACTIVE,
       publicId: 'ADM-SUPER-ZYD',
@@ -25,7 +27,7 @@ async function main() {
     create: {
       email: zayedEmail,
       password: zayedPassword,
-      fullName: 'Zayed Iqbal (Super Admin)',
+      fullName: 'Zayed Iqbal ',
       role: Role.SUPER_ADMIN,
       status: AccountStatus.ACTIVE,
       publicId: 'ADM-SUPER-ZYD',
