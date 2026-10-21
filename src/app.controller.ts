@@ -15,7 +15,7 @@ export class AppController {
   })
   @ApiResponse({ status: 200, description: 'Service is running' })
   @ResponseMessage('Service is running')
-  getHello(): string {
+  getHello(): Record<string, unknown> {
     return this.appService.getHello();
   }
 }

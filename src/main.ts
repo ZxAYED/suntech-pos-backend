@@ -13,7 +13,9 @@ async function bootstrap(): Promise<void> {
     credentials: true,
   });
 
-  app.setGlobalPrefix('api/v1');
+  app.setGlobalPrefix('api/v1', {
+    exclude: ['/'],
+  });
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -37,8 +39,13 @@ async function bootstrap(): Promise<void> {
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, swaggerDocument);
 
-  const port = Number(configService.get<string>('PORT', '3001'));
+  const port = Number(configService.get<string>('PORT', '3000'));
   await app.listen(port);
+  console.log(`🚀 SunTech POS Backend is running on: http://localhost:${port}`);
+  console.log(
+    `📚 Swagger API Docs available at: http://localhost:${port}/api/docs`,
+  );
+  console.log(`🔗 API Base URL: http://localhost:${port}/api/v1`);
 }
 
 void bootstrap();

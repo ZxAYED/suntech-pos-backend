@@ -15,8 +15,13 @@ describe('AppController', () => {
   });
 
   describe('root', () => {
-    it('should return "Hello World!"', () => {
-      expect(appController.getHello()).toBe('Hello World!');
+    it('should return welcome status object', () => {
+      expect(appController.getHello()).toEqual(
+        expect.objectContaining({
+          status: 'online',
+          message: 'Welcome to SunTech POS System!',
+        }),
+      );
     });
   });
 });
