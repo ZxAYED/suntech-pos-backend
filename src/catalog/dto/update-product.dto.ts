@@ -54,4 +54,36 @@ export class UpdateProductDto {
   @IsOptional()
   @IsString()
   businessId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Updated custom attributes / attachments for product (pass null to clear). Accepts array of { key, value } or key-value object map.',
+    example: [
+      { key: 'IMEI', value: '358249012345678' },
+      { key: 'Serial Number', value: 'SN-998822' },
+    ],
+  })
+  @IsOptional()
+  customAttributes?: any;
+
+  @ApiPropertyOptional({
+    description: 'Alias for customAttributes',
+    example: [{ key: 'IMEI', value: '358249012345678' }],
+  })
+  @IsOptional()
+  customFields?: any;
+
+  @ApiPropertyOptional({
+    description: 'Alias for customAttributes',
+    example: [{ key: 'IMEI', value: '358249012345678' }],
+  })
+  @IsOptional()
+  attributes?: any;
+
+  @ApiPropertyOptional({
+    description: 'Alias for customAttributes / multiple attachments',
+    example: [{ key: 'IMEI', value: '358249012345678' }],
+  })
+  @IsOptional()
+  attachments?: any;
 }

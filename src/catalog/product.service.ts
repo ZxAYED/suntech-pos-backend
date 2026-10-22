@@ -10,6 +10,7 @@ import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.e
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProductDto } from './dto/create-product.dto';
+import { normalizeCustomAttributes } from './dto/custom-attribute.dto';
 import { ListProductsQueryDto } from './dto/list-products.query';
 import { UpdateProductDto } from './dto/update-product.dto';
 
@@ -24,6 +25,7 @@ const variantSelect = {
   profileImageUrl: true,
   profileImagePublicId: true,
   profileImageKey: true,
+  customAttributes: true,
   locationStocks: {
     select: {
       locationId: true,
@@ -37,6 +39,7 @@ const productSelect = {
   name: true,
   description: true,
   categoryId: true,
+  customAttributes: true,
   createdAt: true,
   updatedAt: true,
   category: {
@@ -104,6 +107,13 @@ export class ProductService {
       await this.assertCategory(businessId, dto.categoryId);
     }
 
+    const rawAttrs =
+      dto.customAttributes ??
+      dto.customFields ??
+      dto.attributes ??
+      dto.attachments;
+    const customAttributes = normalizeCustomAttributes(rawAttrs);
+
     try {
       const product = await this.prisma.product.create({
         data: {
@@ -111,6 +121,9 @@ export class ProductService {
           name,
           description: dto.description?.trim() || null,
           categoryId: dto.categoryId ?? null,
+          customAttributes:
+            (customAttributes as unknown as Prisma.InputJsonValue) ??
+            Prisma.DbNull,
         },
         select: productSelect,
       });
@@ -219,6 +232,15 @@ export class ProductService {
       await this.assertCategory(businessId, dto.categoryId);
     }
 
+    const rawAttrs =
+      dto.customAttributes !== undefined
+        ? dto.customAttributes
+        : dto.customFields !== undefined
+          ? dto.customFields
+          : dto.attributes !== undefined
+            ? dto.attributes
+            : dto.attachments;
+
     const data: Prisma.ProductUpdateManyMutationInput = {
       ...(name ? { name } : {}),
       ...(dto.description !== undefined
@@ -226,6 +248,14 @@ export class ProductService {
         : {}),
       ...(dto.categoryId !== undefined ? { categoryId: dto.categoryId } : {}),
       ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+      ...(rawAttrs !== undefined
+        ? {
+            customAttributes:
+              (normalizeCustomAttributes(
+                rawAttrs,
+              ) as unknown as Prisma.InputJsonValue) ?? Prisma.DbNull,
+          }
+        : {}),
     };
 
     try {

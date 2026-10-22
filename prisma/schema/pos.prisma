@@ -43,15 +43,16 @@ model Category {
 }
 
 model Product {
-  id          String    @id @default(uuid())
-  businessId  String
-  business    Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  name        String
-  description String?
-  categoryId  String?
-  category    Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  variants    Variant[]
-  isActive    Boolean   @default(true)
+  id               String    @id @default(uuid())
+  businessId       String
+  business         Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name             String
+  description      String?
+  categoryId       String?
+  category         Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  variants         Variant[]
+  isActive         Boolean   @default(true)
+  customAttributes Json?
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())
@@ -75,6 +76,7 @@ model Variant {
   costPrice    Int?
   stock        Int     @default(0)
   isActive     Boolean @default(true)
+  customAttributes Json?
 
   profileImageUrl      String?
   profileImagePublicId String?

@@ -1,5 +1,5 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProductService } from './product.service';
 
@@ -73,9 +73,82 @@ describe('ProductService', () => {
       name: 'iPhone 15 Pro',
       description: 'Flagship phone',
       categoryId: 'cat-1',
+      customAttributes: Prisma.DbNull,
     });
     expect(res.name).toBe('iPhone 15 Pro');
     expect(res.category).toEqual({ id: 'cat-1', name: 'Electronics' });
+  });
+
+  it('creates a product with multiple custom attributes (e.g. IMEI, serial number)', async () => {
+    const res = await service.create(admin, {
+      name: 'iPhone 15 Pro Max',
+      customAttributes: [
+        { key: 'IMEI', value: '358249012345678' },
+        { key: 'Serial Number', value: 'SN-APPLE-123' },
+        { key: 'Warranty', value: '1 Year AppleCare' },
+      ],
+    });
+
+    const call = (
+      productCreate.mock.calls as unknown as Array<
+        [{ data: Record<string, unknown> }]
+      >
+    )[0][0];
+    expect(call.data.customAttributes).toEqual([
+      { key: 'IMEI', value: '358249012345678' },
+      { key: 'Serial Number', value: 'SN-APPLE-123' },
+      { key: 'Warranty', value: '1 Year AppleCare' },
+    ]);
+    expect(res.name).toBe('iPhone 15 Pro Max');
+  });
+
+  it('normalizes key-value dictionary and attachments alias for custom attributes', async () => {
+    await service.create(admin, {
+      name: 'Samsung Galaxy S24',
+      attachments: {
+        IMEI: '359111222333444',
+        Color: 'Titanium Gray',
+      },
+    });
+
+    const call = (
+      productCreate.mock.calls as unknown as Array<
+        [{ data: Record<string, unknown> }]
+      >
+    )[0][0];
+    expect(call.data.customAttributes).toEqual([
+      { key: 'IMEI', value: '359111222333444' },
+      { key: 'Color', value: 'Titanium Gray' },
+    ]);
+  });
+
+  it('updates product custom attributes via update method', async () => {
+    productFindFirst.mockResolvedValueOnce({
+      id: 'prod-1',
+      businessId: 'biz-1',
+      name: 'Existing Product',
+    });
+    productFindFirst.mockResolvedValueOnce({
+      id: 'prod-1',
+      businessId: 'biz-1',
+      name: 'Existing Product',
+      customAttributes: [{ key: 'IMEI', value: 'updated-imei' }],
+      category: null,
+      variants: [],
+    });
+
+    await service.update(admin, 'prod-1', {
+      customAttributes: [{ key: 'IMEI', value: 'updated-imei' }],
+    });
+
+    const updateCall = (
+      productUpdateMany.mock.calls as unknown as Array<
+        [{ data: Record<string, unknown> }]
+      >
+    )[0][0];
+    expect(updateCall.data.customAttributes).toEqual([
+      { key: 'IMEI', value: 'updated-imei' },
+    ]);
   });
 
   it('rejects product creation when name collides', async () => {

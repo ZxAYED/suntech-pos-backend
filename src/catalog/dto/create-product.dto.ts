@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { CustomAttributeDto } from './custom-attribute.dto';
 
 export class CreateProductDto {
   @ApiProperty({
@@ -38,4 +39,38 @@ export class CreateProductDto {
   @IsOptional()
   @IsString()
   businessId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Multiple custom attributes / attachments for product (e.g. IMEI, Serial Number, Warranty, Model, Color). Accepts array of { key, value } or key-value object map.',
+    example: [
+      { key: 'IMEI', value: '358249012345678' },
+      { key: 'Serial Number', value: 'SN-998822' },
+      { key: 'Warranty', value: '1 Year Official' },
+    ],
+  })
+  @IsOptional()
+  customAttributes?: CustomAttributeDto[] | Record<string, any>;
+
+  @ApiPropertyOptional({
+    description: 'Alias for customAttributes',
+    example: [{ key: 'IMEI', value: '358249012345678' }],
+  })
+  @IsOptional()
+  customFields?: CustomAttributeDto[] | Record<string, any>;
+
+  @ApiPropertyOptional({
+    description: 'Alias for customAttributes',
+    example: [{ key: 'IMEI', value: '358249012345678' }],
+  })
+  @IsOptional()
+  attributes?: CustomAttributeDto[] | Record<string, any>;
+
+  @ApiPropertyOptional({
+    description: 'Alias for customAttributes / multiple attachments',
+    example: [{ key: 'IMEI', value: '358249012345678' }],
+  })
+  @IsOptional()
+  attachments?: CustomAttributeDto[] | Record<string, any>;
 }
+
