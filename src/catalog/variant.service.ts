@@ -1,15 +1,20 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, Role } from '@prisma/client';
+import { Prisma, Role, StockTransactionType } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateVariantDto } from './dto/create-variant.dto';
 import { ListVariantsQueryDto } from './dto/list-variants.query';
+import {
+  StockOperation,
+  UpdateVariantStockDto,
+} from './dto/update-variant-stock.dto';
 import { UpdateVariantDto } from './dto/update-variant.dto';
 import { createSku } from './sku';
 
@@ -400,6 +405,171 @@ export class VariantService {
     }
 
     return this.findVariant(businessId, variantId, dto.locationId);
+  }
+
+  async updateStock(
+    actor: AccessTokenPayload,
+    variantId: string,
+    dto: UpdateVariantStockDto,
+    requestedBusinessId?: string,
+  ): Promise<PresentedVariant> {
+    const businessId = await this.resolveBusinessId(
+      actor,
+      requestedBusinessId || dto.businessId,
+    );
+
+    let targetLocationId =
+      actor.role === Role.CASHIER
+        ? actor.locationId || dto.locationId
+        : dto.locationId;
+
+    if (!targetLocationId && this.prisma.location?.findFirst) {
+      const loc = await this.prisma.location.findFirst({
+        where: { businessId, deletedAt: null },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (loc) {
+        targetLocationId = loc.id;
+      }
+    }
+
+    const current = await this.prisma.variant.findFirst({
+      where: { id: variantId, ...this.visibleWhere(businessId) },
+      select: {
+        id: true,
+        name: true,
+        stock: true,
+        locationStocks: targetLocationId
+          ? {
+              where: { locationId: targetLocationId },
+              select: { stock: true },
+            }
+          : false,
+      },
+    });
+
+    if (!current) {
+      throw new NotFoundException('Variant not found');
+    }
+
+    const existingLocStock = current.locationStocks?.[0]?.stock;
+    const currentBaseline = existingLocStock ?? current.stock;
+
+    let operation = dto.operation ?? StockOperation.DEDUCT;
+    let changeQty = 0;
+
+    if (dto.stock !== undefined && dto.stock !== null) {
+      operation = StockOperation.SET;
+      changeQty = dto.stock;
+    } else if (dto.delta !== undefined && dto.delta !== null) {
+      if (dto.delta < 0) {
+        operation = StockOperation.DEDUCT;
+        changeQty = Math.abs(dto.delta);
+      } else {
+        operation = StockOperation.ADD;
+        changeQty = dto.delta;
+      }
+    } else if (dto.quantity !== undefined && dto.quantity !== null) {
+      if (dto.quantity < 0) {
+        operation = StockOperation.DEDUCT;
+        changeQty = Math.abs(dto.quantity);
+      } else {
+        changeQty = dto.quantity;
+      }
+    } else {
+      throw new BadRequestException(
+        'Provide quantity, delta, or stock to update',
+      );
+    }
+
+    let newLocationStock: number;
+    let newGlobalStock: number;
+    let txType: StockTransactionType;
+    let txQty: number;
+
+    if (operation === StockOperation.DEDUCT) {
+      txType = StockTransactionType.SALE;
+      txQty = changeQty;
+
+      if (!dto.allowNegative && currentBaseline < changeQty) {
+        throw new BadRequestException(
+          `Insufficient stock for "${current.name}". Available: ${currentBaseline}, Requested deduction: ${changeQty}`,
+        );
+      }
+
+      newLocationStock = dto.allowNegative
+        ? currentBaseline - changeQty
+        : Math.max(0, currentBaseline - changeQty);
+      newGlobalStock = dto.allowNegative
+        ? current.stock - changeQty
+        : Math.max(0, current.stock - changeQty);
+    } else if (operation === StockOperation.ADD) {
+      txType = StockTransactionType.RESTOCK;
+      txQty = changeQty;
+
+      newLocationStock = currentBaseline + changeQty;
+      newGlobalStock = current.stock + changeQty;
+    } else {
+      // SET
+      txType = StockTransactionType.MANUAL_ADJUSTMENT;
+      txQty = Math.abs(changeQty - currentBaseline);
+
+      newLocationStock = Math.max(0, changeQty);
+      newGlobalStock = Math.max(0, changeQty);
+    }
+
+    // 1. Update location stock if targetLocationId is available
+    if (targetLocationId && this.prisma.locationStock?.upsert) {
+      await this.prisma.locationStock.upsert({
+        where: {
+          locationId_variantId: {
+            locationId: targetLocationId,
+            variantId: current.id,
+          },
+        },
+        create: {
+          businessId,
+          locationId: targetLocationId,
+          variantId: current.id,
+          stock: newLocationStock,
+        },
+        update: {
+          stock: newLocationStock,
+        },
+      });
+
+      if (this.prisma.locationStock.aggregate) {
+        const agg = await this.prisma.locationStock.aggregate({
+          where: { variantId: current.id },
+          _sum: { stock: true },
+        });
+        newGlobalStock = agg?._sum?.stock ?? newLocationStock;
+      }
+    }
+
+    // 2. Update variant global aggregate stock
+    await this.prisma.variant.update({
+      where: { id: current.id },
+      data: { stock: newGlobalStock },
+    });
+
+    // 3. Create stock transaction record
+    if (this.prisma.stockTransaction?.create && txQty > 0) {
+      await this.prisma.stockTransaction.create({
+        data: {
+          variantId: current.id,
+          locationId: targetLocationId ?? null,
+          type: txType,
+          quantity: txQty,
+          notes:
+            dto.notes?.trim() ||
+            `Custom sale stock adjustment (${operation} ${txQty})`,
+        },
+      });
+    }
+
+    return this.findVariant(businessId, current.id, targetLocationId);
   }
 
   async remove(

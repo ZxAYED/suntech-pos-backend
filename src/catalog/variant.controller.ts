@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -29,6 +30,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateVariantDto } from './dto/create-variant.dto';
 import { ListVariantsQueryDto } from './dto/list-variants.query';
 import { UpdateVariantDto } from './dto/update-variant.dto';
+import { UpdateVariantStockDto } from './dto/update-variant-stock.dto';
 import { VariantService } from './variant.service';
 
 @ApiTags('Catalog - Variants')
@@ -155,6 +157,127 @@ export class VariantController {
     @Query('locationId') locationId?: string,
   ) {
     return this.variants.get(actor, id, businessId, locationId);
+  }
+
+  @Patch('stock')
+  @ApiOperation({
+    summary: '[ADMIN | CASHIER] Update variant stock',
+    description:
+      'Deducts, adds, or sets variant stock for custom sale or inventory update. Takes variantId from payload body.',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiResponse({ status: 200, description: 'Variant stock updated' })
+  @ApiResponse({
+    status: 400,
+    description: 'Bad request - insufficient stock or missing quantity',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 404, description: 'Variant not found' })
+  @Roles(Role.ADMIN, Role.CASHIER)
+  @ResponseMessage('Variant stock updated')
+  updateStockBatch(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Body() dto: UpdateVariantStockDto,
+    @Query('businessId') businessId?: string,
+  ) {
+    if (!dto.variantId) {
+      throw new BadRequestException(
+        'variantId is required in body when not in path',
+      );
+    }
+    return this.variants.updateStock(
+      actor,
+      dto.variantId,
+      dto,
+      businessId || dto.businessId,
+    );
+  }
+
+  @Patch(':id/stock')
+  @ApiOperation({
+    summary: '[ADMIN | CASHIER] Update variant stock by ID',
+    description:
+      'Deducts, adds, or sets stock for a specific variant (custom sale, restock, manual adjustment). Accessible by Cashier and Admin.',
+  })
+  @ApiParam({ name: 'id', description: 'Variant UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiResponse({ status: 200, description: 'Variant stock updated' })
+  @ApiResponse({
+    status: 400,
+    description: 'Bad request - insufficient stock or missing quantity',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 404, description: 'Variant not found' })
+  @Roles(Role.ADMIN, Role.CASHIER)
+  @ResponseMessage('Variant stock updated')
+  updateStock(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Param('id') id: string,
+    @Body() dto: UpdateVariantStockDto,
+    @Query('businessId') businessId?: string,
+  ) {
+    return this.variants.updateStock(
+      actor,
+      id,
+      dto,
+      businessId || dto.businessId,
+    );
+  }
+
+  @Post(':id/stock')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: '[ADMIN | CASHIER] Update variant stock by ID (POST alias)',
+    description:
+      'POST alias for stock deduction / addition needed for custom sales or clients preferring POST.',
+  })
+  @ApiParam({ name: 'id', description: 'Variant UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiResponse({ status: 200, description: 'Variant stock updated' })
+  @ApiResponse({
+    status: 400,
+    description: 'Bad request - insufficient stock or missing quantity',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 404, description: 'Variant not found' })
+  @Roles(Role.ADMIN, Role.CASHIER)
+  @ResponseMessage('Variant stock updated')
+  updateStockPost(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Param('id') id: string,
+    @Body() dto: UpdateVariantStockDto,
+    @Query('businessId') businessId?: string,
+  ) {
+    return this.variants.updateStock(
+      actor,
+      id,
+      dto,
+      businessId || dto.businessId,
+    );
   }
 
   @Patch(':id')

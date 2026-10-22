@@ -1,6 +1,11 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
-import { Prisma, Role } from '@prisma/client';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma, Role, StockTransactionType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { StockOperation } from './dto/update-variant-stock.dto';
 import { presentVariant, VariantService } from './variant.service';
 
 describe('VariantService', () => {
@@ -10,6 +15,10 @@ describe('VariantService', () => {
   const variantCreate = jest.fn();
   const variantUpdate = jest.fn();
   const variantUpdateMany = jest.fn();
+  const locationStockUpsert = jest.fn();
+  const locationStockAggregate = jest.fn();
+  const stockTransactionCreate = jest.fn();
+  const locationFindFirst = jest.fn();
 
   const prisma = {
     product: { findFirst: productFindFirst },
@@ -19,6 +28,16 @@ describe('VariantService', () => {
       create: variantCreate,
       update: variantUpdate,
       updateMany: variantUpdateMany,
+    },
+    locationStock: {
+      upsert: locationStockUpsert,
+      aggregate: locationStockAggregate,
+    },
+    stockTransaction: {
+      create: stockTransactionCreate,
+    },
+    location: {
+      findFirst: locationFindFirst,
     },
   } as unknown as PrismaService;
 
@@ -32,9 +51,14 @@ describe('VariantService', () => {
     variantCreate.mockReset();
     variantUpdate.mockReset();
     variantUpdateMany.mockReset();
+    locationStockUpsert.mockReset();
+    locationStockAggregate.mockReset();
+    stockTransactionCreate.mockReset();
+    locationFindFirst.mockReset();
 
     productFindFirst.mockResolvedValue({ id: 'product-1' });
     variantFindFirst.mockResolvedValue(null);
+    locationStockAggregate.mockResolvedValue({ _sum: { stock: 10 } });
   });
 
   describe('presentVariant helper', () => {
@@ -325,6 +349,263 @@ describe('VariantService', () => {
       )[0][0];
       expect(findCall.where.businessId).toBe('biz-cashier');
       expect(res[0].stock).toBe(12);
+    });
+  });
+
+  describe('updateStock', () => {
+    const mockReturnedVariant = {
+      id: 'var-1',
+      productId: 'prod-1',
+      name: 'Test Variant',
+      sku: 'SKU-TEST',
+      barcode: 'BAR-TEST',
+      sellingPrice: 100,
+      costPrice: 60,
+      stock: 8,
+      profileImageUrl: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      images: [],
+      product: {
+        id: 'prod-1',
+        name: 'Product',
+        categoryId: 'cat-1',
+        category: { id: 'cat-1', name: 'Category' },
+      },
+      locationStocks: [{ locationId: 'loc-1', stock: 8 }],
+    };
+
+    it('deducts stock for custom sale and logs SALE stock transaction', async () => {
+      // 1. Initial variant query
+      variantFindFirst
+        .mockResolvedValueOnce({
+          id: 'var-1',
+          name: 'Test Variant',
+          stock: 10,
+          locationStocks: [{ stock: 10 }],
+        })
+        // 2. findVariant query
+        .mockResolvedValueOnce(mockReturnedVariant);
+
+      locationStockAggregate.mockResolvedValueOnce({
+        _sum: { stock: 8 },
+      });
+
+      const res = await service.updateStock(admin, 'var-1', {
+        operation: StockOperation.DEDUCT,
+        quantity: 2,
+        locationId: 'loc-1',
+        notes: 'Custom sale checkout',
+      });
+
+      expect(locationStockUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            locationId_variantId: {
+              locationId: 'loc-1',
+              variantId: 'var-1',
+            },
+          },
+          update: { stock: 8 },
+        }),
+      );
+
+      expect(variantUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'var-1' },
+          data: { stock: 8 },
+        }),
+      );
+
+      expect(stockTransactionCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            variantId: 'var-1',
+            locationId: 'loc-1',
+            type: StockTransactionType.SALE,
+            quantity: 2,
+            notes: 'Custom sale checkout',
+          }),
+        }),
+      );
+
+      expect(res.id).toBe('var-1');
+    });
+
+    it('adds stock for restock and logs RESTOCK stock transaction', async () => {
+      variantFindFirst
+        .mockResolvedValueOnce({
+          id: 'var-1',
+          name: 'Test Variant',
+          stock: 10,
+          locationStocks: [{ stock: 10 }],
+        })
+        .mockResolvedValueOnce({
+          ...mockReturnedVariant,
+          stock: 15,
+          locationStocks: [{ locationId: 'loc-1', stock: 15 }],
+        });
+
+      locationStockAggregate.mockResolvedValueOnce({
+        _sum: { stock: 15 },
+      });
+
+      await service.updateStock(admin, 'var-1', {
+        operation: StockOperation.ADD,
+        quantity: 5,
+        locationId: 'loc-1',
+      });
+
+      expect(locationStockUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: { stock: 15 },
+        }),
+      );
+
+      expect(stockTransactionCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            variantId: 'var-1',
+            locationId: 'loc-1',
+            type: StockTransactionType.RESTOCK,
+            quantity: 5,
+          }),
+        }),
+      );
+    });
+
+    it('sets absolute stock directly and logs MANUAL_ADJUSTMENT', async () => {
+      variantFindFirst
+        .mockResolvedValueOnce({
+          id: 'var-1',
+          name: 'Test Variant',
+          stock: 10,
+          locationStocks: [{ stock: 10 }],
+        })
+        .mockResolvedValueOnce({
+          ...mockReturnedVariant,
+          stock: 25,
+          locationStocks: [{ locationId: 'loc-1', stock: 25 }],
+        });
+
+      locationStockAggregate.mockResolvedValueOnce({
+        _sum: { stock: 25 },
+      });
+
+      await service.updateStock(admin, 'var-1', {
+        stock: 25,
+        locationId: 'loc-1',
+      });
+
+      expect(locationStockUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: { stock: 25 },
+        }),
+      );
+
+      expect(stockTransactionCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            variantId: 'var-1',
+            locationId: 'loc-1',
+            type: StockTransactionType.MANUAL_ADJUSTMENT,
+            quantity: 15,
+          }),
+        }),
+      );
+    });
+
+    it('throws BadRequestException when stock is insufficient and allowNegative is false', async () => {
+      variantFindFirst.mockResolvedValueOnce({
+        id: 'var-1',
+        name: 'Test Variant',
+        stock: 2,
+        locationStocks: [{ stock: 2 }],
+      });
+
+      await expect(
+        service.updateStock(admin, 'var-1', {
+          operation: StockOperation.DEDUCT,
+          quantity: 5,
+          locationId: 'loc-1',
+          allowNegative: false,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('allows negative stock when allowNegative is explicitly true', async () => {
+      variantFindFirst
+        .mockResolvedValueOnce({
+          id: 'var-1',
+          name: 'Test Variant',
+          stock: 2,
+          locationStocks: [{ stock: 2 }],
+        })
+        .mockResolvedValueOnce({
+          ...mockReturnedVariant,
+          stock: -3,
+          locationStocks: [{ locationId: 'loc-1', stock: -3 }],
+        });
+
+      locationStockAggregate.mockResolvedValueOnce({
+        _sum: { stock: -3 },
+      });
+
+      await service.updateStock(admin, 'var-1', {
+        operation: StockOperation.DEDUCT,
+        quantity: 5,
+        locationId: 'loc-1',
+        allowNegative: true,
+      });
+
+      expect(locationStockUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: { stock: -3 },
+        }),
+      );
+    });
+
+    it('scopes Cashier to token businessId and locationId automatically', async () => {
+      const cashier = {
+        sub: 'cashier-1',
+        role: Role.CASHIER,
+        businessId: 'biz-cashier',
+        locationId: 'loc-cashier-branch',
+      };
+
+      variantFindFirst
+        .mockResolvedValueOnce({
+          id: 'var-1',
+          name: 'Test Variant',
+          stock: 20,
+          locationStocks: [{ stock: 20 }],
+        })
+        .mockResolvedValueOnce(mockReturnedVariant);
+
+      await service.updateStock(cashier, 'var-1', {
+        quantity: 1,
+      });
+
+      expect(locationStockUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            locationId_variantId: {
+              locationId: 'loc-cashier-branch',
+              variantId: 'var-1',
+            },
+          },
+        }),
+      );
+    });
+
+    it('throws NotFoundException when variant does not exist', async () => {
+      variantFindFirst.mockResolvedValueOnce(null);
+
+      await expect(
+        service.updateStock(admin, 'var-nonexistent', {
+          quantity: 1,
+        }),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 });
