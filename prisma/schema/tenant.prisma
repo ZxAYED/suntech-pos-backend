@@ -1,9 +1,10 @@
 model Business {
   id                   String  @id @default(uuid())
   name                 String
-  ownerId              String  @unique
+  ownerId              String
   profileImageUrl      String?
   profileImagePublicId String?
+  profileImageKey      String?
   owner                User    @relation("BusinessOwner", fields: [ownerId], references: [id])
 
   locations      Location[]
@@ -15,10 +16,14 @@ model Business {
   advances       EmployeeAdvance[]
   shifts         ShiftSession[]
   payroll        PayrollRecord[]
+  expenses       Expense[]
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
+
+  @@unique([ownerId, name])
+  @@index([ownerId])
 }
 
 model Location {
@@ -32,12 +37,13 @@ model Location {
   shifts         ShiftSession[]
   orders         Order[]
   locationStocks LocationStock[]
+  expenses       Expense[]
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
-  @@unique([businessId, name])
+  @@unique([businessId, name, address])
   @@index([businessId])
 }
 

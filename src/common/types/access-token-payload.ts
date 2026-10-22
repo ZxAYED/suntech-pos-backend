@@ -6,6 +6,8 @@ export interface AccessTokenPayload {
   publicId?: string | null;
   businessId?: string | null;
   locationId?: string | null;
+  businessIds?: string[];
+  locationIds?: string[];
 }
 
 export interface PasswordResetTokenPayload {

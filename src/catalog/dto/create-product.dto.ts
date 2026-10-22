@@ -28,4 +28,14 @@ export class CreateProductDto {
   @IsString()
   @MinLength(1)
   categoryId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Target business UUID under which this product is created (optional for Admin; defaults to active business)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsString()
+  businessId?: string;
 }

@@ -13,6 +13,8 @@ export const userProfileSelect = {
   locationId: true,
   monthlySalary: true,
   profileImageUrl: true,
+  profileImagePublicId: true,
+  profileImageKey: true,
 } satisfies Prisma.UserSelect;
 
 export type UserProfile = Prisma.UserGetPayload<{

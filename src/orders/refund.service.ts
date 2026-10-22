@@ -58,9 +58,16 @@ export class RefundService {
     if (!businessId && admin.role === Role.ADMIN) {
       const user = await this.prisma.user.findFirst({
         where: { id: admin.sub, deletedAt: null },
-        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+        select: {
+          businessId: true,
+          ownedBusinesses: {
+            where: { deletedAt: null },
+            select: { id: true },
+            take: 1,
+          },
+        },
       });
-      businessId = user?.businessId || user?.ownedBusiness?.id;
+      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
     }
     if (!businessId) {
       throw new ForbiddenException('Create a business before continuing');

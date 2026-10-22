@@ -205,7 +205,12 @@ export class OrdersService {
 
     const user = await tx.user.findFirst({
       where: { id: userId, deletedAt: null },
-      include: { ownedBusiness: true },
+      include: {
+        ownedBusinesses: {
+          where: { deletedAt: null },
+          take: 1,
+        },
+      },
     });
 
     if (!user) {
@@ -214,7 +219,7 @@ export class OrdersService {
 
     const effectiveRole = actorRole ?? user.role;
     const effectiveBusinessId =
-      actorBusinessId ?? user.businessId ?? user.ownedBusiness?.id;
+      actorBusinessId ?? user.businessId ?? user.ownedBusinesses?.[0]?.id;
     const effectiveLocationId = actorLocationId ?? user.locationId;
 
     if (effectiveRole !== Role.SUPER_ADMIN && !effectiveBusinessId) {
@@ -647,9 +652,16 @@ export class OrdersService {
       if (!businessId && actor.role === Role.ADMIN) {
         const user = await this.prisma.user?.findFirst({
           where: { id: actor.sub, deletedAt: null },
-          select: { businessId: true, ownedBusiness: { select: { id: true } } },
+          select: {
+            businessId: true,
+            ownedBusinesses: {
+              where: { deletedAt: null },
+              select: { id: true },
+              take: 1,
+            },
+          },
         });
-        businessId = user?.businessId || user?.ownedBusiness?.id;
+        businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
       }
       if (!businessId) {
         throw new ForbiddenException('Create a business before continuing');
@@ -734,9 +746,16 @@ export class OrdersService {
     if (!businessId && actor.role === Role.ADMIN) {
       const user = await this.prisma.user.findFirst({
         where: { id: actor.sub, deletedAt: null },
-        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+        select: {
+          businessId: true,
+          ownedBusinesses: {
+            where: { deletedAt: null },
+            select: { id: true },
+            take: 1,
+          },
+        },
       });
-      businessId = user?.businessId || user?.ownedBusiness?.id;
+      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
     }
     if (!businessId) {
       throw new ForbiddenException('Create a business before continuing');

@@ -78,6 +78,7 @@ model Variant {
 
   profileImageUrl      String?
   profileImagePublicId String?
+  profileImageKey      String?
 
   orderLines        OrderLine[]
   stockTransactions StockTransaction[]
@@ -99,6 +100,7 @@ model VariantImage {
   variant   Variant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
   url       String
   publicId  String   @unique
+  key       String?
   sortOrder Int      @default(0)
   createdAt DateTime @default(now())
 
@@ -247,5 +249,44 @@ model AuditLog {
   @@index([actorId])
   @@index([entityType, entityId])
   @@index([createdAt])
+}
+
+enum ExpenseCategory {
+  RENT
+  UTILITIES
+  SALARIES
+  SUPPLIES
+  MAINTENANCE
+  MARKETING
+  TRANSPORT
+  INVENTORY
+  PERSONAL_DRAWING
+  OTHER
+}
+
+model Expense {
+  id         String          @id @default(uuid())
+  businessId String
+  business   Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  locationId String?
+  location   Location?       @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  userId     String
+  user       User            @relation("UserExpenses", fields: [userId], references: [id], onDelete: Cascade)
+
+  amount     Int
+  title      String
+  category   ExpenseCategory @default(OTHER)
+  note       String?
+  spentAt    DateTime        @default(now())
+
+  deletedAt  DateTime?
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@index([businessId])
+  @@index([locationId])
+  @@index([userId])
+  @@index([spentAt])
+  @@index([deletedAt])
 }
 

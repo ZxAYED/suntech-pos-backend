@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -26,11 +27,9 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
-import { Idempotent } from '../common/decorators/idempotent.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import type { AccessTokenPayload } from '../common/types/access-token-payload';
-import { resolveLocationScope } from '../common/utils/location-scope';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import {
@@ -39,6 +38,7 @@ import {
 } from '../media/uploaded-image';
 import { CreateBusinessDto } from './dto/create-business.dto';
 import { CreateLocationDto } from './dto/create-location.dto';
+import { UpdateBusinessDto } from './dto/update-business.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
 import { TenantService } from './tenant.service';
 
@@ -49,15 +49,33 @@ import { TenantService } from './tenant.service';
 export class TenantController {
   constructor(private readonly tenantService: TenantService) {}
 
+  @Get('businesses')
+  @ApiOperation({
+    summary: '[ADMIN] List all businesses owned by admin',
+    description:
+      'Returns all non-deleted businesses owned by the authenticated admin, including their branch locations.',
+  })
+  @ApiResponse({ status: 200, description: 'List of owned businesses' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Businesses loaded')
+  listBusinesses(@CurrentUser() admin: AccessTokenPayload) {
+    return this.tenantService.listBusinesses(admin);
+  }
+
   @Post('business')
   @ApiOperation({
     summary: '[ADMIN] Create business tenant profile',
     description:
-      'Initializes business profile for authenticated store admin. Requires ADMIN role.',
+      'Creates a new business owned by the authenticated admin. Requires ADMIN role.',
   })
   @ApiResponse({
     status: 201,
-    description: 'Business created, new JWT token returned',
+    description: 'Business created successfully',
   })
   @ApiResponse({
     status: 401,
@@ -66,10 +84,9 @@ export class TenantController {
   @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
-    description: 'User already has a business registered',
+    description: 'A business with this name already exists for this admin',
   })
   @Roles(Role.ADMIN)
-  @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Business created')
   createBusiness(
@@ -79,11 +96,125 @@ export class TenantController {
     return this.tenantService.createBusiness(admin, dto);
   }
 
+  @Patch('businesses/:id')
+  @ApiOperation({
+    summary: '[ADMIN] Update business profile',
+    description:
+      'Allows an Admin to update business details such as name. Requires ADMIN role.',
+  })
+  @ApiParam({ name: 'id', description: 'Business UUID to update' })
+  @ApiResponse({ status: 200, description: 'Business updated' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
+  @ApiResponse({
+    status: 404,
+    description: 'Business not found or access denied',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'A business with this name already exists',
+  })
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Business updated')
+  updateBusiness(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+    @Body() dto: UpdateBusinessDto,
+  ) {
+    return this.tenantService.updateBusiness(admin, id, dto);
+  }
+
+  @Delete('businesses/:id')
+  @ApiOperation({
+    summary: '[ADMIN] Delete business profile by ID',
+    description:
+      'Soft-deletes a business if no active branches exist. Rejects with 409 Conflict if any active branch locations exist. Requires ADMIN role.',
+  })
+  @ApiParam({ name: 'id', description: 'Business UUID to delete' })
+  @ApiResponse({ status: 200, description: 'Business deleted' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
+  @ApiResponse({
+    status: 404,
+    description: 'Business not found or access denied',
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      'Cannot delete business with existing branch locations. Please delete all branches first.',
+  })
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Business deleted')
+  deleteBusiness(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+  ) {
+    return this.tenantService.deleteBusiness(admin, id);
+  }
+
+  @Delete('business')
+  @ApiOperation({
+    summary: '[ADMIN] Delete active or query-specified business profile',
+    description:
+      'Soft-deletes a business if no active branches exist. Target business is specified via query ?businessId= or defaults to the Admin active business from JWT. Rejects with 409 Conflict if any active branch locations exist. Requires ADMIN role.',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Target business UUID (optional; defaults to Admin active business)',
+  })
+  @ApiResponse({ status: 200, description: 'Business deleted' })
+  @ApiResponse({
+    status: 400,
+    description: 'Business ID could not be resolved',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
+  @ApiResponse({
+    status: 404,
+    description: 'Business not found or access denied',
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      'Cannot delete business with existing branch locations. Please delete all branches first.',
+  })
+  @Roles(Role.ADMIN)
+  @ResponseMessage('Business deleted')
+  deleteActiveBusiness(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Query('businessId') queryBusinessId?: string,
+  ) {
+    const businessId = queryBusinessId || admin.businessId;
+    if (!businessId) {
+      throw new BadRequestException(
+        'Business ID is required. Please provide ?businessId=.',
+      );
+    }
+    return this.tenantService.deleteBusiness(admin, businessId);
+  }
+
   @Get('business')
   @ApiOperation({
     summary: '[ADMIN, CASHIER] Get business tenant profile',
     description:
-      'Returns business profile details for the active business. Accessible by ADMIN and CASHIER.',
+      'Returns business profile details. Cashiers automatically receive their assigned business from token. Admins receive their business specified via query ?businessId= (or default owned business).',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Optional business UUID for Admin; Cashier is always locked to assigned business from token',
   })
   @ApiResponse({ status: 200, description: 'Business profile returned' })
   @ApiResponse({
@@ -92,16 +223,18 @@ export class TenantController {
   })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Business profile loaded')
-  getBusiness(@CurrentUser() actor: AccessTokenPayload) {
-    const scope = resolveLocationScope(actor);
-    return this.tenantService.getBusiness(scope.businessId);
+  getBusiness(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query('businessId') queryBusinessId?: string,
+  ) {
+    return this.tenantService.getBusinessProfile(actor, queryBusinessId);
   }
 
   @Post('locations')
   @ApiOperation({
     summary: '[ADMIN] Create branch location',
     description:
-      'Creates a new branch location scoped to the business (tenant-scoped unique name). Requires ADMIN role.',
+      'Creates a new branch location for the specified business. Name, address, and businessId are combinely unique. Pass "businessId" in request body.',
   })
   @ApiResponse({ status: 201, description: 'Location created' })
   @ApiResponse({
@@ -111,10 +244,10 @@ export class TenantController {
   @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 409,
-    description: 'Location with that name already exists in your business',
+    description:
+      'A branch location with that name and address already exists in this business',
   })
   @Roles(Role.ADMIN)
-  @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Location created')
   createLocation(
@@ -128,7 +261,13 @@ export class TenantController {
   @ApiOperation({
     summary: '[ADMIN, CASHIER] List store branch locations',
     description:
-      'Returns locations for the business. Cashiers are scoped to their assigned branch. Accessible by ADMIN and CASHIER.',
+      'Returns locations for the business. Cashiers are strictly scoped to their assigned branch from token. Admins can view locations for their business by querying ?businessId= (or default owned business).',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Optional business UUID for Admin; Cashier is locked to assigned business from token',
   })
   @ApiQuery({
     name: 'locationId',
@@ -151,13 +290,14 @@ export class TenantController {
   @ResponseMessage('Locations loaded')
   getLocations(
     @CurrentUser() actor: AccessTokenPayload,
+    @Query('businessId') queryBusinessId?: string,
     @Query('locationId') locationId?: string,
     @Query('search') search?: string,
   ) {
-    const scope = resolveLocationScope(actor, locationId);
     return this.tenantService.getLocations(
-      scope.businessId,
-      scope.locationId,
+      actor,
+      queryBusinessId,
+      locationId,
       search,
     );
   }
@@ -219,9 +359,14 @@ export class TenantController {
   @ApiOperation({
     summary: '[ADMIN] Upload business logo/image',
     description:
-      'Uploads and links business logo to Cloudinary. Requires ADMIN role.',
+      'Uploads new business logo to Cloudinary, sets profileImageUrl and key (profileImagePublicId / profileImageKey), and automatically deletes previous image from cloud storage. Requires ADMIN role.',
   })
   @ApiConsumes('multipart/form-data')
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Target business UUID (optional for Admin; defaults to active business)',
+  })
   @ApiBody({
     schema: {
       type: 'object',
@@ -230,7 +375,11 @@ export class TenantController {
       },
     },
   })
-  @ApiResponse({ status: 201, description: 'Business logo uploaded' })
+  @ApiResponse({
+    status: 201,
+    description:
+      'Business logo uploaded; returns profileImageUrl and key (profileImagePublicId / profileImageKey)',
+  })
   @ApiResponse({
     status: 401,
     description: 'Unauthorized - invalid or missing JWT',
@@ -242,14 +391,25 @@ export class TenantController {
   setBusinessProfileImage(
     @CurrentUser() admin: AccessTokenPayload,
     @UploadedFile() file: UploadedImage,
+    @Query('businessId') queryBusinessId?: string,
   ) {
-    return this.tenantService.setBusinessProfileImage(admin, file);
+    return this.tenantService.setBusinessProfileImage(
+      admin,
+      file,
+      queryBusinessId,
+    );
   }
 
   @Delete('business/profile-image')
   @ApiOperation({
     summary: '[ADMIN] Remove business logo/image',
-    description: 'Deletes business logo from Cloudinary. Requires ADMIN role.',
+    description:
+      'Deletes business logo from Cloudinary and clears profileImageUrl and key fields. Requires ADMIN role.',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Target business UUID (optional for Admin; defaults to owned business)',
   })
   @ApiResponse({ status: 200, description: 'Business logo removed' })
   @ApiResponse({
@@ -259,7 +419,14 @@ export class TenantController {
   @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Business image removed')
-  clearBusinessProfileImage(@CurrentUser() admin: AccessTokenPayload) {
-    return this.tenantService.clearBusinessProfileImage(admin);
+  clearBusinessProfileImage(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Query('businessId') queryBusinessId?: string,
+  ) {
+    return this.tenantService.clearBusinessProfileImage(
+      admin,
+      queryBusinessId,
+    );
   }
 }
+

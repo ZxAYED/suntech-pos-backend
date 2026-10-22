@@ -165,7 +165,8 @@ export class AuthService {
   }
 
   async signAccessToken(user: User): Promise<string> {
-    return this.jwtService.signAsync(this.buildAccessPayload(user));
+    const payload = await this.buildAccessPayload(user);
+    return this.jwtService.signAsync(payload);
   }
 
   private getOtpTtlMs(): number {
@@ -301,9 +302,15 @@ export class AuthService {
   }
 
   private async findByPublicId(publicId: string): Promise<User> {
+    const raw = publicId.trim().toUpperCase();
+    const candidateIds =
+      raw.startsWith('CSH-') || raw.startsWith('ADM-')
+        ? [raw]
+        : [raw, `CSH-${raw}`];
+
     const user = await this.prisma.user.findFirst({
       where: {
-        publicId: publicId.trim().toUpperCase(),
+        publicId: { in: candidateIds },
         deletedAt: null,
       },
     });
@@ -319,6 +326,12 @@ export class AuthService {
     loginType: LoginType,
     identifier: string,
   ): Promise<User> {
+    const raw = identifier.trim().toUpperCase();
+    const candidatePublicIds =
+      raw.startsWith('CSH-') || raw.startsWith('ADM-')
+        ? [raw]
+        : [raw, `CSH-${raw}`];
+
     const user =
       loginType === LoginType.ADMIN
         ? await this.prisma.user.findFirst({
@@ -329,7 +342,7 @@ export class AuthService {
           })
         : await this.prisma.user.findFirst({
             where: {
-              publicId: identifier.trim().toUpperCase(),
+              publicId: { in: candidatePublicIds },
               deletedAt: null,
             },
           });
@@ -375,13 +388,38 @@ export class AuthService {
     throw new ForbiddenException('Account is not active');
   }
 
-  private buildAccessPayload(user: User): AccessTokenPayload {
+  private async buildAccessPayload(user: User): Promise<AccessTokenPayload> {
+    let businessIds: string[] = [];
+    let locationIds: string[] = [];
+
+    if (user.role === Role.ADMIN) {
+      if (this.prisma.business?.findMany) {
+        const owned = await this.prisma.business.findMany({
+          where: { ownerId: user.id, deletedAt: null },
+          select: {
+            id: true,
+            locations: {
+              where: { deletedAt: null },
+              select: { id: true },
+            },
+          },
+        });
+        businessIds = owned.map((b) => b.id);
+        locationIds = owned.flatMap((b) => b.locations.map((l) => l.id));
+      }
+    } else if (user.role === Role.CASHIER) {
+      if (user.businessId) businessIds = [user.businessId];
+      if (user.locationId) locationIds = [user.locationId];
+    }
+
     return {
       sub: user.id,
       role: user.role,
       publicId: user.publicId,
       businessId: user.businessId,
       locationId: user.locationId,
+      businessIds,
+      locationIds,
     };
   }
 
@@ -397,6 +435,8 @@ export class AuthService {
       businessId: user.businessId,
       locationId: user.locationId,
       profileImageUrl: user.profileImageUrl,
+      profileImagePublicId: user.profileImagePublicId,
+      profileImageKey: user.profileImageKey,
     };
   }
 
@@ -405,8 +445,9 @@ export class AuthService {
       return user;
     }
 
-    const owned = await this.prisma.business.findUnique({
-      where: { ownerId: user.id },
+    const owned = await this.prisma.business.findFirst({
+      where: { ownerId: user.id, deletedAt: null },
+      orderBy: { createdAt: 'asc' },
     });
 
     if (!owned) {

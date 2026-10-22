@@ -23,10 +23,12 @@ const variantSelect = {
   costPrice: true,
   stock: true,
   profileImageUrl: true,
+  profileImagePublicId: true,
+  profileImageKey: true,
   createdAt: true,
   updatedAt: true,
   images: {
-    select: { id: true, url: true, sortOrder: true },
+    select: { id: true, url: true, publicId: true, key: true, sortOrder: true },
     orderBy: { sortOrder: 'asc' as const },
   },
   product: {
@@ -114,9 +116,16 @@ export class VariantService {
     if (!businessId && actor.role === Role.ADMIN) {
       const user = await this.prisma.user.findFirst({
         where: { id: actor.sub, deletedAt: null },
-        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+        select: {
+          businessId: true,
+          ownedBusinesses: {
+            where: { deletedAt: null },
+            select: { id: true },
+            take: 1,
+          },
+        },
       });
-      businessId = user?.businessId || user?.ownedBusiness?.id;
+      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
     }
     if (!businessId) {
       throw new ForbiddenException('Create a business before continuing');

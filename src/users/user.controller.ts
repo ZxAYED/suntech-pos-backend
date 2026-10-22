@@ -23,7 +23,6 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
-import { Idempotent } from '../common/decorators/idempotent.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import type { AccessTokenPayload } from '../common/types/access-token-payload';
@@ -66,7 +65,7 @@ export class UserController {
   @ApiOperation({
     summary: '[AUTHENTICATED] Upload current user profile image',
     description:
-      'Uploads and links profile image to Cloudinary for current authenticated user.',
+      'Uploads new profile photo to Cloudinary, updates profileImageUrl and key (profileImagePublicId / profileImageKey), and automatically deletes previous image from cloud storage.',
   })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -77,7 +76,11 @@ export class UserController {
       },
     },
   })
-  @ApiResponse({ status: 201, description: 'Profile image updated' })
+  @ApiResponse({
+    status: 201,
+    description:
+      'Profile image updated; returns updated profile including profileImageUrl and key (profileImagePublicId / profileImageKey)',
+  })
   @ApiResponse({
     status: 401,
     description: 'Unauthorized - invalid or missing JWT',
@@ -95,7 +98,7 @@ export class UserController {
   @ApiOperation({
     summary: '[AUTHENTICATED] Remove current user profile image',
     description:
-      'Deletes profile image from Cloudinary and clears reference for current authenticated user.',
+      'Deletes profile image from Cloudinary and clears profileImageUrl and key fields for current authenticated user.',
   })
   @ApiResponse({ status: 200, description: 'Profile image removed' })
   @ApiResponse({
@@ -124,7 +127,6 @@ export class UserController {
     description: 'Phone number already in use within this business',
   })
   @Roles(Role.ADMIN)
-  @Idempotent()
   @ResponseMessage('Cashier created')
   createCashier(
     @CurrentUser() admin: AccessTokenPayload,
@@ -231,7 +233,8 @@ export class UserController {
   @Post(':id/profile-image')
   @ApiOperation({
     summary: '[ADMIN] Upload staff profile image',
-    description: 'Uploads profile photo for an employee. Requires ADMIN role.',
+    description:
+      'Uploads new profile photo to Cloudinary for an employee, updates profileImageUrl and key (profileImagePublicId / profileImageKey), and automatically deletes previous image from cloud storage. Requires ADMIN role.',
   })
   @ApiConsumes('multipart/form-data')
   @ApiParam({ name: 'id', description: 'Employee user UUID' })
@@ -243,7 +246,11 @@ export class UserController {
       },
     },
   })
-  @ApiResponse({ status: 201, description: 'Profile image updated' })
+  @ApiResponse({
+    status: 201,
+    description:
+      'Profile image updated; returns updated profile including profileImageUrl and key (profileImagePublicId / profileImageKey)',
+  })
   @ApiResponse({
     status: 401,
     description: 'Unauthorized - invalid or missing JWT',
@@ -264,7 +271,7 @@ export class UserController {
   @ApiOperation({
     summary: '[ADMIN] Remove staff profile image',
     description:
-      'Deletes profile image from Cloudinary for an employee. Requires ADMIN role.',
+      'Deletes profile image from Cloudinary and clears profileImageUrl and key fields for an employee. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Employee user UUID' })
   @ApiResponse({ status: 200, description: 'Profile image removed' })

@@ -104,8 +104,8 @@ export async function runDatabaseSeed(
 
     const businessName =
       process.env.DEFAULT_BUSINESS_NAME?.trim() || 'Suntech Retail';
-    let business = await prisma.business.findUnique({
-      where: { ownerId: admin.id },
+    let business = await prisma.business.findFirst({
+      where: { ownerId: admin.id, deletedAt: null },
     });
 
     if (!business) {

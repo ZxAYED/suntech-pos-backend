@@ -144,8 +144,7 @@ export class UserService {
     const providedEmail = dto.email?.trim().toLowerCase();
 
     try {
-      const cashier = await this.idGenerator.withUniquePublicId(
-        'CSH',
+      const cashier = await this.idGenerator.withZeroCollisionCashierId(
         (publicId) =>
           this.prisma.user.create({
             data: {
@@ -461,7 +460,11 @@ export class UserService {
   ): Promise<PresentedProfile> {
     const user = await this.prisma.user.findFirst({
       where: { ...where, deletedAt: null },
-      select: { id: true, profileImagePublicId: true },
+      select: {
+        id: true,
+        profileImagePublicId: true,
+        profileImageKey: true,
+      },
     });
 
     if (!user) {
@@ -479,6 +482,7 @@ export class UserService {
         data: {
           profileImageUrl: uploaded.url,
           profileImagePublicId: uploaded.publicId,
+          profileImageKey: uploaded.publicId,
         },
       });
     } catch (error) {
@@ -486,7 +490,9 @@ export class UserService {
       throw error;
     }
 
-    await this.removeStoredImage(user.profileImagePublicId);
+    await this.removeStoredImage(
+      user.profileImagePublicId || user.profileImageKey,
+    );
     return this.getMe(user.id);
   }
 
@@ -495,7 +501,11 @@ export class UserService {
   ): Promise<PresentedProfile> {
     const user = await this.prisma.user.findFirst({
       where: { ...where, deletedAt: null },
-      select: { id: true, profileImagePublicId: true },
+      select: {
+        id: true,
+        profileImagePublicId: true,
+        profileImageKey: true,
+      },
     });
 
     if (!user) {
@@ -507,9 +517,12 @@ export class UserService {
       data: {
         profileImageUrl: null,
         profileImagePublicId: null,
+        profileImageKey: null,
       },
     });
-    await this.removeStoredImage(user.profileImagePublicId);
+    await this.removeStoredImage(
+      user.profileImagePublicId || user.profileImageKey,
+    );
     return this.getMe(user.id);
   }
 
@@ -533,11 +546,15 @@ export class UserService {
         where: { id: admin.sub, deletedAt: null },
         select: {
           businessId: true,
-          ownedBusiness: { select: { id: true } },
+          ownedBusinesses: {
+            where: { deletedAt: null },
+            select: { id: true },
+            take: 1,
+          },
         },
       });
 
-      businessId = user?.businessId || user?.ownedBusiness?.id || undefined;
+      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id || undefined;
     }
 
     if (!businessId) {

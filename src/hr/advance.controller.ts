@@ -39,9 +39,9 @@ export class AdvanceController {
 
   @Post()
   @ApiOperation({
-    summary: '[ADMIN] Issue off-register employee salary advance',
+    summary: '[ADMIN, CASHIER] Record employee salary advance',
     description:
-      'Creates an off-register advance for cashier. (In-shift register drawer cash advances must use /shifts/advances). Enforces atomic salary cap check: total pending advances for current payroll month cannot exceed employee monthlySalary. Accessible by ADMIN only.',
+      'Cashiers can input fee/advance amount with a note (reason) to immediately record a salary advance. No admin approval is required; it is auto-added to the ledger history (status PENDING until monthly payroll settlement). Admins can also issue an advance on behalf of any cashier. Enforces atomic salary cap check: total pending advances for current payroll month cannot exceed employee monthlySalary.',
   })
   @ApiResponse({ status: 201, description: 'Advance recorded' })
   @ApiResponse({
@@ -49,14 +49,11 @@ export class AdvanceController {
     description: 'Unauthorized - invalid or missing JWT',
   })
   @ApiResponse({
-    status: 403,
-    description: 'Forbidden - requires ADMIN role',
-  })
-  @ApiResponse({
     status: 400,
-    description: 'Advance amount exceeds remaining monthly salary limit or cashier has no salary configured',
+    description:
+      'Advance amount exceeds remaining monthly salary limit or cashier has no salary configured',
   })
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.CASHIER)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Advance recorded')
@@ -91,7 +88,7 @@ export class AdvanceController {
   @ApiOperation({
     summary: '[ADMIN, CASHIER] Get monthly advance summary',
     description:
-      'Calculates total approved and deducted advance amounts for a given month and year. Accessible by CASHIER and ADMIN.',
+      'Calculates total pending advance amounts strictly for the given month and year, strictly excluding any soft-deleted advances. Cashiers see their own monthly advance summary and remaining net payable. Admins can view a specific cashier summary via ?cashierId= or view the business-wide monthly summary when cashierId is omitted.',
   })
   @ApiResponse({ status: 200, description: 'Advance summary loaded' })
   @ApiResponse({
@@ -109,9 +106,9 @@ export class AdvanceController {
 
   @Delete(':id')
   @ApiOperation({
-    summary: '[ADMIN] Cancel pending advance',
+    summary: '[ADMIN] Soft-delete pending advance',
     description:
-      'Admin cancels a pending advance that has not yet been deducted in payroll. Requires ADMIN role.',
+      'Admin soft-deletes a pending advance that has not yet been deducted in payroll. Excludes it from monthly summary and payroll deduction. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Advance ID' })
   @ApiResponse({ status: 200, description: 'Advance removed' })

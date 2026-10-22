@@ -56,11 +56,13 @@ describe('AdminService', () => {
           statusReason: null,
           createdAt: new Date('2026-01-01'),
           updatedAt: new Date('2026-01-01'),
-          ownedBusiness: {
-            id: 'biz-1',
-            name: 'Test Retail',
-            _count: { locations: 2 },
-          },
+          ownedBusinesses: [
+            {
+              id: 'biz-1',
+              name: 'Test Retail',
+              _count: { locations: 2 },
+            },
+          ],
         },
       ]);
 

@@ -7,6 +7,7 @@ import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth/auth.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { HrModule } from './hr/hr.module';
+import { ExpenseModule } from './expenses/expense.module';
 import { MediaModule } from './media/media.module';
 import { OrdersModule } from './orders/orders.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
@@ -42,6 +43,7 @@ import { AppService } from './app.service';
     OrdersModule,
     ReportsModule,
     HrModule,
+    ExpenseModule,
     AuditModule,
   ],
   controllers: [AppController],

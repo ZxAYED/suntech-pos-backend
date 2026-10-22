@@ -22,6 +22,8 @@ const variantSelect = {
   costPrice: true,
   stock: true,
   profileImageUrl: true,
+  profileImagePublicId: true,
+  profileImageKey: true,
   locationStocks: {
     select: {
       locationId: true,
@@ -73,9 +75,16 @@ export class ProductService {
     if (!businessId && actor.role === Role.ADMIN) {
       const user = await this.prisma.user.findFirst({
         where: { id: actor.sub, deletedAt: null },
-        select: { businessId: true, ownedBusiness: { select: { id: true } } },
+        select: {
+          businessId: true,
+          ownedBusinesses: {
+            where: { deletedAt: null },
+            select: { id: true },
+            take: 1,
+          },
+        },
       });
-      businessId = user?.businessId || user?.ownedBusiness?.id;
+      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
     }
     if (!businessId) {
       throw new ForbiddenException('Create a business before continuing');
@@ -87,7 +96,7 @@ export class ProductService {
     admin: AccessTokenPayload,
     dto: CreateProductDto,
   ): Promise<PresentedProduct> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, dto.businessId);
     const name = dto.name.trim();
     await this.assertNameAvailable(businessId, name);
 

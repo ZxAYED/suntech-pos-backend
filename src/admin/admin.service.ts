@@ -98,7 +98,7 @@ export class AdminService {
           statusReason: true,
           createdAt: true,
           updatedAt: true,
-          ownedBusiness: {
+          ownedBusinesses: {
             where: { deletedAt: null },
             select: {
               id: true,
@@ -130,11 +130,11 @@ export class AdminService {
       statusReason: u.statusReason,
       createdAt: u.createdAt,
       updatedAt: u.updatedAt,
-      business: u.ownedBusiness
+      business: u.ownedBusinesses?.[0]
         ? {
-            id: u.ownedBusiness.id,
-            name: u.ownedBusiness.name,
-            _count: u.ownedBusiness._count,
+            id: u.ownedBusinesses[0].id,
+            name: u.ownedBusinesses[0].name,
+            _count: u.ownedBusinesses[0]._count,
           }
         : null,
     }));

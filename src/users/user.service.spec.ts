@@ -47,6 +47,7 @@ describe('UserService', () => {
 
   const idGenerator = {
     withUniquePublicId,
+    withZeroCollisionCashierId: withUniquePublicId,
   } as unknown as IdGeneratorService;
 
   const cloudinary = {

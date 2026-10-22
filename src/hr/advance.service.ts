@@ -299,13 +299,26 @@ export class AdvanceService {
     query: AdvanceSummaryQueryDto,
   ): Promise<AdvanceSummary> {
     const businessId = requireBusinessId(actor);
-    const cashierId = this.resolveSummaryCashierId(actor, query.cashierId);
-    const cashier = await this.findCashier(businessId, cashierId);
     const { start, end } = payrollPeriod(query.year, query.month);
+
+    let targetCashierId: string | undefined = undefined;
+    let cashier: { id: string; monthlySalary: number | null } | null = null;
+
+    if (actor.role === Role.CASHIER) {
+      if (query.cashierId && query.cashierId !== actor.sub) {
+        throw new ForbiddenException('You can only view your own advances');
+      }
+      targetCashierId = actor.sub;
+      cashier = await this.findCashier(businessId, targetCashierId);
+    } else if (query.cashierId?.trim()) {
+      targetCashierId = query.cashierId.trim();
+      cashier = await this.findCashier(businessId, targetCashierId);
+    }
+
     const history = await this.prisma.employeeAdvance.findMany({
       where: {
         businessId,
-        cashierId,
+        ...(targetCashierId ? { cashierId: targetCashierId } : {}),
         status: AdvanceStatus.PENDING,
         deletedAt: null,
         takenAt: { gte: start, lt: end },
@@ -313,39 +326,32 @@ export class AdvanceService {
       select: advanceSelect,
       orderBy: { takenAt: 'desc' },
     });
+
     const totalPendingAdvances = history.reduce(
       (total, advance) => total + advance.amount,
       0,
     );
-    const baseSalary = cashier.monthlySalary ?? 0;
+
+    if (cashier) {
+      const baseSalary = cashier.monthlySalary ?? 0;
+      return {
+        history,
+        summary: {
+          baseSalary,
+          totalPendingAdvances,
+          netPayable: baseSalary - totalPendingAdvances,
+        },
+      };
+    }
 
     return {
       history,
       summary: {
-        baseSalary,
+        baseSalary: 0,
         totalPendingAdvances,
-        netPayable: baseSalary - totalPendingAdvances,
+        netPayable: 0,
       },
     };
-  }
-
-  private resolveSummaryCashierId(
-    actor: AccessTokenPayload,
-    requestedCashierId?: string,
-  ): string {
-    if (actor.role === Role.CASHIER) {
-      if (requestedCashierId && requestedCashierId !== actor.sub) {
-        throw new ForbiddenException('You can only view your own advances');
-      }
-
-      return actor.sub;
-    }
-
-    if (!requestedCashierId) {
-      throw new BadRequestException('cashierId is required');
-    }
-
-    return requestedCashierId;
   }
 
   private async resolveCashierId(

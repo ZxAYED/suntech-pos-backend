@@ -45,7 +45,7 @@ export class VariantImageController {
   @ApiOperation({
     summary: '[ADMIN] Upload / update variant profile hero image',
     description:
-      'Uploads and links primary display image for the variant. Requires ADMIN role.',
+      'Uploads new primary display image to Cloudinary, updates profileImageUrl and keys (profileImagePublicId / profileImageKey / key), and automatically deletes previous hero image from cloud storage. Requires ADMIN role.',
   })
   @ApiParam({ name: 'variantId', description: 'Variant ID' })
   @ApiConsumes('multipart/form-data')
@@ -57,7 +57,11 @@ export class VariantImageController {
       },
     },
   })
-  @ApiResponse({ status: 200, description: 'Variant image updated' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Variant image updated; returns profileImageUrl and key (profileImagePublicId / profileImageKey / key)',
+  })
   @ApiResponse({
     status: 401,
     description: 'Unauthorized - invalid or missing JWT',
@@ -78,7 +82,7 @@ export class VariantImageController {
   @ApiOperation({
     summary: '[ADMIN] Remove variant profile hero image',
     description:
-      'Clears primary display image for the variant. Requires ADMIN role.',
+      'Deletes primary display image from Cloudinary and clears profileImageUrl and key fields for the variant. Requires ADMIN role.',
   })
   @ApiParam({ name: 'variantId', description: 'Variant ID' })
   @ApiResponse({ status: 200, description: 'Variant image removed' })
@@ -156,12 +160,12 @@ export class VariantImageController {
 
   @Delete(':variantId/images/:imageId')
   @ApiOperation({
-    summary: '[ADMIN] Remove variant gallery image by image ID',
+    summary: '[ADMIN] Remove variant gallery image by image ID or key',
     description:
-      'Deletes image from media storage and detaches from variant. Requires ADMIN role.',
+      'Deletes image from media storage and detaches from variant. Accepts image ID or storage publicId/key. Requires ADMIN role.',
   })
   @ApiParam({ name: 'variantId', description: 'Variant ID' })
-  @ApiParam({ name: 'imageId', description: 'Image ID' })
+  @ApiParam({ name: 'imageId', description: 'Image ID or storage key/publicId' })
   @ApiResponse({ status: 200, description: 'Variant image removed' })
   @ApiResponse({
     status: 401,

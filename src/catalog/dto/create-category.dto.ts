@@ -28,4 +28,14 @@ export class CreateCategoryDto {
   @IsString()
   @MaxLength(500)
   description?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Target business UUID under which this category is created (optional for Admin; defaults to active business)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsString()
+  businessId?: string;
 }

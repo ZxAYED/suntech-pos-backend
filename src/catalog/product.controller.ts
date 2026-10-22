@@ -20,7 +20,6 @@ import {
 } from '@nestjs/swagger';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
-import { Idempotent } from '../common/decorators/idempotent.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import type { AccessTokenPayload } from '../common/types/access-token-payload';
@@ -55,7 +54,6 @@ export class ProductController {
     description: 'Product with that name already exists in this business',
   })
   @Roles(Role.ADMIN)
-  @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Product created')
   create(

@@ -20,13 +20,14 @@ model User {
   password             String
   profileImageUrl      String?
   profileImagePublicId String?
+  profileImageKey      String?
   role                 Role          @default(CASHIER)
   status               AccountStatus @default(PENDING_APPROVAL)
   statusReason         String?
 
   // Multi-Tenancy Relations
-  ownedBusiness Business? @relation("BusinessOwner")
-  businessId    String?
+  ownedBusinesses Business[] @relation("BusinessOwner")
+  businessId      String?
   business      Business? @relation("BusinessStaff", fields: [businessId], references: [id])
   locationId    String?
   location      Location? @relation("LocationStaff", fields: [locationId], references: [id])
@@ -44,6 +45,7 @@ model User {
   payrolls         PayrollRecord[]
   orders           Order[]           @relation("CashierOrders")
   refundsProcessed Refund[]          @relation("RefundAuditor")
+  expenses         Expense[]         @relation("UserExpenses")
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())

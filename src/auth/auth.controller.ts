@@ -11,7 +11,6 @@ import {
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
-import { Idempotent } from '../common/decorators/idempotent.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
 import { AuthService } from './auth.service';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -43,7 +42,6 @@ export class AuthController {
     description: 'Email or phone number already in use',
   })
   @Throttle(sensitiveThrottle)
-  @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Registration submitted for approval')
   register(@Body() dto: RegisterDto) {
@@ -204,7 +202,6 @@ export class AuthController {
   })
   @ApiResponse({ status: 200, description: 'Password successfully updated' })
   @ApiResponse({ status: 400, description: 'Invalid or expired OTP code' })
-  @Idempotent()
   @Throttle(sensitiveThrottle)
   @HttpCode(HttpStatus.OK)
   @ResponseMessage('Password updated')

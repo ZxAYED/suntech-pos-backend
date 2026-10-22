@@ -124,17 +124,25 @@
     - An Admin is strictly prohibited from updating their own account status to `SUSPENDED` or `REJECTED` (`400 Bad Request: "You cannot suspend or reject your own admin account"`), preventing permanent tenant lockout.
   - **Collision-Free Reuse:** Allows an admin to recreate a product with the identical SKU/barcode or re-register an employee phone number immediately without triggering PostgreSQL unique index conflicts (`P2002`).
 
-### 1.9 Multi-Tenant Isolation & Compound Uniqueness (`businessId` Dependent)
+### 1.9 Multi-Tenant Architecture: "1 Admin -> Multiple Businesses -> Multiple Branches"
 
-- **Rule:** Global `@unique` is restricted strictly to `User.email` (for multi-tenant Admin login) and system-minted identifiers (`publicId`, `invoiceNumber`). All operational entities are compound-unique per tenant:
-  - `Category`: `@@unique([businessId, name])`, `@@unique([businessId, slug])`
-  - `Product`: `@@unique([businessId, name])`
-  - `Variant`: `@@unique([businessId, sku])`, `@@unique([businessId, barcode])`
-  - `Location`: `@@unique([businessId, name])`
-  - `User`: `@@unique([businessId, phoneNumber])`
+- **Architectural Hierarchy:**
+  - **1 Admin** can create, own, and manage **Multiple Businesses** (`Business.ownerId` is indexed and compound-unique with `name`: `@@unique([ownerId, name])`).
+  - **Each Business** contains **Multiple Branches** (`Location`).
+  - **Admin** selects an active Business first, then selects/manages one of that Business's Branches.
+  - **Cashiers** are assigned to a single `businessId` and `locationId` upon creation/invitation and are strictly locked to their assigned business and branch.
+- **Tenant Compound Uniqueness Rules:**
+  - Global `@unique` is restricted strictly to `User.email` (for multi-tenant Admin login) and system-minted identifiers (`publicId`, `invoiceNumber`).
+  - All operational entities are compound-unique per tenant:
+    - `Business`: `@@unique([ownerId, name])`
+    - `Category`: `@@unique([businessId, name])`, `@@unique([businessId, slug])`
+    - `Product`: `@@unique([businessId, name])`
+    - `Variant`: `@@unique([businessId, sku])`, `@@unique([businessId, barcode])`
+    - `Location`: `@@unique([businessId, name])`
+    - `User`: `@@unique([businessId, phoneNumber])`
 - **Location Scope Enforcement (`resolveLocationScope`):**
-  - **Caller is `CASHIER`:** `businessId` and `locationId` are strictly resolved from the authenticated JWT token. Any attempt to supply a different `locationId` in the query or body throws `403 Forbidden` (`"Cashiers can only query their assigned store location"`).
-  - **Caller is `ADMIN`:** `businessId` is resolved from the JWT token. Admin can pass optional `locationId` to filter down to a specific store branch, or omit `locationId` to aggregate across all branches.
+  - **Caller is `CASHIER`:** `businessId` and `locationId` are strictly resolved from the authenticated JWT token. Any attempt to supply a different `locationId` in the query or body throws `403 Forbidden` (`"Cashiers can only access their assigned branch location"`).
+  - **Caller is `ADMIN`:** `businessId` is resolved from query parameter `businessId`, header `x-business-id`, or caller's active `actor.businessId` token claim (verifying `ownerId === admin.sub`). Admin can pass optional `locationId` to filter down to a specific branch, or omit `locationId` to aggregate across all branches.
   - Cashiers with no assigned `locationId` or `businessId` in DB are blocked from logging in.
 
 ### 1.10 Asynchronous Processing & Queue Roadmap
@@ -304,7 +312,7 @@ erDiagram
 
 #### `POST /auth/register`
 
-- **Access:** Public (`@Idempotent()`, Throttled 5 req/min)
+- **Access:** Public (Throttled 5 req/min)
 - **DTO Validation:**
   - `fullName`: `@IsString()`, `@MinLength(2)`
   - `email`: `@IsEmail()`, normalized to lowercase
@@ -362,7 +370,7 @@ erDiagram
 
 #### `POST /auth/reset-password`
 
-- **Access:** Public (`@Idempotent()`, Throttled 5 req/min)
+- **Access:** Public (Throttled 5 req/min)
 - **DTO:** `{ resetToken: string, newPassword: string }`
 - **Behavior:** Verifies `resetToken` claims (`purpose === 'password-reset'`), bcrypt-hashes `newPassword`, clears `resetOtpHash` and `otpExpiry`.
 - **Edge Cases:** `401 Unauthorized` if token is expired, invalid, or forged.
@@ -379,7 +387,7 @@ erDiagram
 
 #### `PATCH /admin/users/:id/approve`
 
-- **Access:** `@Roles(Role.SUPER_ADMIN)` (`@Idempotent()`)
+- **Access:** `@Roles(Role.SUPER_ADMIN)`
 - **Behavior:** Transitions admin status from `PENDING_APPROVAL` to `ACTIVE` and mints public identifier `ADM-XXXXX`.
 - **Edge Cases:** `400 Bad Request` if user is already approved or not an Admin.
 
@@ -393,41 +401,65 @@ erDiagram
 
 ### 3.3 Tenant & Multi-Location (`/api/v1/tenant`)
 
+#### `GET /tenant/businesses`
+
+- **Access:** `@Roles(Role.ADMIN)`
+- **Behavior:** Returns all non-deleted businesses owned by the authenticated admin (`ownerId: admin.sub`), including their active branch locations (`Location[]`).
+
 #### `POST /tenant/business`
 
-- **Access:** `@Roles(Role.ADMIN)` (`@Idempotent()`)
+- **Access:** `@Roles(Role.ADMIN)`
 - **DTO:** `{ name: string }`
-- **Behavior:** Creates business owned by caller, links caller's `businessId`, and re-issues an updated JWT accessToken containing the new `businessId`.
-- **Edge Cases:** `409 Conflict` if the admin already owns a business.
+- **Behavior:** Creates a new business owned by caller (`ownerId: admin.sub`) and returns the created business entity.
+- **Edge Cases:** `409 Conflict` if the admin already has a business with the exact same name.
+
+#### `PATCH /tenant/businesses/:id`
+
+- **Access:** `@Roles(Role.ADMIN)`
+- **Param:** `id` (Business UUID)
+- **DTO:** `{ name?: string }`
+- **Behavior:** Renames an owned business.
+- **Edge Cases:** `404 Not Found` if business not found or access denied; `409 Conflict` if another owned business already uses that name.
+
+#### `DELETE /tenant/businesses/:id` & `DELETE /tenant/business`
+
+- **Access:** `@Roles(Role.ADMIN)`
+- **Param / Query:** `id` in path or optional `?businessId=` in query (defaults to Admin active/first business).
+- **Behavior:** Soft-deletes a business strictly **if no active branches exist**.
+- **Edge Cases:**
+  - `409 Conflict` (`"Cannot delete business with existing branch locations. Please delete all branches first."`) if the business still has active branch locations.
+  - `409 Conflict` (`"Cannot delete a business with active open shifts in its branches"`) if any active open shift exists in any branch of this business.
 
 #### `GET /tenant/business`
 
 - **Access:** `@Roles(Role.ADMIN, Role.CASHIER)`
-- **Behavior:** Returns current business profile scoped to `actor.businessId`.
+- **Query:** `businessId?: string` (Admin only).
+- **Behavior:** Cashiers receive their locked assigned business from JWT token. Admins receive their active business (or target business passed via query `?businessId=` after verifying ownership).
 
 #### `POST /tenant/business/profile-image` & `DELETE /tenant/business/profile-image`
 
 - **Access:** `@Roles(Role.ADMIN)`
-- **Behavior:** Uploads image buffer to Cloudinary (`suntech-pos/business`), sets `profileImageUrl` & `profileImagePublicId`, eagerly destroys previous image.
+- **Query:** `businessId?: string` (optional).
+- **Behavior:** Uploads new image first to Cloudinary, updates `profileImageUrl` along with storage keys (`profileImagePublicId` and `profileImageKey`), and automatically deletes the previous image from storage upon successful update. If database update fails, the newly uploaded image is safely removed. `DELETE` clears both URL and key fields and deletes the asset from Cloudinary.
 
 #### `POST /tenant/locations`
 
-- **Access:** `@Roles(Role.ADMIN)` (`@Idempotent()`)
-- **DTO:** `{ name: string, address?: string }`
-- **Behavior:** Creates a branch location under caller's `businessId`.
-- **Edge Cases:** `409 Conflict` if location name already exists within the business.
+- **Access:** `@Roles(Role.ADMIN)`
+- **DTO:** Body `{ name: string, address?: string, businessId?: string }`
+- **Behavior:** Creates a branch location under the target business. The `businessId` is provided in the request body; if omitted, it defaults to the Admin's first owned business. Branch uniqueness is strictly composite on `[businessId, name, address]` (`@@unique([businessId, name, address])`), allowing same-named branches if they reside at different addresses.
+- **Edge Cases:** `409 Conflict` if location with that name and address already exists within the target business.
 
 #### `GET /tenant/locations`
 
 - **Access:** `@Roles(Role.ADMIN, Role.CASHIER)`
-- **Query:** `locationId?: string`, `search?: string`.
-- **Behavior:** Cashiers automatically receive only their assigned location. Admins receive all locations or filter by ID/name.
+- **Query:** `businessId?: string`, `locationId?: string`, `search?: string`.
+- **Behavior:** Cashiers automatically receive only their assigned location from token. Admins receive all branch locations under the target (or default) business, with optional branch UUID and name/address search.
 
 #### `PATCH /tenant/locations/:id` & `DELETE /tenant/locations/:id`
 
 - **Access:** `@Roles(Role.ADMIN)`
-- **Behavior:** Updates or soft-deletes a store branch location.
-- **Edge Cases:** `404 Not Found` if location does not belong to caller's `businessId`.
+- **Behavior:** Updates or soft-deletes a store branch location after verifying caller owns the parent business.
+- **Edge Cases:** `404 Not Found` if location not found or not owned; `409 Conflict` on delete if branch has an active open shift (`ShiftStatus.OPEN`).
 
 ---
 
@@ -435,7 +467,7 @@ erDiagram
 
 #### `POST /users/cashiers`
 
-- **Access:** `@Roles(Role.ADMIN)` (`@Idempotent()`)
+- **Access:** `@Roles(Role.ADMIN)`
 - **DTO:**
   - `fullName`: `@IsString()`, `@MinLength(2)`
   - `email`: `@IsEmail()`
@@ -810,6 +842,20 @@ erDiagram
   - `locationId?: string`
   - `search?: string`
 - **Behavior:** Generates and streams branded `text/csv` or `application/pdf` (via PDFKit) with formatted tables, column headers, and totals.
+
+---
+
+## 3.10 Expense Ledger System (Admin Operational Expenses)
+
+- **Schema:** `Expense` and `ExpenseCategory` in `prisma/schema/pos.prisma`.
+- **Ownership & Authorization:**
+  - JWT tokens include `businessIds: string[]` and `locationIds: string[]` arrays.
+  - Frontend sends `businessId` directly. Backend validates that `businessId` exists in the admin's owned `businessIds`.
+- **Endpoints:**
+  - `POST /expenses` (`@Roles(Role.ADMIN)`): Record an expense with `amount`, `title`, optional `category` (RENT, UTILITIES, SALARIES, SUPPLIES, MAINTENANCE, MARKETING, TRANSPORT, INVENTORY, PERSONAL_DRAWING, OTHER), `note`, `spentAt`, and `locationId`.
+  - `GET /expenses` (`@Roles(Role.ADMIN)`): List active expenses with search, category, location, and month/year filters.
+  - `GET /expenses/summary` (`@Roles(Role.ADMIN)`): Monthly summary of expenses. **No salary deduction** is performed (admins have no monthly salary deduction). Returns `totalExpenses`, `expenseCount`, and `byCategory` breakdowns.
+  - `DELETE /expenses/:id` (`@Roles(Role.ADMIN)`): Soft-deletes an expense (`deletedAt: new Date()`). Soft-deleted records are strictly excluded from monthly summaries.
 
 ---
 

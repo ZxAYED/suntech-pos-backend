@@ -11,6 +11,8 @@ export const userPublicSelect = {
   businessId: true,
   locationId: true,
   profileImageUrl: true,
+  profileImagePublicId: true,
+  profileImageKey: true,
 } satisfies Prisma.UserSelect;
 
 export type PublicUser = Prisma.UserGetPayload<{

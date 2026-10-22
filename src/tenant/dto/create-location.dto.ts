@@ -19,4 +19,14 @@ export class CreateLocationDto {
   @IsString()
   @MaxLength(240)
   address?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Target business UUID under which this branch is created. Optional for Admin: if omitted, automatically attaches to your currently active business.',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsString()
+  businessId?: string;
 }

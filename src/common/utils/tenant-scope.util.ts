@@ -51,11 +51,15 @@ export async function resolveTenantContext(
       where: { id: actor.sub, deletedAt: null },
       select: {
         businessId: true,
-        ownedBusiness: { select: { id: true } },
+        ownedBusinesses: {
+          where: { deletedAt: null },
+          select: { id: true },
+          take: 1,
+        },
       },
     });
 
-    businessId = adminUser?.businessId || adminUser?.ownedBusiness?.id || undefined;
+    businessId = adminUser?.businessId || adminUser?.ownedBusinesses?.[0]?.id || undefined;
   }
 
   if (!businessId) {

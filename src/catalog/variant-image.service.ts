@@ -86,6 +86,7 @@ export class VariantImageService {
           variantId: variant.id,
           url: image.url,
           publicId: image.publicId,
+          key: image.publicId,
           sortOrder: sortStart + index,
         })),
       });
@@ -103,7 +104,12 @@ export class VariantImageService {
     admin: AccessTokenPayload,
     variantId: string,
     file: UploadedImage,
-  ): Promise<{ profileImageUrl: string }> {
+  ): Promise<{
+    profileImageUrl: string;
+    profileImagePublicId: string;
+    profileImageKey: string;
+    key: string;
+  }> {
     const businessId = this.requireBusinessId(admin);
     const variant = await this.findVariant(businessId, variantId);
     const uploaded = await this.cloudinary.uploadImage(
@@ -117,6 +123,7 @@ export class VariantImageService {
         data: {
           profileImageUrl: uploaded.url,
           profileImagePublicId: uploaded.publicId,
+          profileImageKey: uploaded.publicId,
         },
       });
 
@@ -128,14 +135,26 @@ export class VariantImageService {
       throw error;
     }
 
-    await this.removeStoredImage(variant.profileImagePublicId);
-    return { profileImageUrl: uploaded.url };
+    await this.removeStoredImage(
+      variant.profileImagePublicId || variant.profileImageKey,
+    );
+    return {
+      profileImageUrl: uploaded.url,
+      profileImagePublicId: uploaded.publicId,
+      profileImageKey: uploaded.publicId,
+      key: uploaded.publicId,
+    };
   }
 
   async clearProfileImage(
     admin: AccessTokenPayload,
     variantId: string,
-  ): Promise<{ profileImageUrl: null }> {
+  ): Promise<{
+    profileImageUrl: null;
+    profileImagePublicId: null;
+    profileImageKey: null;
+    key: null;
+  }> {
     const businessId = this.requireBusinessId(admin);
     const variant = await this.findVariant(businessId, variantId);
     const updated = await this.prisma.variant.updateMany({
@@ -143,14 +162,22 @@ export class VariantImageService {
       data: {
         profileImageUrl: null,
         profileImagePublicId: null,
+        profileImageKey: null,
       },
     });
 
     if (updated.count === 0) {
       throw new NotFoundException('Variant not found');
     }
-    await this.removeStoredImage(variant.profileImagePublicId);
-    return { profileImageUrl: null };
+    await this.removeStoredImage(
+      variant.profileImagePublicId || variant.profileImageKey,
+    );
+    return {
+      profileImageUrl: null,
+      profileImagePublicId: null,
+      profileImageKey: null,
+      key: null,
+    };
   }
 
   async removeImage(
@@ -162,11 +189,11 @@ export class VariantImageService {
     await this.findVariant(businessId, variantId);
     const image = await this.prisma.variantImage.findFirst({
       where: {
-        id: imageId,
         variantId,
         variant: { businessId, deletedAt: null },
+        OR: [{ id: imageId }, { publicId: imageId }, { key: imageId }],
       },
-      select: { id: true, publicId: true },
+      select: { id: true, publicId: true, key: true },
     });
 
     if (!image) {
@@ -175,12 +202,7 @@ export class VariantImageService {
 
     await this.prisma.variantImage.delete({ where: { id: image.id } });
 
-    try {
-      await this.cloudinary.deleteImage(image.publicId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Could not delete stored image: ${message}`);
-    }
+    await this.removeStoredImage(image.publicId || image.key);
 
     return this.listImages(businessId, variantId);
   }
@@ -198,7 +220,11 @@ export class VariantImageService {
   private async findVariant(businessId: string, variantId: string) {
     const variant = await this.prisma.variant.findFirst({
       where: { id: variantId, businessId, deletedAt: null },
-      select: { id: true, profileImagePublicId: true },
+      select: {
+        id: true,
+        profileImagePublicId: true,
+        profileImageKey: true,
+      },
     });
 
     if (!variant) {
