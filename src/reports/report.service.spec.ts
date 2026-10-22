@@ -316,4 +316,99 @@ describe('ReportService', () => {
       }),
     );
   });
+
+  it('computes period analytics for admin filtered by month name or code', async () => {
+    orderCount.mockResolvedValue(3);
+    orderAggregate.mockResolvedValue({ _sum: { totalAmount: 6000 } });
+    refundAggregate.mockResolvedValue({ _sum: { totalRefund: 0 } });
+    orderGroupBy.mockResolvedValue([
+      { paymentMethod: PaymentMethod.COD, _sum: { totalAmount: 6000 } },
+    ]);
+    orderLineFindMany.mockResolvedValue([
+      {
+        subtotal: 6000,
+        quantity: 3,
+        variantId: 'var-1',
+        variant: {
+          costPrice: 1000,
+          product: { category: { name: 'Electronics' } },
+        },
+      },
+    ]);
+
+    const res = await service.analytics(
+      { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+      { month: 'october', year: 2026 },
+    );
+
+    expect(res.grossRevenue).toBe(6000);
+    expect(res.ordersCount).toBe(3);
+    expect(res.averageTicketValue).toBe(2000);
+    expect(res.topCategories).toEqual([
+      { name: 'Electronics', revenue: 6000, percentage: 100 },
+    ]);
+  });
+
+  it('supports dashboard metrics filtered by range="month"', async () => {
+    orderGroupBy.mockImplementation(({ by }: { by: string[] }) => {
+      if (by.includes('cashierId')) {
+        return Promise.resolve([
+          { cashierId: 'cashier-1', _sum: { totalAmount: 1000 } },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
+    userFindMany.mockResolvedValue([
+      { id: 'cashier-1', fullName: 'Rafi', publicId: 'CSH-RAFI1' },
+    ]);
+    orderCount.mockResolvedValue(1);
+    orderLineFindMany.mockResolvedValue([]);
+    orderFindMany.mockResolvedValue([]);
+
+    const dashboard = (await service.dashboard(
+      { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+      { range: 'month', month: 'oct' },
+    )) as AdminDashboard;
+
+    expect(dashboard.periodRevenue).toBe(1000);
+    expect(dashboard.ordersCount).toBe(1);
+  });
+
+  it('supports transactions filtered by month and year', async () => {
+    orderCount.mockResolvedValue(1);
+    orderFindMany.mockResolvedValue([
+      {
+        id: 'ord-oct',
+        invoiceNumber: 'INV-OCT',
+        paymentMethod: PaymentMethod.COD,
+        totalAmount: 1500,
+        subtotal: 1500,
+        tenderedAmount: 1500,
+        changeDue: 0,
+        status: 'PAID',
+        createdAt: new Date(),
+        cashier: { id: 'c1', fullName: 'Cashier 1', publicId: 'C1' },
+        lines: [],
+      },
+    ]);
+
+    const res = await service.transactions(
+      { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+      { month: '10', year: 2026 },
+    );
+
+    expect(res.total).toBe(1);
+    expect(res.items).toHaveLength(1);
+    expect(orderFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          cashier: { businessId: 'biz-1' },
+          createdAt: expect.objectContaining({
+            gte: expect.any(Date),
+            lte: expect.any(Date),
+          }),
+        }),
+      }),
+    );
+  });
 });

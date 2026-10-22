@@ -17,7 +17,10 @@ import {
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { requireBusinessId } from '../hr/require-business-id';
-import { getDhakaReportDateRange } from '../common/utils/timezone.util';
+import {
+  getDhakaReportDateRange,
+  resolveDhakaDateRange,
+} from '../common/utils/timezone.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCatalogOrderDto } from './dto/create-catalog-order.dto';
 import { CreateCustomOrderDto } from './dto/create-custom-order.dto';
@@ -51,6 +54,13 @@ export const unifiedOrderSelect = {
   locationId: true,
   shiftId: true,
   cashierId: true,
+  cashier: {
+    select: {
+      id: true,
+      fullName: true,
+      role: true,
+    },
+  },
   subtotal: true,
   totalAmount: true,
   tenderedAmount: true,
@@ -673,9 +683,28 @@ export class OrdersService {
       where.location = { businessId: actor.businessId };
     }
 
+    const isOwnOrders =
+      query.ownOrders === true ||
+      (query.ownOrders as unknown as string) === 'true' ||
+      query.scope === 'my' ||
+      query.scope === 'own';
+
     if (actor?.role === Role.CASHIER) {
       if (actor.locationId) {
         where.locationId = actor.locationId;
+      }
+      if (isOwnOrders) {
+        where.cashierId = actor.sub;
+      }
+    } else if (actor?.role === Role.ADMIN || actor?.role === Role.SUPER_ADMIN) {
+      if (isOwnOrders) {
+        where.cashierId = actor.sub;
+      } else if (query.cashierId) {
+        where.cashierId = query.cashierId;
+      }
+
+      if (query.locationId) {
+        where.locationId = query.locationId;
       }
     } else if (query.locationId) {
       where.locationId = query.locationId;
@@ -693,10 +722,18 @@ export class OrdersService {
       where.status = query.status;
     }
 
-    if (query.range) {
-      const dateRange = getDhakaReportDateRange(query.range);
+    if (query.range || query.month || query.week || query.year) {
+      const dateRange = resolveDhakaDateRange({
+        range: query.range,
+        month: query.month,
+        week: query.week,
+        year: query.year,
+      });
       if (dateRange) {
-        where.createdAt = dateRange;
+        where.createdAt = {
+          gte: dateRange.gte,
+          ...(dateRange.lte ? { lte: dateRange.lte } : {}),
+        };
       }
     }
 

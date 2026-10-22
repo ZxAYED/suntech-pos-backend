@@ -34,9 +34,30 @@ export class ReportController {
   @ApiQuery({
     name: 'range',
     required: false,
-    enum: ['today', 'yesterday', 'weekly', 'monthly'],
+    enum: ['today', 'yesterday', 'weekly', 'monthly', 'daily', 'quarterly', 'week', 'month', 'year'],
     enumName: 'DashboardDateRange',
-    description: 'Filter dashboard metrics by period range',
+    description: 'Filter dashboard metrics by period range ("month" defaults to current month)',
+  })
+  @ApiQuery({
+    name: 'month',
+    required: false,
+    type: String,
+    description: 'Filter by month name or code (e.g. october, oct, 10, current)',
+    example: 'october',
+  })
+  @ApiQuery({
+    name: 'week',
+    required: false,
+    type: String,
+    description: 'Filter by week number (1-53) or "current"',
+    example: 'current',
+  })
+  @ApiQuery({
+    name: 'year',
+    required: false,
+    type: Number,
+    description: 'Filter by calendar year (e.g. 2026)',
+    example: 2026,
   })
   @ApiQuery({
     name: 'locationId',
@@ -73,10 +94,31 @@ export class ReportController {
   @ApiQuery({
     name: 'range',
     required: false,
-    enum: ['daily', 'weekly', 'monthly', 'quarterly'],
+    enum: ['daily', 'weekly', 'monthly', 'quarterly', 'week', 'month', 'year'],
     enumName: 'AnalyticsDateRange',
-    description: 'Filter period analytics by range (default monthly)',
+    description: 'Filter period analytics by range (default monthly, "month" = current month)',
     example: 'monthly',
+  })
+  @ApiQuery({
+    name: 'month',
+    required: false,
+    type: String,
+    description: 'Filter by month name or code (e.g. october, oct, 10, current)',
+    example: 'october',
+  })
+  @ApiQuery({
+    name: 'week',
+    required: false,
+    type: String,
+    description: 'Filter by week number (1-53) or "current"',
+    example: 'current',
+  })
+  @ApiQuery({
+    name: 'year',
+    required: false,
+    type: Number,
+    description: 'Filter by calendar year (e.g. 2026)',
+    example: 2026,
   })
   @ApiQuery({
     name: 'locationId',
@@ -142,9 +184,30 @@ export class ReportController {
   @ApiQuery({
     name: 'range',
     required: false,
-    enum: ['today', 'yesterday', 'daily', 'weekly', 'monthly', 'quarterly'],
+    enum: ['today', 'yesterday', 'daily', 'weekly', 'monthly', 'quarterly', 'week', 'month', 'year'],
     enumName: 'TransactionLogDateRange',
-    description: 'Date range filter',
+    description: 'Date range filter ("month" = current month)',
+  })
+  @ApiQuery({
+    name: 'month',
+    required: false,
+    type: String,
+    description: 'Filter by month name or code (e.g. october, oct, 10, current)',
+    example: 'october',
+  })
+  @ApiQuery({
+    name: 'week',
+    required: false,
+    type: String,
+    description: 'Filter by week number (1-53) or "current"',
+    example: 'current',
+  })
+  @ApiQuery({
+    name: 'year',
+    required: false,
+    type: Number,
+    description: 'Filter by calendar year (e.g. 2026)',
+    example: 2026,
   })
   @ApiResponse({ status: 200, description: 'Transactions loaded' })
   @ApiResponse({

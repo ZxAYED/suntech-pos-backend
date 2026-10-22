@@ -621,6 +621,83 @@ describe('OrdersService', () => {
         new ForbiddenException('Create a business before continuing'),
       );
     });
+
+    it('filters to admin own orders when ownOrders is true or scope is my', async () => {
+      orderCount.mockResolvedValue(1);
+      orderFindMany.mockResolvedValue([{ id: 'order-admin-own' }]);
+
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+      };
+
+      const result = await service.getOrders(adminActor, {
+        ownOrders: true,
+        page: 1,
+        limit: 10,
+      });
+
+      expect(orderCount).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          location: { businessId: 'biz-1' },
+          cashierId: 'admin-1',
+        }),
+      });
+      expect(result.items).toHaveLength(1);
+    });
+
+    it('filters orders by specific cashierId for admin', async () => {
+      orderCount.mockResolvedValue(2);
+      orderFindMany.mockResolvedValue([{ id: 'order-c1' }, { id: 'order-c2' }]);
+
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+      };
+
+      await service.getOrders(adminActor, {
+        cashierId: 'cashier-42',
+        page: 1,
+        limit: 10,
+      });
+
+      expect(orderCount).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          location: { businessId: 'biz-1' },
+          cashierId: 'cashier-42',
+        }),
+      });
+    });
+
+    it('filters orders by month name such as october', async () => {
+      orderCount.mockResolvedValue(1);
+      orderFindMany.mockResolvedValue([{ id: 'order-oct' }]);
+
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+      };
+
+      await service.getOrders(adminActor, {
+        month: 'october',
+        year: 2026,
+        page: 1,
+        limit: 10,
+      });
+
+      expect(orderCount).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          location: { businessId: 'biz-1' },
+          createdAt: expect.objectContaining({
+            gte: expect.any(Date),
+            lte: expect.any(Date),
+          }),
+        }),
+      });
+    });
   });
 
   describe('Legacy checkoutWithin support', () => {

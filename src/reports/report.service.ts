@@ -6,6 +6,8 @@ import {
   getDhakaMonthBounds,
   getDhakaReportDateRange,
   getDhakaStartOfDay,
+  resolveDhakaDateRange,
+  ReportDateFilterOptions,
 } from '../common/utils/timezone.util';
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
@@ -92,10 +94,13 @@ export interface PeriodAnalytics {
 }
 
 export function getReportDateRange(
-  range?: string,
+  queryOrRange?: string | ReportDateFilterOptions,
   now = new Date(),
 ): { gte: Date; lte?: Date } {
-  return getDhakaReportDateRange(range, now);
+  if (typeof queryOrRange === 'string') {
+    return resolveDhakaDateRange({ range: queryOrRange }, now);
+  }
+  return resolveDhakaDateRange(queryOrRange, now);
 }
 
 const transactionLineSelect = {
@@ -165,7 +170,7 @@ export class ReportService {
       return this.adminDashboard(
         scope.businessId,
         scope.locationId,
-        query?.range,
+        query,
       );
     }
 
@@ -183,11 +188,10 @@ export class ReportService {
       query?.businessId,
     );
     const scope = resolveLocationScope(admin, query?.locationId, businessId);
-    const range = query?.range ?? 'monthly';
     const metrics = await this.computePeriodMetrics(
       scope.businessId,
       scope.locationId,
-      range,
+      query ?? { range: 'monthly' },
     );
 
     return {
@@ -215,8 +219,8 @@ export class ReportService {
       ...(scope.locationId ? { locationId: scope.locationId } : {}),
     };
 
-    if (query.range) {
-      const dateRange = getReportDateRange(query.range);
+    if (query.range || query.month || query.week || query.year) {
+      const dateRange = getReportDateRange(query);
       where.createdAt = {
         gte: dateRange.gte,
         ...(dateRange.lte ? { lte: dateRange.lte } : {}),
@@ -326,8 +330,12 @@ export class ReportService {
   private async adminDashboard(
     businessId: string,
     locationId?: string,
-    range?: string,
+    queryOrRange?: DashboardQueryDto | string,
   ): Promise<AdminDashboard> {
+    const queryObj: DashboardQueryDto =
+      typeof queryOrRange === 'string'
+        ? { range: queryOrRange }
+        : (queryOrRange ?? {});
     const today = utcDay();
     const rolling = {
       gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
@@ -339,6 +347,11 @@ export class ReportService {
       ...(locationId ? { locationId } : {}),
     };
 
+    const periodFilter =
+      queryObj.range || queryObj.month || queryObj.week || queryObj.year
+        ? queryObj
+        : 'today';
+
     const [
       globalDailyRevenue,
       globalRolling30DayRevenue,
@@ -349,7 +362,7 @@ export class ReportService {
       this.netRevenue({ ...business, createdAt: today }),
       this.netRevenue({ ...business, createdAt: rolling }),
       this.leaderboard(businessId, month, locationId),
-      this.computePeriodMetrics(businessId, locationId, range ?? 'today'),
+      this.computePeriodMetrics(businessId, locationId, periodFilter),
       this.fetchRecentTickets(businessId, locationId),
     ]);
 
@@ -370,7 +383,7 @@ export class ReportService {
   private async computePeriodMetrics(
     businessId: string,
     locationId?: string,
-    range?: string,
+    queryOrRange?: ReportDateFilterOptions | string,
   ): Promise<{
     periodRevenue: number;
     ordersCount: number;
@@ -394,7 +407,11 @@ export class ReportService {
       percentage: number;
     }>;
   }> {
-    const dateRange = getReportDateRange(range);
+    const options: ReportDateFilterOptions =
+      typeof queryOrRange === 'string'
+        ? { range: queryOrRange }
+        : (queryOrRange ?? { range: 'monthly' });
+    const dateRange = getReportDateRange(options);
     const createdAt = {
       gte: dateRange.gte,
       ...(dateRange.lte ? { lte: dateRange.lte } : {}),

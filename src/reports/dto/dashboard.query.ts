@@ -4,13 +4,35 @@ import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export class DashboardQueryDto {
   @ApiPropertyOptional({
-    enum: ['today', 'yesterday', 'weekly', 'monthly'],
-    enumName: 'DashboardDateRange',
-    description: 'Filter dashboard metrics by period range',
+    description:
+      'Filter dashboard metrics by period range (e.g. today, yesterday, weekly, monthly, week, month, year). "month" defaults to current month.',
+    example: 'month',
   })
   @IsOptional()
-  @IsEnum(['today', 'yesterday', 'weekly', 'monthly'])
-  range?: 'today' | 'yesterday' | 'weekly' | 'monthly';
+  range?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Filter by month name or code (e.g. "october", "oct", "10", 10, "current")',
+    example: 'october',
+  })
+  @IsOptional()
+  month?: string | number;
+
+  @ApiPropertyOptional({
+    description: 'Filter by week number (1-53) or "current"',
+    example: 'current',
+  })
+  @IsOptional()
+  week?: string | number;
+
+  @ApiPropertyOptional({
+    description:
+      'Filter by calendar year (e.g. 2026). Defaults to current year if month/week specified.',
+    example: 2026,
+  })
+  @IsOptional()
+  year?: string | number;
 
   @ApiPropertyOptional({ description: 'Filter by store branch location ID' })
   @IsOptional()

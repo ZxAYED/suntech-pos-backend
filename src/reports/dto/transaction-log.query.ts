@@ -44,11 +44,34 @@ export class TransactionLogQueryDto {
   search?: string;
 
   @ApiPropertyOptional({
-    description: 'Date range filter (e.g. today, weekly, monthly)',
-    enum: ['today', 'yesterday', 'daily', 'weekly', 'monthly', 'quarterly'],
-    enumName: 'TransactionLogDateRange',
+    description:
+      'Date range filter (e.g. today, yesterday, daily, weekly, monthly, quarterly, week, month, year)',
+    example: 'month',
   })
   @IsOptional()
-  @IsIn(['today', 'yesterday', 'daily', 'weekly', 'monthly', 'quarterly'])
+  @IsString()
   range?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Filter by month name or code (e.g. "october", "oct", "10", 10, "current")',
+    example: 'october',
+  })
+  @IsOptional()
+  month?: string | number;
+
+  @ApiPropertyOptional({
+    description: 'Filter by week number (1-53) or "current"',
+    example: 'current',
+  })
+  @IsOptional()
+  week?: string | number;
+
+  @ApiPropertyOptional({
+    description:
+      'Filter by calendar year (e.g. 2026). Defaults to current year if month/week specified.',
+    example: 2026,
+  })
+  @IsOptional()
+  year?: string | number;
 }

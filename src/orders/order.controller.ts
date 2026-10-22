@@ -166,9 +166,51 @@ export class OrdersController {
   @ApiQuery({
     name: 'range',
     required: false,
-    enum: ['today', 'yesterday', 'weekly', 'monthly'],
+    enum: ['today', 'yesterday', 'weekly', 'monthly', 'daily', 'quarterly', 'week', 'month', 'year'],
     enumName: 'OrderDateRange',
-    description: 'Filter orders by period range',
+    description: 'Filter orders by period range ("month" defaults to current month)',
+  })
+  @ApiQuery({
+    name: 'month',
+    required: false,
+    type: String,
+    description: 'Filter by month name or code (e.g. october, oct, 10, current)',
+    example: 'october',
+  })
+  @ApiQuery({
+    name: 'week',
+    required: false,
+    type: String,
+    description: 'Filter by week number (1-53) or "current"',
+    example: 'current',
+  })
+  @ApiQuery({
+    name: 'year',
+    required: false,
+    type: Number,
+    description: 'Filter by calendar year (e.g. 2026)',
+    example: 2026,
+  })
+  @ApiQuery({
+    name: 'ownOrders',
+    required: false,
+    type: Boolean,
+    description:
+      'When true for Admin, returns only orders created/sold by the admin themselves. Default false (all business orders)',
+    example: true,
+  })
+  @ApiQuery({
+    name: 'scope',
+    required: false,
+    enum: ['all', 'my', 'own'],
+    description: 'Scope orders: "all" for all business orders, "my" for admin own sales',
+    example: 'all',
+  })
+  @ApiQuery({
+    name: 'cashierId',
+    required: false,
+    type: String,
+    description: 'Filter orders sold by a specific cashier or staff user ID',
   })
   @ApiQuery({
     name: 'page',

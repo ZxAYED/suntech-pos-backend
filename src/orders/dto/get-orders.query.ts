@@ -54,13 +54,61 @@ export class GetOrdersQueryDto {
   status?: OrderStatus;
 
   @ApiPropertyOptional({
-    enum: ['today', 'yesterday', 'weekly', 'monthly'],
-    enumName: 'OrderDateRange',
-    description: 'Filter orders by period range',
+    description:
+      'Filter orders by period range (e.g. today, yesterday, weekly, monthly, week, month, year)',
+    example: 'month',
   })
   @IsOptional()
-  @IsEnum(['today', 'yesterday', 'weekly', 'monthly'])
-  range?: 'today' | 'yesterday' | 'weekly' | 'monthly';
+  @IsString()
+  range?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Filter by month name or code (e.g. "october", "oct", "10", 10, "current")',
+    example: 'october',
+  })
+  @IsOptional()
+  month?: string | number;
+
+  @ApiPropertyOptional({
+    description: 'Filter by week number (1-53) or "current"',
+    example: 'current',
+  })
+  @IsOptional()
+  week?: string | number;
+
+  @ApiPropertyOptional({
+    description:
+      'Filter by calendar year (e.g. 2026). Defaults to current year if month/week specified.',
+    example: 2026,
+  })
+  @IsOptional()
+  year?: string | number;
+
+  @ApiPropertyOptional({
+    description:
+      'When true for Admin, returns only orders created/sold by the admin themselves. Default false (all business orders)',
+    example: true,
+  })
+  @IsOptional()
+  ownOrders?: boolean | string;
+
+  @ApiPropertyOptional({
+    description:
+      'Order history scope: "all" for all business orders, "my" or "own" for orders sold by the current user',
+    enum: ['all', 'my', 'own'],
+    example: 'all',
+  })
+  @IsOptional()
+  @IsString()
+  scope?: string;
+
+  @ApiPropertyOptional({
+    description: 'Filter orders sold by a specific cashier or staff user ID',
+  })
+  @IsOptional()
+  @IsEntityId()
+  cashierId?: string;
 
   @ApiPropertyOptional({ description: 'Page number', default: 1, minimum: 1 })
   @IsOptional()
