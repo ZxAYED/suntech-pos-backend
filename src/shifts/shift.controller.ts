@@ -13,10 +13,11 @@ import {
   ApiBearerAuth,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { Role } from '@prisma/client';
+import { Role, ShiftStatus } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Idempotent } from '../common/decorators/idempotent.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
@@ -182,6 +183,39 @@ export class ShiftController {
     summary: '[ADMIN, CASHIER] List shift history with filters',
     description:
       'Paginated shift session audit list. Cashier is restricted to own shifts; Admin can filter by location. Accessible by CASHIER and ADMIN.',
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter shifts by location ID',
+  })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ShiftStatus,
+    enumName: 'ShiftStatus',
+    description: 'Filter by shift status',
+  })
+  @ApiQuery({
+    name: 'page',
+    required: false,
+    type: Number,
+    description: 'Page number',
+    example: 1,
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Page size limit',
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Optional business UUID for Admin; Cashier is locked to assigned business from token',
+    example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Shifts loaded' })
   @ApiResponse({

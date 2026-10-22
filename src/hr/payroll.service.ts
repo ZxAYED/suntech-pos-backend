@@ -49,7 +49,7 @@ export class PayrollService {
     admin: AccessTokenPayload,
     dto: ProcessPayrollDto,
   ): Promise<PresentedPayroll> {
-    const businessId = requireBusinessId(admin);
+    const businessId = requireBusinessId(admin, dto.businessId);
 
     try {
       return await this.prisma.$transaction((tx) =>
@@ -137,7 +137,7 @@ export class PayrollService {
   }
 
   async summary(admin: AccessTokenPayload, query: PayrollHistoryQueryDto) {
-    const businessId = requireBusinessId(admin);
+    const businessId = requireBusinessId(admin, query.businessId);
     const now = new Date();
     const month = query.month ?? now.getMonth() + 1;
     const year = query.year ?? now.getFullYear();
@@ -250,7 +250,7 @@ export class PayrollService {
   }
 
   async disburse(admin: AccessTokenPayload, dto: DisbursePayrollDto) {
-    const businessId = requireBusinessId(admin);
+    const businessId = requireBusinessId(admin, dto.businessId);
 
     return this.prisma.$transaction(async (tx) => {
       const staffList = await tx.user.findMany({
@@ -343,7 +343,7 @@ export class PayrollService {
     admin: AccessTokenPayload,
     query: PayrollHistoryQueryDto,
   ): Promise<PresentedPayroll[]> {
-    const businessId = requireBusinessId(admin);
+    const businessId = requireBusinessId(admin, query.businessId);
     const now = new Date();
     const month = query.month ?? now.getMonth() + 1;
     const year = query.year ?? now.getFullYear();

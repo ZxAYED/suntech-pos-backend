@@ -41,4 +41,12 @@ export class ListVariantsQueryDto {
   @IsOptional()
   @IsString()
   locationId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional business UUID for Admin; Cashier is locked to assigned business from token',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsString()
+  businessId?: string;
 }

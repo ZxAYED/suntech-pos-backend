@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   Post,
+  Query,
   UploadedFile,
   UploadedFiles,
   UseGuards,
@@ -16,6 +17,7 @@ import {
   ApiConsumes,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -48,6 +50,12 @@ export class VariantImageController {
       'Uploads new primary display image to Cloudinary, updates profileImageUrl and keys (profileImagePublicId / profileImageKey / key), and automatically deletes previous hero image from cloud storage. Requires ADMIN role.',
   })
   @ApiParam({ name: 'variantId', description: 'Variant ID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
@@ -74,8 +82,9 @@ export class VariantImageController {
     @CurrentUser() admin: AccessTokenPayload,
     @Param('variantId') variantId: string,
     @UploadedFile() file: UploadedImage,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.variantImages.setProfileImage(admin, variantId, file);
+    return this.variantImages.setProfileImage(admin, variantId, file, businessId);
   }
 
   @Delete(':variantId/profile-image')
@@ -85,6 +94,12 @@ export class VariantImageController {
       'Deletes primary display image from Cloudinary and clears profileImageUrl and key fields for the variant. Requires ADMIN role.',
   })
   @ApiParam({ name: 'variantId', description: 'Variant ID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Variant image removed' })
   @ApiResponse({
     status: 401,
@@ -96,8 +111,9 @@ export class VariantImageController {
   clearProfileImage(
     @CurrentUser() admin: AccessTokenPayload,
     @Param('variantId') variantId: string,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.variantImages.clearProfileImage(admin, variantId);
+    return this.variantImages.clearProfileImage(admin, variantId, businessId);
   }
 
   @Get(':variantId/images')
@@ -107,6 +123,12 @@ export class VariantImageController {
       'Returns gallery image records associated with variant. Requires ADMIN role.',
   })
   @ApiParam({ name: 'variantId', description: 'Variant ID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Variant images loaded' })
   @ApiResponse({
     status: 401,
@@ -117,8 +139,9 @@ export class VariantImageController {
   list(
     @CurrentUser() admin: AccessTokenPayload,
     @Param('variantId') variantId: string,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.variantImages.list(admin, variantId);
+    return this.variantImages.list(admin, variantId, businessId);
   }
 
   @Post(':variantId/images')
@@ -128,6 +151,12 @@ export class VariantImageController {
       'Uploads up to MAX_VARIANT_IMAGES to the variant gallery. Requires ADMIN role.',
   })
   @ApiParam({ name: 'variantId', description: 'Variant ID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
@@ -154,8 +183,9 @@ export class VariantImageController {
     @CurrentUser() admin: AccessTokenPayload,
     @Param('variantId') variantId: string,
     @UploadedFiles() files: UploadedImage[],
+    @Query('businessId') businessId?: string,
   ) {
-    return this.variantImages.addImages(admin, variantId, files);
+    return this.variantImages.addImages(admin, variantId, files, businessId);
   }
 
   @Delete(':variantId/images/:imageId')
@@ -166,6 +196,12 @@ export class VariantImageController {
   })
   @ApiParam({ name: 'variantId', description: 'Variant ID' })
   @ApiParam({ name: 'imageId', description: 'Image ID or storage key/publicId' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Variant image removed' })
   @ApiResponse({
     status: 401,
@@ -178,7 +214,8 @@ export class VariantImageController {
     @CurrentUser() admin: AccessTokenPayload,
     @Param('variantId') variantId: string,
     @Param('imageId') imageId: string,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.variantImages.removeImage(admin, variantId, imageId);
+    return this.variantImages.removeImage(admin, variantId, imageId, businessId);
   }
 }

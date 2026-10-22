@@ -272,5 +272,59 @@ describe('VariantService', () => {
         NotFoundException,
       );
     });
+
+    it('filters variants by businessId query for Admin', async () => {
+      variantFindMany.mockResolvedValue([]);
+
+      await service.list(admin, { businessId: 'biz-target' });
+
+      const findCall = (
+        variantFindMany.mock.calls as unknown as Array<
+          [{ where: Record<string, unknown> }]
+        >
+      )[0][0];
+      expect(findCall.where.businessId).toBe('biz-target');
+    });
+
+    it('scopes Cashier variant listing to token businessId and branch stock', async () => {
+      const cashier = {
+        sub: 'cashier-1',
+        role: Role.CASHIER,
+        businessId: 'biz-cashier',
+        locationId: 'loc-branch-1',
+      };
+
+      variantFindMany.mockResolvedValue([
+        {
+          id: 'var-1',
+          productId: 'prod-1',
+          name: 'Variant 1',
+          sku: 'SKU-1',
+          barcode: 'BAR-1',
+          sellingPrice: 100,
+          costPrice: 60,
+          stock: 50,
+          profileImageUrl: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          images: [],
+          product: { id: 'prod-1', name: 'Product', categoryId: null, category: null },
+          locationStocks: [
+            { locationId: 'loc-branch-1', stock: 12 },
+            { locationId: 'loc-branch-2', stock: 38 },
+          ],
+        },
+      ]);
+
+      const res = await service.list(cashier, { businessId: 'biz-fake' });
+
+      const findCall = (
+        variantFindMany.mock.calls as unknown as Array<
+          [{ where: Record<string, unknown> }]
+        >
+      )[0][0];
+      expect(findCall.where.businessId).toBe('biz-cashier');
+      expect(res[0].stock).toBe(12);
+    });
   });
 });

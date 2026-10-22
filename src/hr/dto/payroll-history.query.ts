@@ -24,4 +24,12 @@ export class PayrollHistoryQueryDto {
   @IsOptional()
   @IsEntityId()
   locationId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional business UUID for Admin validation',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsEntityId()
+  businessId?: string;
 }

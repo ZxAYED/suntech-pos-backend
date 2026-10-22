@@ -12,7 +12,10 @@ export function resolveLocationScope(
   requestedLocationId?: string,
   requestedBusinessId?: string,
 ): LocationScope {
-  const effectiveBusinessId = requestedBusinessId?.trim() || actor?.businessId;
+  let effectiveBusinessId = requestedBusinessId?.trim() || actor?.businessId;
+  if (!effectiveBusinessId && actor?.businessIds && actor.businessIds.length === 1) {
+    effectiveBusinessId = actor.businessIds[0];
+  }
 
   if (actor.role === Role.CASHIER) {
     if (!actor.businessId || typeof actor.businessId !== 'string') {

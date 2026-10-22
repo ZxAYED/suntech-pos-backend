@@ -129,7 +129,7 @@ export class ProductService {
     actor: AccessTokenPayload,
     query?: ListProductsQueryDto,
   ): Promise<PresentedProduct[]> {
-    const businessId = await this.resolveBusinessId(actor);
+    const businessId = await this.resolveBusinessId(actor, query?.businessId);
     const search = query?.search?.trim();
 
     const searchFilter = search
@@ -184,10 +184,14 @@ export class ProductService {
   async get(
     actor: AccessTokenPayload,
     productId: string,
+    requestedBusinessId?: string,
+    requestedLocationId?: string,
   ): Promise<PresentedProduct> {
-    const businessId = await this.resolveBusinessId(actor);
+    const businessId = await this.resolveBusinessId(actor, requestedBusinessId);
     const effectiveLocationId =
-      actor.role === Role.CASHIER ? actor.locationId : undefined;
+      actor.role === Role.CASHIER
+        ? actor.locationId
+        : requestedLocationId?.trim() || undefined;
     return presentProduct(
       await this.findProduct(businessId, productId),
       effectiveLocationId,
@@ -198,8 +202,12 @@ export class ProductService {
     admin: AccessTokenPayload,
     productId: string,
     dto: UpdateProductDto,
+    requestedBusinessId?: string,
   ): Promise<PresentedProduct> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(
+      admin,
+      requestedBusinessId || dto.businessId,
+    );
     await this.findProduct(businessId, productId);
     const name = dto.name?.trim();
 
@@ -243,8 +251,9 @@ export class ProductService {
   async remove(
     admin: AccessTokenPayload,
     productId: string,
+    requestedBusinessId?: string,
   ): Promise<{ id: string; deletedAt: Date }> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     const product = await this.prisma.product.findFirst({
       where: { id: productId, businessId, deletedAt: null },
       select: { id: true, name: true },

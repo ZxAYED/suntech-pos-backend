@@ -11,6 +11,7 @@ import {
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -40,6 +41,29 @@ export class PayrollController {
     summary: '[ADMIN] Get monthly payroll disbursement summary',
     description:
       'Pre-flight calculation of total base salary, deducted advances, and net payable for eligible active cashiers. Requires ADMIN role.',
+  })
+  @ApiQuery({
+    name: 'month',
+    required: false,
+    description: 'Payroll month (1-12)',
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'year',
+    required: false,
+    description: 'Payroll year (e.g. 2026)',
+    example: 2026,
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter by branch location ID',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin validation',
+    example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Payroll summary loaded' })
   @ApiResponse({
@@ -109,7 +133,30 @@ export class PayrollController {
   @ApiOperation({
     summary: '[ADMIN] Get historical payroll records',
     description:
-      'Lists finalized payroll records with filters for month, year, and location. Requires ADMIN role.',
+      'Lists finalized payroll records with filters for month, year, location, and business. Requires ADMIN role.',
+  })
+  @ApiQuery({
+    name: 'month',
+    required: false,
+    description: 'Payroll month (1-12)',
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'year',
+    required: false,
+    description: 'Payroll year (e.g. 2026)',
+    example: 2026,
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter by branch location ID',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin validation',
+    example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Payroll history loaded' })
   @ApiResponse({
@@ -129,6 +176,29 @@ export class PayrollController {
   @ApiOperation({
     summary: '[ADMIN] List historical payroll records',
     description: 'Alias route for payroll history. Requires ADMIN role.',
+  })
+  @ApiQuery({
+    name: 'month',
+    required: false,
+    description: 'Payroll month (1-12)',
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'year',
+    required: false,
+    description: 'Payroll year (e.g. 2026)',
+    example: 2026,
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter by branch location ID',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin validation',
+    example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Payroll history loaded' })
   @ApiResponse({

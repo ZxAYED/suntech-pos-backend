@@ -15,7 +15,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { Role } from '@prisma/client';
+import { ExpenseCategory, Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
@@ -59,6 +59,40 @@ export class ExpenseController {
     description:
       'Retrieve expenses filtered by month, year, location, category, or search keywords. Excludes soft-deleted items.',
   })
+  @ApiQuery({
+    name: 'month',
+    required: false,
+    description: 'Calendar month (1-12) to filter expenses',
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'year',
+    required: false,
+    description: 'Calendar year to filter expenses',
+    example: 2026,
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter expenses by branch location',
+  })
+  @ApiQuery({
+    name: 'category',
+    required: false,
+    enum: ExpenseCategory,
+    enumName: 'ExpenseCategory',
+    description: 'Filter expenses by category',
+  })
+  @ApiQuery({
+    name: 'search',
+    required: false,
+    description: 'Keyword search in expense title or note',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business ID for multi-business admins',
+  })
   @ApiResponse({ status: 200, description: 'Expenses retrieved successfully' })
   @ResponseMessage('Expenses retrieved successfully')
   list(
@@ -74,6 +108,35 @@ export class ExpenseController {
     summary: 'Get monthly expense ledger summary (No salary deduction)',
     description:
       'Calculates total expenses and category breakdowns for a given month. Does not perform salary deductions, and excludes soft-deleted records.',
+  })
+  @ApiQuery({
+    name: 'month',
+    required: false,
+    description: 'Calendar month (1-12). Defaults to current month.',
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'year',
+    required: false,
+    description: 'Calendar year. Defaults to current year.',
+    example: 2026,
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter expense summary by branch location',
+  })
+  @ApiQuery({
+    name: 'category',
+    required: false,
+    enum: ExpenseCategory,
+    enumName: 'ExpenseCategory',
+    description: 'Filter expense summary by category',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business ID for multi-business admins',
   })
   @ApiResponse({ status: 200, description: 'Expense summary retrieved successfully' })
   @ResponseMessage('Expense summary retrieved successfully')

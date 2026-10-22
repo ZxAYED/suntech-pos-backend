@@ -134,8 +134,9 @@ export class CategoryService {
     admin: AccessTokenPayload,
     search?: string,
     locationId?: string,
+    requestedBusinessId?: string,
   ): Promise<PresentedCategory[]> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     const searchFilter = search?.trim()
       ? {
           OR: [
@@ -312,8 +313,9 @@ export class CategoryService {
   async get(
     admin: AccessTokenPayload,
     categoryId: string,
+    requestedBusinessId?: string,
   ): Promise<PresentedCategory> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
 
     const cat = await this.prisma.category.findFirst({
       where: { id: categoryId, businessId, deletedAt: null },
@@ -419,8 +421,12 @@ export class CategoryService {
     admin: AccessTokenPayload,
     categoryId: string,
     dto: UpdateCategoryDto,
+    requestedBusinessId?: string,
   ): Promise<PresentedCategory> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(
+      admin,
+      requestedBusinessId || dto.businessId,
+    );
     await this.findCategory(businessId, categoryId);
     const name = dto.name?.trim();
 
@@ -461,14 +467,15 @@ export class CategoryService {
       throw error;
     }
 
-    return this.get(admin, categoryId);
+    return this.get(admin, categoryId, businessId);
   }
 
   async remove(
     admin: AccessTokenPayload,
     categoryId: string,
+    requestedBusinessId?: string,
   ): Promise<{ id: string; deletedAt: Date }> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     const category = await this.prisma.category.findFirst({
       where: { id: categoryId, businessId, deletedAt: null },
       select: { id: true, name: true, slug: true },

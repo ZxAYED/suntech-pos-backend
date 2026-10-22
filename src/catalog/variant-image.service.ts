@@ -5,6 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { CloudinaryService } from '../media/cloudinary.service';
 import {
@@ -29,19 +30,22 @@ export class VariantImageService {
     private readonly cloudinary: CloudinaryService,
   ) {}
 
-  list(
+  async list(
     admin: AccessTokenPayload,
     variantId: string,
+    requestedBusinessId?: string,
   ): Promise<PresentedVariantImage[]> {
-    return this.listImages(this.requireBusinessId(admin), variantId);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
+    return this.listImages(businessId, variantId);
   }
 
   async addImages(
     admin: AccessTokenPayload,
     variantId: string,
     files: UploadedImage[] | undefined,
+    requestedBusinessId?: string,
   ): Promise<PresentedVariantImage[]> {
-    const businessId = this.requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     const images = files ?? [];
 
     if (images.length === 0) {
@@ -104,13 +108,14 @@ export class VariantImageService {
     admin: AccessTokenPayload,
     variantId: string,
     file: UploadedImage,
+    requestedBusinessId?: string,
   ): Promise<{
     profileImageUrl: string;
     profileImagePublicId: string;
     profileImageKey: string;
     key: string;
   }> {
-    const businessId = this.requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     const variant = await this.findVariant(businessId, variantId);
     const uploaded = await this.cloudinary.uploadImage(
       file,
@@ -149,13 +154,14 @@ export class VariantImageService {
   async clearProfileImage(
     admin: AccessTokenPayload,
     variantId: string,
+    requestedBusinessId?: string,
   ): Promise<{
     profileImageUrl: null;
     profileImagePublicId: null;
     profileImageKey: null;
     key: null;
   }> {
-    const businessId = this.requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     const variant = await this.findVariant(businessId, variantId);
     const updated = await this.prisma.variant.updateMany({
       where: { id: variant.id, businessId, deletedAt: null },
@@ -184,8 +190,9 @@ export class VariantImageService {
     admin: AccessTokenPayload,
     variantId: string,
     imageId: string,
+    requestedBusinessId?: string,
   ): Promise<PresentedVariantImage[]> {
-    const businessId = this.requireBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     await this.findVariant(businessId, variantId);
     const image = await this.prisma.variantImage.findFirst({
       where: {
@@ -207,14 +214,38 @@ export class VariantImageService {
     return this.listImages(businessId, variantId);
   }
 
-  private requireBusinessId(admin: AccessTokenPayload): string {
-    if (!admin.businessId) {
-      throw new ForbiddenException(
-        'Create a business before managing products',
-      );
+  private async resolveBusinessId(
+    actor: AccessTokenPayload,
+    requestedBusinessId?: string,
+  ): Promise<string> {
+    if (actor.role === Role.CASHIER) {
+      if (!actor.businessId) {
+        throw new ForbiddenException('Business context is required');
+      }
+      return actor.businessId;
     }
-
-    return admin.businessId;
+    let businessId = requestedBusinessId?.trim() || actor.businessId;
+    if (!businessId && actor.role === Role.ADMIN) {
+      if (actor.businessIds && actor.businessIds.length === 1) {
+        return actor.businessIds[0];
+      }
+      const user = await this.prisma.user.findFirst({
+        where: { id: actor.sub, deletedAt: null },
+        select: {
+          businessId: true,
+          ownedBusinesses: {
+            where: { deletedAt: null },
+            select: { id: true },
+            take: 1,
+          },
+        },
+      });
+      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
+    }
+    if (!businessId) {
+      throw new ForbiddenException('Create a business before continuing');
+    }
+    return businessId;
   }
 
   private async findVariant(businessId: string, variantId: string) {

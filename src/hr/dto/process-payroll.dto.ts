@@ -1,6 +1,13 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsString, Max, Min, MinLength } from 'class-validator';
+import {
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+  MinLength,
+} from 'class-validator';
 
 export class ProcessPayrollDto {
   @ApiProperty({
@@ -34,4 +41,13 @@ export class ProcessPayrollDto {
   @Min(2000)
   @Max(2100)
   year: number;
+
+  @ApiPropertyOptional({
+    description: 'Optional business UUID for Admin validation',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  businessId?: string;
 }

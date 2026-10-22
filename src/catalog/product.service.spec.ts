@@ -173,4 +173,63 @@ describe('ProductService', () => {
       NotFoundException,
     );
   });
+
+  it('filters product list by requestedBusinessId for multi-business Admin', async () => {
+    productFindMany.mockResolvedValue([]);
+
+    await service.list(admin, { businessId: 'biz-2' });
+
+    const findCall = (
+      productFindMany.mock.calls as unknown as Array<
+        [{ where: Record<string, unknown> }]
+      >
+    )[0][0];
+    expect(findCall.where.businessId).toBe('biz-2');
+  });
+
+  it('scopes Cashier to token businessId and location stock', async () => {
+    const cashier = {
+      sub: 'cashier-1',
+      role: Role.CASHIER,
+      businessId: 'biz-cashier',
+      locationId: 'loc-branch-1',
+    };
+
+    productFindMany.mockResolvedValue([
+      {
+        id: 'prod-1',
+        name: 'iPhone 15 Pro',
+        description: 'Flagship phone',
+        categoryId: 'cat-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        category: null,
+        variants: [
+          {
+            id: 'var-1',
+            name: '128GB',
+            sku: 'IPH-128',
+            stock: 100, // global aggregate
+            locationStocks: [
+              { locationId: 'loc-branch-1', stock: 15 },
+              { locationId: 'loc-branch-2', stock: 85 },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const res = await service.list(cashier, { businessId: 'biz-attempt-bypass' });
+
+    const findCall = (
+      productFindMany.mock.calls as unknown as Array<
+        [{ where: Record<string, unknown> }]
+      >
+    )[0][0];
+    // Cashier cannot bypass businessId from query; token is used
+    expect(findCall.where.businessId).toBe('biz-cashier');
+    expect(findCall.where.isActive).toBe(true);
+    // Stock is resolved specifically for cashier branch location
+    expect(res[0].variants[0].stock).toBe(15);
+  });
 });

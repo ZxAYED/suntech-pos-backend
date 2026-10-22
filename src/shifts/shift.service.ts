@@ -426,7 +426,7 @@ export class ShiftService {
   }
 
   async list(user: AccessTokenPayload, query: ListShiftsQueryDto) {
-    const scope = resolveLocationScope(user, query.locationId);
+    const scope = resolveLocationScope(user, query.locationId, query.businessId);
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 10));
     const skip = (page - 1) * limit;

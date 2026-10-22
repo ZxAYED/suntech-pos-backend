@@ -15,6 +15,7 @@ import {
   ApiBearerAuth,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -67,7 +68,44 @@ export class VariantController {
   @ApiOperation({
     summary: '[ADMIN, CASHIER] List variants with filters',
     description:
-      'Accessible by both ADMIN and CASHIER. Supports filtering by category, product, search, and low stock.',
+      'Accessible by both ADMIN and CASHIER. Supports filtering by category, product, search, low stock, branch location, and business.',
+  })
+  @ApiQuery({
+    name: 'search',
+    required: false,
+    description: 'Search term by name, SKU, or barcode',
+    example: 'Red',
+  })
+  @ApiQuery({
+    name: 'categoryId',
+    required: false,
+    description: 'Filter variants by category UUID',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiQuery({
+    name: 'productId',
+    required: false,
+    description: 'Filter variants by product UUID',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiQuery({
+    name: 'lowStockOnly',
+    required: false,
+    description: 'Filter for items with low stock (<= 5) when set to "true"',
+    example: 'true',
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter stock counts for a specific branch location UUID',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Optional business UUID for Admin; Cashier is locked to assigned business from token',
+    example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Variants loaded' })
   @ApiResponse({
@@ -89,6 +127,19 @@ export class VariantController {
     description: 'Accessible by both ADMIN and CASHIER.',
   })
   @ApiParam({ name: 'id', description: 'Variant UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Optional business UUID for Admin; Cashier is locked to assigned business from token',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Optional branch location UUID to view branch-specific stock',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Variant loaded' })
   @ApiResponse({
     status: 401,
@@ -97,8 +148,13 @@ export class VariantController {
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Variant loaded')
-  get(@CurrentUser() actor: AccessTokenPayload, @Param('id') id: string) {
-    return this.variants.get(actor, id);
+  get(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Param('id') id: string,
+    @Query('businessId') businessId?: string,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.variants.get(actor, id, businessId, locationId);
   }
 
   @Patch(':id')
@@ -108,6 +164,12 @@ export class VariantController {
       'Updates variant name, prices, SKU, barcode, or stock. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Variant UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Variant updated' })
   @ApiResponse({
     status: 401,
@@ -122,8 +184,9 @@ export class VariantController {
     @CurrentUser() admin: AccessTokenPayload,
     @Param('id') id: string,
     @Body() dto: UpdateVariantDto,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.variants.update(admin, id, dto);
+    return this.variants.update(admin, id, dto, businessId || dto.businessId);
   }
 
   @Delete(':id')
@@ -132,6 +195,12 @@ export class VariantController {
     description: 'Soft-deletes a variant from catalog. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Variant UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Variant removed' })
   @ApiResponse({
     status: 401,
@@ -141,7 +210,11 @@ export class VariantController {
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Variant removed')
-  remove(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {
-    return this.variants.remove(admin, id);
+  remove(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+    @Query('businessId') businessId?: string,
+  ) {
+    return this.variants.remove(admin, id, businessId);
   }
 }

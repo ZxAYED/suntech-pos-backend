@@ -15,6 +15,7 @@ import {
   ApiBearerAuth,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -67,7 +68,32 @@ export class ProductController {
   @ApiOperation({
     summary: '[ADMIN, CASHIER] List products with filters & pagination',
     description:
-      'List products with optional search, category, lowStock, and pagination. Accessible by ADMIN and CASHIER.',
+      'List products with optional search, category, branch location, and business filters. Accessible by ADMIN and CASHIER.',
+  })
+  @ApiQuery({
+    name: 'search',
+    required: false,
+    description: 'Search products by name, description, variant SKU or barcode',
+    example: 'iPhone',
+  })
+  @ApiQuery({
+    name: 'categoryId',
+    required: false,
+    description: 'Filter products by parent category UUID',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter stock counts for a specific branch location UUID',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Optional business UUID for Admin; Cashier is locked to assigned business from token',
+    example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({
     status: 200,
@@ -93,6 +119,19 @@ export class ProductController {
       'Returns product details including all non-deleted variants. Accessible by ADMIN and CASHIER.',
   })
   @ApiParam({ name: 'id', description: 'Product UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Optional business UUID for Admin; Cashier is locked to assigned business from token',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Optional branch location UUID to view branch-specific stock',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Product details returned' })
   @ApiResponse({
     status: 401,
@@ -101,8 +140,13 @@ export class ProductController {
   @ApiResponse({ status: 404, description: 'Product not found' })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Product loaded')
-  get(@CurrentUser() actor: AccessTokenPayload, @Param('id') id: string) {
-    return this.products.get(actor, id);
+  get(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Param('id') id: string,
+    @Query('businessId') businessId?: string,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.products.get(actor, id, businessId, locationId);
   }
 
   @Patch(':id')
@@ -112,6 +156,12 @@ export class ProductController {
       'Updates product name, description, or categoryId. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Product UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Product updated' })
   @ApiResponse({
     status: 401,
@@ -128,8 +178,9 @@ export class ProductController {
     @CurrentUser() admin: AccessTokenPayload,
     @Param('id') id: string,
     @Body() dto: UpdateProductDto,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.products.update(admin, id, dto);
+    return this.products.update(admin, id, dto, businessId || dto.businessId);
   }
 
   @Delete(':id')
@@ -138,6 +189,12 @@ export class ProductController {
     description: 'Soft-deletes product and its variants. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Product UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin to target a specific business',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Product deleted' })
   @ApiResponse({
     status: 401,
@@ -147,7 +204,11 @@ export class ProductController {
   @ApiResponse({ status: 404, description: 'Product not found' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Product removed')
-  remove(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {
-    return this.products.remove(admin, id);
+  remove(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+    @Query('businessId') businessId?: string,
+  ) {
+    return this.products.remove(admin, id, businessId);
   }
 }

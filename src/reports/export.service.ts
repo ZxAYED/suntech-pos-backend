@@ -39,7 +39,7 @@ export class ExportService {
     admin: AccessTokenPayload,
     query: ExportReportQueryDto,
   ): Promise<StreamableFile> {
-    const businessId = requireBusinessId(admin);
+    const businessId = requireBusinessId(admin, query.businessId);
     const business = await this.prisma.business.findFirst({
       where: { id: businessId, deletedAt: null },
       select: { name: true },

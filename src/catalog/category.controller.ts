@@ -76,6 +76,19 @@ export class CategoryController {
     description: 'Search categories by name or description',
     example: 'Smartphones',
   })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Filter stock totals for a specific branch location UUID',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Optional business UUID for Admin; Cashier is locked to assigned business from token',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   @ApiResponse({ status: 200, description: 'Categories list returned' })
   @ApiResponse({
     status: 401,
@@ -87,7 +100,12 @@ export class CategoryController {
     @CurrentUser() actor: AccessTokenPayload,
     @Query() query?: ListCategoriesQueryDto,
   ) {
-    return this.categories.list(actor, query?.search, query?.locationId);
+    return this.categories.list(
+      actor,
+      query?.search,
+      query?.locationId,
+      query?.businessId,
+    );
   }
 
   @Get(':id')
@@ -97,6 +115,11 @@ export class CategoryController {
       'Returns category details and products. Accessible by ADMIN and CASHIER.',
   })
   @ApiParam({ name: 'id', description: 'Category UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin',
+  })
   @ApiResponse({ status: 200, description: 'Category returned' })
   @ApiResponse({
     status: 401,
@@ -105,8 +128,12 @@ export class CategoryController {
   @ApiResponse({ status: 404, description: 'Category not found' })
   @Roles(Role.ADMIN, Role.CASHIER)
   @ResponseMessage('Category loaded')
-  get(@CurrentUser() actor: AccessTokenPayload, @Param('id') id: string) {
-    return this.categories.get(actor, id);
+  get(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Param('id') id: string,
+    @Query('businessId') businessId?: string,
+  ) {
+    return this.categories.get(actor, id, businessId);
   }
 
   @Patch(':id')
@@ -116,6 +143,11 @@ export class CategoryController {
       'Updates category name, slug, or description. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Category UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin',
+  })
   @ApiResponse({ status: 200, description: 'Category updated' })
   @ApiResponse({
     status: 401,
@@ -129,8 +161,9 @@ export class CategoryController {
     @CurrentUser() admin: AccessTokenPayload,
     @Param('id') id: string,
     @Body() dto: UpdateCategoryDto,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.categories.update(admin, id, dto);
+    return this.categories.update(admin, id, dto, businessId || dto.businessId);
   }
 
   @Delete(':id')
@@ -140,6 +173,11 @@ export class CategoryController {
       'Soft-deletes category and detaches linked products. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Category UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID for Admin',
+  })
   @ApiResponse({ status: 200, description: 'Category deleted' })
   @ApiResponse({
     status: 401,
@@ -149,7 +187,11 @@ export class CategoryController {
   @ApiResponse({ status: 404, description: 'Category not found' })
   @Roles(Role.ADMIN)
   @ResponseMessage('Category removed')
-  remove(@CurrentUser() admin: AccessTokenPayload, @Param('id') id: string) {
-    return this.categories.remove(admin, id);
+  remove(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+    @Query('businessId') businessId?: string,
+  ) {
+    return this.categories.remove(admin, id, businessId);
   }
 }

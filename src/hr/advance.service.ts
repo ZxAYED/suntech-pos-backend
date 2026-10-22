@@ -44,7 +44,7 @@ export class AdvanceService {
     actor: AccessTokenPayload,
     dto: CreateAdvanceDto,
   ): Promise<PresentedAdvance> {
-    const businessId = requireBusinessId(actor);
+    const businessId = requireBusinessId(actor, dto.businessId);
     const cashierId = await this.resolveCashierId(
       actor,
       businessId,
@@ -159,8 +159,9 @@ export class AdvanceService {
   async remove(
     actor: AccessTokenPayload,
     advanceId: string,
+    requestedBusinessId?: string,
   ): Promise<{ id: string; deletedAt: Date }> {
-    const businessId = requireBusinessId(actor);
+    const businessId = requireBusinessId(actor, requestedBusinessId);
     const deletedAt = new Date();
 
     if (this.prisma.employeeAdvance?.findFirst) {
@@ -197,7 +198,7 @@ export class AdvanceService {
   }
 
   async list(actor: AccessTokenPayload, query: ListAdvancesQueryDto) {
-    const businessId = requireBusinessId(actor);
+    const businessId = requireBusinessId(actor, query.businessId);
     const where: Prisma.EmployeeAdvanceWhereInput = {
       businessId,
       deletedAt: null,
@@ -298,7 +299,7 @@ export class AdvanceService {
     actor: AccessTokenPayload,
     query: AdvanceSummaryQueryDto,
   ): Promise<AdvanceSummary> {
-    const businessId = requireBusinessId(actor);
+    const businessId = requireBusinessId(actor, query.businessId);
     const { start, end } = payrollPeriod(query.year, query.month);
 
     let targetCashierId: string | undefined = undefined;

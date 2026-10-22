@@ -137,7 +137,7 @@ export class VariantService {
     admin: AccessTokenPayload,
     dto: CreateVariantDto,
   ): Promise<PresentedVariant> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, dto.businessId);
     await this.assertProduct(businessId, dto.productId);
     const requestedSku = dto.sku?.trim();
     const barcode = dto.barcode?.trim() || null;
@@ -237,7 +237,7 @@ export class VariantService {
     actor: AccessTokenPayload,
     query?: ListVariantsQueryDto,
   ): Promise<PresentedVariant[]> {
-    const businessId = await this.resolveBusinessId(actor);
+    const businessId = await this.resolveBusinessId(actor, query?.businessId);
     const isLowStock = query?.lowStockOnly === 'true';
     const search = query?.search?.trim();
 
@@ -286,10 +286,14 @@ export class VariantService {
   async get(
     actor: AccessTokenPayload,
     variantId: string,
+    requestedBusinessId?: string,
+    requestedLocationId?: string,
   ): Promise<PresentedVariant> {
-    const businessId = await this.resolveBusinessId(actor);
+    const businessId = await this.resolveBusinessId(actor, requestedBusinessId);
     const effectiveLocationId =
-      actor.role === Role.CASHIER ? actor.locationId : undefined;
+      actor.role === Role.CASHIER
+        ? actor.locationId
+        : requestedLocationId?.trim() || undefined;
     return this.findVariant(businessId, variantId, effectiveLocationId);
   }
 
@@ -297,8 +301,12 @@ export class VariantService {
     admin: AccessTokenPayload,
     variantId: string,
     dto: UpdateVariantDto,
+    requestedBusinessId?: string,
   ): Promise<PresentedVariant> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(
+      admin,
+      requestedBusinessId || dto.businessId,
+    );
     const current = await this.findVariant(businessId, variantId);
 
     if (dto.productId) {
@@ -397,8 +405,9 @@ export class VariantService {
   async remove(
     admin: AccessTokenPayload,
     variantId: string,
+    requestedBusinessId?: string,
   ): Promise<{ id: string; deletedAt: Date }> {
-    const businessId = await this.resolveBusinessId(admin);
+    const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     const variant = await this.prisma.variant.findFirst({
       where: { id: variantId, businessId, deletedAt: null },
       select: { id: true, sku: true, barcode: true },
