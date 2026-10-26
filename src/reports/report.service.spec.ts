@@ -71,7 +71,7 @@ describe('ReportService', () => {
         cashierId: 'cashier-1',
         cashier: { businessId: 'biz-1' },
         locationId: 'loc-1',
-        createdAt: expect.any(Object) as object,
+        occurredAt: expect.any(Object) as object,
       },
       _sum: { totalAmount: true },
     });
@@ -130,7 +130,7 @@ describe('ReportService', () => {
         paymentMethod: PaymentMethod.COD,
         totalAmount: 500,
         status: 'PAID',
-        createdAt: new Date(),
+        occurredAt: new Date(),
         lines: [{ productName: 'Item A', variantName: 'Var A', quantity: 1 }],
       },
     ]);
@@ -403,7 +403,7 @@ describe('ReportService', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           cashier: { businessId: 'biz-1' },
-          createdAt: expect.objectContaining({
+          occurredAt: expect.objectContaining({
             gte: expect.any(Date),
             lte: expect.any(Date),
           }),

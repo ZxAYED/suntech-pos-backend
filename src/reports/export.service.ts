@@ -1,4 +1,5 @@
 import { Injectable, StreamableFile } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { requireBusinessId } from '../hr/require-business-id';
 import { payrollPeriod } from '../hr/payroll-period';
@@ -106,9 +107,9 @@ export class ExportService {
     subtitle: string,
   ) {
     const period = payrollPeriod(query.year, query.month);
-    const where: any = {
+    const where: Prisma.OrderWhereInput = {
       cashier: { businessId },
-      createdAt: { gte: period.start, lt: period.end },
+      occurredAt: { gte: period.start, lt: period.end },
       ...(query.locationId ? { locationId: query.locationId } : {}),
     };
 
@@ -128,7 +129,7 @@ export class ExportService {
       select: {
         invoiceNumber: true,
         receiptNumber: true,
-        createdAt: true,
+        occurredAt: true,
         customerName: true,
         customerPhone: true,
         customerNumber: true,
@@ -136,7 +137,7 @@ export class ExportService {
         cashier: { select: { fullName: true } },
         refunds: { select: { totalRefund: true } },
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { occurredAt: 'asc' },
     });
 
     return {
@@ -151,7 +152,7 @@ export class ExportService {
 
         return [
           order.invoiceNumber ?? order.receiptNumber ?? '',
-          order.createdAt.toISOString().slice(0, 10),
+          order.occurredAt.toISOString().slice(0, 10),
           order.cashier.fullName,
           order.customerName ??
             order.customerPhone ??

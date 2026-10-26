@@ -1,6 +1,5 @@
 import {
   ConflictException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -64,35 +63,11 @@ const NAME_TAKEN = 'A product with that name already exists';
 export class ProductService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async resolveBusinessId(
+  private resolveBusinessId(
     actor: AccessTokenPayload,
     requestedBusinessId?: string,
-  ): Promise<string> {
-    if (actor.role === Role.CASHIER) {
-      if (!actor.businessId) {
-        throw new ForbiddenException('Business context is required');
-      }
-      return actor.businessId;
-    }
-    let businessId = requestedBusinessId?.trim() || actor.businessId;
-    if (!businessId && actor.role === Role.ADMIN) {
-      const user = await this.prisma.user.findFirst({
-        where: { id: actor.sub, deletedAt: null },
-        select: {
-          businessId: true,
-          ownedBusinesses: {
-            where: { deletedAt: null },
-            select: { id: true },
-            take: 1,
-          },
-        },
-      });
-      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
-    }
-    if (!businessId) {
-      throw new ForbiddenException('Create a business before continuing');
-    }
-    return businessId;
+  ): string {
+    return requireBusinessId(actor, requestedBusinessId);
   }
 
   async create(

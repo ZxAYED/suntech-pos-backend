@@ -59,6 +59,7 @@ describe('VariantService', () => {
     productFindFirst.mockResolvedValue({ id: 'product-1' });
     variantFindFirst.mockResolvedValue(null);
     locationStockAggregate.mockResolvedValue({ _sum: { stock: 10 } });
+    locationFindFirst.mockResolvedValue({ id: 'loc-1' });
   });
 
   describe('presentVariant helper', () => {
@@ -300,7 +301,10 @@ describe('VariantService', () => {
     it('filters variants by businessId query for Admin', async () => {
       variantFindMany.mockResolvedValue([]);
 
-      await service.list(admin, { businessId: 'biz-target' });
+      await service.list(
+        { ...admin, businessIds: ['biz-1', 'biz-target'] },
+        { businessId: 'biz-target' },
+      );
 
       const findCall = (
         variantFindMany.mock.calls as unknown as Array<
@@ -332,7 +336,12 @@ describe('VariantService', () => {
           createdAt: new Date(),
           updatedAt: new Date(),
           images: [],
-          product: { id: 'prod-1', name: 'Product', categoryId: null, category: null },
+          product: {
+            id: 'prod-1',
+            name: 'Product',
+            categoryId: null,
+            category: null,
+          },
           locationStocks: [
             { locationId: 'loc-branch-1', stock: 12 },
             { locationId: 'loc-branch-2', stock: 38 },
@@ -584,7 +593,16 @@ describe('VariantService', () => {
 
       await service.updateStock(cashier, 'var-1', {
         quantity: 1,
+        businessId: 'biz-other',
+        locationId: 'loc-other',
       });
+
+      expect(variantFindFirst).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          where: expect.objectContaining({ businessId: 'biz-cashier' }),
+        }),
+      );
 
       expect(locationStockUpsert).toHaveBeenCalledWith(
         expect.objectContaining({

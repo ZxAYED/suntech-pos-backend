@@ -10,6 +10,7 @@ import { HrModule } from './hr/hr.module';
 import { ExpenseModule } from './expenses/expense.module';
 import { MediaModule } from './media/media.module';
 import { OrdersModule } from './orders/orders.module';
+import { OfflineModule } from './offline/offline.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { IdempotencyInterceptor } from './common/interceptors/idempotency.interceptor';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
@@ -41,6 +42,7 @@ import { AppService } from './app.service';
     CatalogModule,
     ShiftModule,
     OrdersModule,
+    OfflineModule,
     ReportsModule,
     HrModule,
     ExpenseModule,

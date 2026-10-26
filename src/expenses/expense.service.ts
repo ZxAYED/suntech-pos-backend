@@ -1,12 +1,8 @@
-import {
-  BadRequestException,
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
-import { ExpenseCategory, Prisma, Role } from '@prisma/client';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { ExpenseCategory, Prisma } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { payrollPeriod } from '../hr/payroll-period';
+import { getDhakaDateParts } from '../common/utils/timezone.util';
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
@@ -130,8 +126,9 @@ export class ExpenseService {
     const businessId = requireBusinessId(admin, query.businessId);
 
     const now = new Date();
-    const month = query.month ?? now.getUTCMonth() + 1;
-    const year = query.year ?? now.getUTCFullYear();
+    const currentPeriod = getDhakaDateParts(now);
+    const month = query.month ?? currentPeriod.month;
+    const year = query.year ?? currentPeriod.year;
     const { start, end } = payrollPeriod(year, month);
 
     const where: Prisma.ExpenseWhereInput = {
@@ -156,7 +153,10 @@ export class ExpenseService {
 
     const totalExpenses = items.reduce((sum, item) => sum + item.amount, 0);
 
-    const breakdownMap = new Map<ExpenseCategory, { total: number; count: number }>();
+    const breakdownMap = new Map<
+      ExpenseCategory,
+      { total: number; count: number }
+    >();
     for (const item of items) {
       const current = breakdownMap.get(item.category) ?? { total: 0, count: 0 };
       breakdownMap.set(item.category, {
@@ -210,8 +210,9 @@ export class ExpenseService {
 
     if (query.month || query.year) {
       const now = new Date();
-      const month = query.month ?? now.getUTCMonth() + 1;
-      const year = query.year ?? now.getUTCFullYear();
+      const currentPeriod = getDhakaDateParts(now);
+      const month = query.month ?? currentPeriod.month;
+      const year = query.year ?? currentPeriod.year;
       const { start, end } = payrollPeriod(year, month);
       where.spentAt = { gte: start, lt: end };
     }

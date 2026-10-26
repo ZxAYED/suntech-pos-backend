@@ -34,14 +34,14 @@ describe('AdvanceService', () => {
     advanceCreate.mockResolvedValue({ id: 'advance-1' });
   });
 
-  it('forces a cashier advance onto their own user id', async () => {
+  it('records a cashier advance against their own user id', async () => {
     await service.create(
       {
         sub: 'cashier-1',
         role: Role.CASHIER,
         businessId: 'biz-1',
       },
-      { amount: 500, cashierId: 'someone-else', reason: 'Transport' },
+      { amount: 500, reason: 'Transport' },
     );
 
     expect(advanceCreate).toHaveBeenCalledWith({
@@ -64,6 +64,16 @@ describe('AdvanceService', () => {
     });
   });
 
+  it('rejects advance creation when actor is ADMIN (only CASHIER can create)', async () => {
+    await expect(
+      service.create(
+        { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+        { amount: 500, reason: 'Admin attempt' },
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(advanceCreate).not.toHaveBeenCalled();
+  });
+
   it('calculates net payable from pending advances in the requested month', async () => {
     advanceFindMany.mockResolvedValue([
       { id: 'a1', amount: 200 },
@@ -82,8 +92,8 @@ describe('AdvanceService', () => {
         status: AdvanceStatus.PENDING,
         deletedAt: null,
         takenAt: {
-          gte: new Date(Date.UTC(2026, 9, 1)),
-          lt: new Date(Date.UTC(2026, 10, 1)),
+          gte: new Date('2026-09-30T18:00:00.000Z'),
+          lt: new Date('2026-10-31T18:00:00.000Z'),
         },
       },
       select: {

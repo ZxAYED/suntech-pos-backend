@@ -14,11 +14,11 @@ enum ShiftStatus {
 }
 
 model EmployeeAdvance {
-  id         String   @id @default(uuid())
+  id         String        @id @default(uuid())
   businessId String
-  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  business   Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
   cashierId  String
-  cashier    User     @relation(fields: [cashierId], references: [id], onDelete: Cascade)
+  cashier    User          @relation(fields: [cashierId], references: [id], onDelete: Cascade)
   shiftId    String?
   shift      ShiftSession? @relation(fields: [shiftId], references: [id], onDelete: SetNull)
 
@@ -87,4 +87,3 @@ model ShiftSession {
   @@index([locationId])
   @@index([cashierId, status])
 }
-

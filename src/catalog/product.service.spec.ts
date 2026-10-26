@@ -250,7 +250,10 @@ describe('ProductService', () => {
   it('filters product list by requestedBusinessId for multi-business Admin', async () => {
     productFindMany.mockResolvedValue([]);
 
-    await service.list(admin, { businessId: 'biz-2' });
+    await service.list(
+      { ...admin, businessIds: ['biz-1', 'biz-2'] },
+      { businessId: 'biz-2' },
+    );
 
     const findCall = (
       productFindMany.mock.calls as unknown as Array<

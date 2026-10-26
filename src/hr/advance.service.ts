@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { AdvanceStatus, Prisma, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
+import { getDhakaDateParts } from '../common/utils/timezone.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdvanceSummaryQueryDto } from './dto/advance-summary.query';
 import { CreateAdvanceDto } from './dto/create-advance.dto';
@@ -44,18 +45,20 @@ export class AdvanceService {
     actor: AccessTokenPayload,
     dto: CreateAdvanceDto,
   ): Promise<PresentedAdvance> {
-    const businessId = requireBusinessId(actor, dto.businessId);
-    const cashierId = await this.resolveCashierId(
-      actor,
-      businessId,
-      dto.cashierId,
-    );
+    if (actor.role !== Role.CASHIER) {
+      throw new ForbiddenException(
+        'Only cashiers can create employee advance ledger requests',
+      );
+    }
+    const businessId = requireBusinessId(actor);
+    const cashierId = actor.sub;
     const cashier = await this.findCashier(businessId, cashierId);
 
     const now = new Date();
+    const currentPeriod = getDhakaDateParts(now);
     const { start, end } = payrollPeriod(
-      now.getUTCFullYear(),
-      now.getUTCMonth() + 1,
+      currentPeriod.year,
+      currentPeriod.month,
     );
 
     const executeInTx = async (tx: any) => {
@@ -71,8 +74,8 @@ export class AdvanceService {
           where: {
             businessId,
             cashierId,
-            month: now.getUTCMonth() + 1,
-            year: now.getUTCFullYear(),
+            month: currentPeriod.month,
+            year: currentPeriod.year,
             status: 'PAID',
           },
         });
@@ -227,8 +230,9 @@ export class AdvanceService {
 
     if (query.month || query.year) {
       const now = new Date();
-      const month = query.month ?? now.getMonth() + 1;
-      const year = query.year ?? now.getFullYear();
+      const currentPeriod = getDhakaDateParts(now);
+      const month = query.month ?? currentPeriod.month;
+      const year = query.year ?? currentPeriod.year;
       const { start, end } = payrollPeriod(year, month);
       where.takenAt = { gte: start, lt: end };
     }
@@ -353,24 +357,6 @@ export class AdvanceService {
         netPayable: 0,
       },
     };
-  }
-
-  private async resolveCashierId(
-    actor: AccessTokenPayload,
-    businessId: string,
-    requestedCashierId?: string,
-  ): Promise<string> {
-    if (actor.role === Role.CASHIER) {
-      await this.findCashier(businessId, actor.sub);
-      return actor.sub;
-    }
-
-    if (!requestedCashierId) {
-      throw new BadRequestException('cashierId is required');
-    }
-
-    await this.findCashier(businessId, requestedCashierId);
-    return requestedCashierId;
   }
 
   private async findCashier(businessId: string, cashierId: string) {

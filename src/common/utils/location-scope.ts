@@ -12,11 +12,6 @@ export function resolveLocationScope(
   requestedLocationId?: string,
   requestedBusinessId?: string,
 ): LocationScope {
-  let effectiveBusinessId = requestedBusinessId?.trim() || actor?.businessId;
-  if (!effectiveBusinessId && actor?.businessIds && actor.businessIds.length === 1) {
-    effectiveBusinessId = actor.businessIds[0];
-  }
-
   if (actor.role === Role.CASHIER) {
     if (!actor.businessId || typeof actor.businessId !== 'string') {
       throw new ForbiddenException('Business context is required');
@@ -27,21 +22,35 @@ export function resolveLocationScope(
       );
     }
 
-    const requested = requestedLocationId?.trim();
-    if (requested && requested !== actor.locationId) {
-      throw new ForbiddenException(
-        'Cashiers can only access their assigned branch location',
-      );
-    }
-
     return {
       businessId: actor.businessId,
       locationId: actor.locationId,
     };
   }
 
+  let effectiveBusinessId = requestedBusinessId?.trim() || actor?.businessId;
+  if (
+    !effectiveBusinessId &&
+    actor?.businessIds &&
+    actor.businessIds.length === 1
+  ) {
+    effectiveBusinessId = actor.businessIds[0];
+  }
+
   if (!effectiveBusinessId || typeof effectiveBusinessId !== 'string') {
     throw new ForbiddenException('Business context is required');
+  }
+
+  if (actor.role === Role.ADMIN) {
+    const ownedBusinessIds = new Set(actor.businessIds ?? []);
+    if (actor.businessId) {
+      ownedBusinessIds.add(actor.businessId);
+    }
+    if (!ownedBusinessIds.has(effectiveBusinessId)) {
+      throw new ForbiddenException(
+        'You can only access businesses owned by your account',
+      );
+    }
   }
 
   return {

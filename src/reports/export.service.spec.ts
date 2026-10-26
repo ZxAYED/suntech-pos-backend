@@ -95,7 +95,7 @@ describe('ExportService', () => {
       {
         invoiceNumber: 'INV-100',
         receiptNumber: 'REC-100',
-        createdAt: new Date('2026-10-15T12:00:00Z'),
+        occurredAt: new Date('2026-10-15T12:00:00Z'),
         customerName: 'Karim',
         customerPhone: '01700000000',
         customerNumber: '01700000000',

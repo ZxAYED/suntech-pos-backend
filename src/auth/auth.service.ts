@@ -13,6 +13,7 @@ import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import {
   AccessTokenPayload,
+  PasswordResetTokenPayload,
   RefreshTokenPayload,
 } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
@@ -99,30 +100,7 @@ export class AuthService {
     const user = await this.attachOwnedBusiness(found);
 
     if (user.role === Role.CASHIER) {
-      if (
-        !user.businessId ||
-        !user.locationId ||
-        typeof user.businessId !== 'string' ||
-        typeof user.locationId !== 'string'
-      ) {
-        throw new ForbiddenException(
-          'Cashier account must be assigned to an active business and branch location',
-        );
-      }
-
-      const location = await this.prisma.location.findFirst({
-        where: {
-          id: user.locationId,
-          businessId: user.businessId,
-          deletedAt: null,
-        },
-      });
-
-      if (!location) {
-        throw new ForbiddenException(
-          'Cashier account must be assigned to an active business and branch location',
-        );
-      }
+      await this.assertCashierAssignment(user);
     }
 
     const accessToken = await this.signAccessToken(user);
@@ -149,16 +127,7 @@ export class AuthService {
     const sessionUser = await this.attachOwnedBusiness(user);
 
     if (sessionUser.role === Role.CASHIER) {
-      if (
-        !sessionUser.businessId ||
-        !sessionUser.locationId ||
-        typeof sessionUser.businessId !== 'string' ||
-        typeof sessionUser.locationId !== 'string'
-      ) {
-        throw new ForbiddenException(
-          'Cashier account must be assigned to an active business and branch location',
-        );
-      }
+      await this.assertCashierAssignment(sessionUser);
     }
 
     return { accessToken: await this.signAccessToken(sessionUser) };
@@ -181,10 +150,18 @@ export class AuthService {
       throw new BadRequestException('Email address is required');
     }
 
-    const user = await this.findRecoveryUser(
-      dto.loginType ?? LoginType.ADMIN,
-      identifier,
-    );
+    let user: User;
+    try {
+      user = await this.findRecoveryUser(
+        dto.loginType ?? LoginType.ADMIN,
+        identifier,
+      );
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        return { accepted: true };
+      }
+      throw error;
+    }
 
     if (
       user.role === Role.CASHIER ||
@@ -225,7 +202,7 @@ export class AuthService {
     return { accepted: true };
   }
 
-  async verifyOtp(dto: VerifyOtpDto): Promise<{ verified: true }> {
+  async verifyOtp(dto: VerifyOtpDto): Promise<{ resetToken: string }> {
     const identifier = (dto.email || dto.identifier || '').trim();
     if (!identifier) {
       throw new BadRequestException('Email address is required');
@@ -250,29 +227,32 @@ export class AuthService {
       throw new BadRequestException('Reset code is invalid');
     }
 
-    return { verified: true };
+    const secret =
+      this.configService.get<string>('JWT_RESET_SECRET') ??
+      this.configService.getOrThrow<string>('JWT_ACCESS_SECRET');
+    const resetToken = await this.jwtService.signAsync(
+      {
+        sub: user.id,
+        purpose: 'password-reset',
+      } satisfies PasswordResetTokenPayload,
+      { secret, expiresIn: '10m' },
+    );
+
+    return { resetToken };
   }
 
   async resetPassword(dto: ResetPasswordDto): Promise<{ updated: true }> {
-    const identifier = (dto.email || dto.identifier || '').trim();
-    if (!identifier) {
-      throw new BadRequestException('Email address is required');
-    }
+    const payload = await this.readPasswordResetToken(dto.resetToken);
+    const user = await this.prisma.user.findFirst({
+      where: { id: payload.sub, deletedAt: null },
+    });
 
-    const user = await this.findRecoveryUser(LoginType.ADMIN, identifier);
-
-    if (!user.resetOtpHash || !user.otpExpiry) {
+    if (!user || !user.resetOtpHash || !user.otpExpiry) {
       throw new BadRequestException('No reset code is active for this account');
     }
 
     if (user.otpExpiry.getTime() <= Date.now()) {
       throw new BadRequestException('Reset code has expired');
-    }
-
-    const matches = await bcrypt.compare(dto.otp.trim(), user.resetOtpHash);
-
-    if (!matches) {
-      throw new BadRequestException('Reset code is invalid');
     }
 
     const password = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
@@ -362,7 +342,7 @@ export class AuthService {
         : role === Role.CASHIER;
 
     if (!allowed) {
-      throw new ForbiddenException(INVALID_LOGIN_MODE);
+      throw new BadRequestException(INVALID_LOGIN_MODE);
     }
   }
 
@@ -460,6 +440,30 @@ export class AuthService {
     });
   }
 
+  private async assertCashierAssignment(user: User): Promise<void> {
+    if (!user.businessId || !user.locationId) {
+      throw new ForbiddenException(
+        'Cashier account must be assigned to an active business and branch location',
+      );
+    }
+
+    const location = await this.prisma.location.findFirst({
+      where: {
+        id: user.locationId,
+        businessId: user.businessId,
+        deletedAt: null,
+        business: { deletedAt: null },
+      },
+      select: { id: true },
+    });
+
+    if (!location) {
+      throw new ForbiddenException(
+        'Cashier account must be assigned to an active business and branch location',
+      );
+    }
+  }
+
   private async signRefreshToken(userId: string): Promise<string> {
     const expiresIn = this.configService.getOrThrow<string>('JWT_REFRESH_TTL');
 
@@ -492,6 +496,29 @@ export class AuthService {
       }
 
       throw new UnauthorizedException('Refresh token is invalid or expired');
+    }
+  }
+
+  private async readPasswordResetToken(
+    token: string,
+  ): Promise<PasswordResetTokenPayload> {
+    try {
+      const secret =
+        this.configService.get<string>('JWT_RESET_SECRET') ??
+        this.configService.getOrThrow<string>('JWT_ACCESS_SECRET');
+      const payload =
+        await this.jwtService.verifyAsync<PasswordResetTokenPayload>(token, {
+          secret,
+        });
+      if (payload.purpose !== 'password-reset' || !payload.sub) {
+        throw new UnauthorizedException('Reset token is invalid or expired');
+      }
+      return payload;
+    } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      throw new UnauthorizedException('Reset token is invalid or expired');
     }
   }
 }

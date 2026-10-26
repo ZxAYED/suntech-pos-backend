@@ -286,7 +286,10 @@ export class UserService {
         });
       }
 
-      if (dto.monthlySalary !== undefined && dto.monthlySalary !== cashier.monthlySalary) {
+      if (
+        dto.monthlySalary !== undefined &&
+        dto.monthlySalary !== cashier.monthlySalary
+      ) {
         await this.auditService?.log({
           actorId: admin.sub,
           businessId,
@@ -437,10 +440,7 @@ export class UserService {
     file: UploadedImage,
   ): Promise<PresentedProfile> {
     const businessId = await this.requireBusinessId(admin);
-    return this.replaceProfileImage(
-      { id: userId, businessId },
-      file,
-    );
+    return this.replaceProfileImage({ id: userId, businessId }, file);
   }
 
   async clearStaffProfileImage(
@@ -554,11 +554,22 @@ export class UserService {
         },
       });
 
-      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id || undefined;
+      businessId =
+        user?.businessId || user?.ownedBusinesses?.[0]?.id || undefined;
     }
 
     if (!businessId) {
       throw new ForbiddenException('Create a business before managing staff');
+    }
+
+    if (admin.role === Role.ADMIN) {
+      const ownedBusinessIds = new Set(admin.businessIds ?? []);
+      if (admin.businessId) {
+        ownedBusinessIds.add(admin.businessId);
+      }
+      if (!ownedBusinessIds.has(businessId)) {
+        throw new ForbiddenException('You do not have access to this business');
+      }
     }
 
     return businessId;

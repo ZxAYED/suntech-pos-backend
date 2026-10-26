@@ -1,11 +1,9 @@
 import {
   BadRequestException,
-  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { CloudinaryService } from '../media/cloudinary.service';
 import {
@@ -14,6 +12,7 @@ import {
   assertImageFile,
 } from '../media/uploaded-image';
 import { PrismaService } from '../prisma/prisma.service';
+import { requireBusinessId } from '../hr/require-business-id';
 import {
   PresentedVariantImage,
   variantImageSelect,
@@ -214,38 +213,11 @@ export class VariantImageService {
     return this.listImages(businessId, variantId);
   }
 
-  private async resolveBusinessId(
+  private resolveBusinessId(
     actor: AccessTokenPayload,
     requestedBusinessId?: string,
-  ): Promise<string> {
-    if (actor.role === Role.CASHIER) {
-      if (!actor.businessId) {
-        throw new ForbiddenException('Business context is required');
-      }
-      return actor.businessId;
-    }
-    let businessId = requestedBusinessId?.trim() || actor.businessId;
-    if (!businessId && actor.role === Role.ADMIN) {
-      if (actor.businessIds && actor.businessIds.length === 1) {
-        return actor.businessIds[0];
-      }
-      const user = await this.prisma.user.findFirst({
-        where: { id: actor.sub, deletedAt: null },
-        select: {
-          businessId: true,
-          ownedBusinesses: {
-            where: { deletedAt: null },
-            select: { id: true },
-            take: 1,
-          },
-        },
-      });
-      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
-    }
-    if (!businessId) {
-      throw new ForbiddenException('Create a business before continuing');
-    }
-    return businessId;
+  ): string {
+    return requireBusinessId(actor, requestedBusinessId);
   }
 
   private async findVariant(businessId: string, variantId: string) {

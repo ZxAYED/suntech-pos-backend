@@ -28,9 +28,9 @@ model User {
   // Multi-Tenancy Relations
   ownedBusinesses Business[] @relation("BusinessOwner")
   businessId      String?
-  business      Business? @relation("BusinessStaff", fields: [businessId], references: [id])
-  locationId    String?
-  location      Location? @relation("LocationStaff", fields: [locationId], references: [id])
+  business        Business?  @relation("BusinessStaff", fields: [businessId], references: [id])
+  locationId      String?
+  location        Location?  @relation("LocationStaff", fields: [locationId], references: [id])
 
   // Sensitive Payroll Data (Hidden from Cashiers)
   monthlySalary Int?

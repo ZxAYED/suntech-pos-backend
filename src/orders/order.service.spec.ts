@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
@@ -28,6 +27,12 @@ describe('OrdersService', () => {
   const orderCreate = jest.fn();
   const orderCount = jest.fn();
   const orderFindMany = jest.fn();
+  const orderFindUnique = jest.fn();
+  const auditCreate = jest.fn();
+  const locationStockFindUnique = jest.fn();
+  const locationStockUpdate = jest.fn();
+  const locationStockUpsert = jest.fn();
+  const locationStockCreate = jest.fn();
 
   const tx = {
     user: { findFirst: userFindFirst },
@@ -40,13 +45,29 @@ describe('OrdersService', () => {
       updateMany: variantUpdateMany,
     },
     stockTransaction: { create: stockCreate },
-    order: { create: orderCreate, count: orderCount, findMany: orderFindMany },
+    order: {
+      create: orderCreate,
+      count: orderCount,
+      findMany: orderFindMany,
+      findUnique: orderFindUnique,
+    },
+    auditLog: { create: auditCreate },
+    locationStock: {
+      findUnique: locationStockFindUnique,
+      update: locationStockUpdate,
+      upsert: locationStockUpsert,
+      create: locationStockCreate,
+    },
   };
 
   const prisma = {
     $transaction: jest.fn((callback) => callback(tx)),
     user: { findFirst: userFindFirst },
-    order: { count: orderCount, findMany: orderFindMany },
+    order: {
+      count: orderCount,
+      findMany: orderFindMany,
+      findUnique: orderFindUnique,
+    },
   };
 
   const service = new OrdersService(prisma as never);
@@ -55,6 +76,7 @@ describe('OrdersService', () => {
     id: 'user-cashier-1',
     role: Role.CASHIER,
     businessId: 'biz-1',
+    locationId: 'loc-1',
     deletedAt: null,
   };
 
@@ -62,6 +84,7 @@ describe('OrdersService', () => {
     id: 'user-admin-1',
     role: Role.ADMIN,
     businessId: 'biz-1',
+    ownedBusinesses: [{ id: 'biz-1' }],
     deletedAt: null,
   };
 
@@ -88,6 +111,18 @@ describe('OrdersService', () => {
     variantUpdate.mockResolvedValue({ id: 'variant-1', stock: 8 });
     variantUpdateMany.mockResolvedValue({ count: 1 });
     stockCreate.mockResolvedValue({ id: 'stock-1' });
+    auditCreate.mockResolvedValue({ id: 'audit-1' });
+    orderFindUnique.mockResolvedValue(null);
+    locationStockFindUnique.mockResolvedValue(null);
+    locationStockUpdate.mockResolvedValue({ stock: 8 });
+    locationStockUpsert.mockImplementation(
+      ({ create }: { create: { stock: number } }) =>
+        Promise.resolve({ stock: create.stock }),
+    );
+    locationStockCreate.mockImplementation(
+      ({ data }: { data: { stock: number } }) =>
+        Promise.resolve({ stock: data.stock }),
+    );
     orderCreate.mockImplementation(
       ({ data }: { data: Record<string, unknown> }) =>
         Promise.resolve({ id: 'order-1', ...data }),
@@ -232,7 +267,7 @@ describe('OrdersService', () => {
       );
     });
 
-    it('rejects immediately with BadRequestException when stock is insufficient', async () => {
+    it('allows stock to become negative and records a low-stock audit', async () => {
       variantFindMany.mockResolvedValue([
         {
           id: 'variant-1',
@@ -240,21 +275,29 @@ describe('OrdersService', () => {
           stock: 1, // Insufficient for quantity 2
           sellingPrice: 1500,
           product: { name: 'iPhone 15' },
+          locationStocks: [{ id: 'ls-1', stock: 1 }],
         },
       ]);
+      locationStockUpdate.mockResolvedValueOnce({ stock: -1 });
 
-      await expect(
-        service.createCatalogOrder('user-cashier-1', {
-          locationId: 'loc-1',
-          tenderedAmount: 3000,
-          lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
+      await service.createCatalogOrder('user-cashier-1', {
+        locationId: 'loc-1',
+        tenderedAmount: 3000,
+        lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
+      });
+
+      expect(variantUpdate).toHaveBeenCalledWith({
+        where: { id: 'variant-1' },
+        data: { stock: { decrement: 2 } },
+      });
+      expect(auditCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'LOW_STOCK_AFTER_SALE',
+            metadata: expect.objectContaining({ resultingStock: -1 }),
+          }),
         }),
-      ).rejects.toThrow(
-        new BadRequestException('Insufficient stock for variant variant-1'),
       );
-
-      expect(variantUpdate).not.toHaveBeenCalled();
-      expect(orderCreate).not.toHaveBeenCalled();
     });
 
     it('rejects when variant is not found in the tenant', async () => {
@@ -289,20 +332,34 @@ describe('OrdersService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('rejects cashier without an open shift', async () => {
+    it('allows cashier checkout without an open shift', async () => {
       shiftFindFirst.mockResolvedValue(null);
+      variantFindMany.mockResolvedValue([
+        {
+          id: 'variant-1',
+          name: '128GB Black',
+          stock: 10,
+          sellingPrice: 1500,
+          product: { name: 'iPhone 15' },
+        },
+      ]);
 
-      await expect(
-        service.createCatalogOrder('user-cashier-1', {
-          locationId: 'loc-1',
-          tenderedAmount: 1500,
-          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+      await service.createCatalogOrder('user-cashier-1', {
+        locationId: 'loc-1',
+        tenderedAmount: 1500,
+        lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+      });
+
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ shiftId: null }),
         }),
-      ).rejects.toBeInstanceOf(ConflictException);
+      );
     });
 
     it('allows Admin to sell without shiftId', async () => {
       userFindFirst.mockResolvedValue(adminUser);
+      shiftFindFirst.mockResolvedValue(null);
       variantFindMany.mockResolvedValue([
         {
           id: 'variant-1',
@@ -331,7 +388,7 @@ describe('OrdersService', () => {
       );
     });
 
-    it('throws ForbiddenException if cashier attempts to create order for an unassigned location', async () => {
+    it('ignores a payload location and uses the cashier token location', async () => {
       const cashierActor = {
         sub: 'user-cashier-1',
         role: Role.CASHIER,
@@ -339,13 +396,30 @@ describe('OrdersService', () => {
         locationId: 'loc-1',
       };
 
-      await expect(
-        service.createCatalogOrder(cashierActor, {
-          locationId: 'loc-other',
-          tenderedAmount: 1500,
-          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+      variantFindMany.mockResolvedValue([
+        {
+          id: 'variant-1',
+          name: '128GB Black',
+          stock: 10,
+          sellingPrice: 1500,
+          product: { name: 'iPhone 15' },
+        },
+      ]);
+
+      await service.createCatalogOrder(cashierActor, {
+        locationId: 'loc-other',
+        tenderedAmount: 1500,
+        lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+      });
+
+      expect(locationFindFirst).toHaveBeenCalledWith({
+        where: { id: 'loc-1', businessId: 'biz-1', deletedAt: null },
+      });
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ locationId: 'loc-1' }),
         }),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      );
     });
 
     it('does not increment physical cash drawer when paymentMethod is digital (BKASH)', async () => {
@@ -505,6 +579,173 @@ describe('OrdersService', () => {
     });
   });
 
+  describe('syncOrders', () => {
+    const actor = {
+      sub: 'user-cashier-1',
+      role: Role.CASHIER,
+      businessId: 'biz-1',
+      locationId: 'loc-1',
+    };
+
+    it('returns independent accepted, duplicate, and rejected results', async () => {
+      shiftFindFirst.mockResolvedValue(null);
+      orderFindUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: 'order-existing',
+          invoiceNumber: 'INV-OLD',
+        });
+
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '11111111-1111-4111-8111-111111111111',
+            occurredAt: '2026-10-24T13:30:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            lines: [{ productName: 'Repair', quantity: 1, unitPrice: 500 }],
+          },
+          {
+            clientOrderId: '22222222-2222-4222-8222-222222222222',
+            occurredAt: '2026-10-24T13:31:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 200,
+            lines: [{ productName: 'Cable', quantity: 1, unitPrice: 200 }],
+          },
+          {
+            clientOrderId: 'not-a-uuid',
+            occurredAt: '2026-10-24T13:32:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 100,
+            lines: [{ productName: 'Invalid', quantity: 1, unitPrice: 100 }],
+          },
+        ],
+      });
+
+      expect(result.results.map((item) => item.status)).toEqual([
+        'ACCEPTED',
+        'DUPLICATE',
+        'REJECTED',
+      ]);
+      expect(result.results[0].warnings).toContain('SHIFT_NOT_ATTACHED');
+      expect(result.results[1]).toEqual(
+        expect.objectContaining({
+          orderId: 'order-existing',
+          invoiceNumber: 'INV-OLD',
+        }),
+      );
+      expect(orderCreate).toHaveBeenCalledTimes(1);
+      expect(variantFindMany).not.toHaveBeenCalled();
+      expect(variantUpdate).not.toHaveBeenCalled();
+    });
+
+    it('honors offline price, accepts deleted variants, and audits low stock', async () => {
+      const existingVariantId = '33333333-3333-4333-8333-333333333333';
+      const deletedVariantId = '44444444-4444-4444-8444-444444444444';
+      shiftFindFirst.mockResolvedValue(null);
+      variantFindMany.mockResolvedValue([
+        {
+          id: existingVariantId,
+          name: 'Blue',
+          stock: 20,
+          sellingPrice: 100,
+          costPrice: 50,
+          product: { name: 'Phone', category: { name: 'Devices' } },
+          locationStocks: [{ id: 'ls-1', stock: 6 }],
+        },
+      ]);
+      locationStockUpdate.mockResolvedValueOnce({ stock: 4 });
+
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '55555555-5555-4555-8555-555555555555',
+            clientReceiptNumber: 'COUNTER-01-1',
+            occurredAt: '2026-10-23T13:30:00+06:00',
+            orderType: OrderType.CATALOG,
+            tenderedAmount: 230,
+            lines: [
+              {
+                variantId: existingVariantId,
+                productName: 'Phone',
+                variantName: 'Blue',
+                quantity: 2,
+                unitPrice: 90,
+              },
+              {
+                variantId: deletedVariantId,
+                productName: 'Old accessory',
+                variantName: 'Cached',
+                quantity: 1,
+                unitPrice: 50,
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(result.results[0]).toEqual(
+        expect.objectContaining({
+          status: 'ACCEPTED',
+          warnings: expect.arrayContaining([
+            'SHIFT_NOT_ATTACHED',
+            'OFFLINE_PRICE_MISMATCH',
+            'VARIANT_UNAVAILABLE',
+            'LOW_STOCK_AFTER_SALE',
+          ]),
+        }),
+      );
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            clientReceiptNumber: 'COUNTER-01-1',
+            totalAmount: 230,
+            lines: {
+              create: expect.arrayContaining([
+                expect.objectContaining({
+                  variantId: existingVariantId,
+                  unitPrice: 90,
+                }),
+                expect.objectContaining({
+                  variantId: null,
+                  productName: 'Old accessory',
+                  unitPrice: 50,
+                }),
+              ]),
+            },
+          }),
+        }),
+      );
+      expect(auditCreate.mock.calls.map(([arg]) => arg.data.action)).toEqual(
+        expect.arrayContaining([
+          'LOW_STOCK_AFTER_SALE',
+          'OFFLINE_PRICE_MISMATCH',
+          'VARIANT_UNAVAILABLE',
+        ]),
+      );
+    });
+
+    it('rejects an underpaid order without creating it', async () => {
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '66666666-6666-4666-8666-666666666666',
+            occurredAt: '2026-10-24T13:30:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 99,
+            lines: [{ productName: 'Repair', quantity: 1, unitPrice: 100 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('REJECTED');
+      expect(orderCreate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getOrders', () => {
     it('retrieves orders with locationId and orderType filters', async () => {
       orderCount.mockResolvedValue(1);
@@ -525,7 +766,7 @@ describe('OrdersService', () => {
       expect(orderFindMany).toHaveBeenCalledWith({
         where: { locationId: 'loc-1', orderType: OrderType.CATALOG },
         select: expect.any(Object),
-        orderBy: { createdAt: 'desc' },
+        orderBy: { occurredAt: 'desc' },
         skip: 0,
         take: 10,
       });
@@ -545,6 +786,8 @@ describe('OrdersService', () => {
       };
 
       const result = await service.getOrders(cashierActor, {
+        businessId: 'biz-other',
+        locationId: 'loc-other',
         orderType: OrderType.CATALOG,
         page: 1,
         limit: 10,
@@ -586,7 +829,7 @@ describe('OrdersService', () => {
           locationId: 'loc-2',
           paymentMethod: PaymentMethod.COD,
           status: OrderStatus.PAID,
-          createdAt: expect.objectContaining({
+          occurredAt: expect.objectContaining({
             gte: expect.any(Date),
             lte: expect.any(Date),
           }),
@@ -691,7 +934,7 @@ describe('OrdersService', () => {
       expect(orderCount).toHaveBeenCalledWith({
         where: expect.objectContaining({
           location: { businessId: 'biz-1' },
-          createdAt: expect.objectContaining({
+          occurredAt: expect.objectContaining({
             gte: expect.any(Date),
             lte: expect.any(Date),
           }),
@@ -701,23 +944,36 @@ describe('OrdersService', () => {
   });
 
   describe('Legacy checkoutWithin support', () => {
-    it('refuses a cashier checkout when no shift is open', async () => {
+    it('allows a legacy cashier checkout when no shift is open', async () => {
       shiftFindFirst.mockResolvedValue(null);
+      variantFindFirst.mockResolvedValue({
+        id: 'variant-1',
+        name: 'Catalog item',
+        stock: 10,
+        sellingPrice: 500,
+        costPrice: 300,
+        product: { name: 'Catalog item', category: { name: 'General' } },
+        locationStocks: [],
+      });
 
-      await expect(
-        service.checkoutWithin(
-          tx as unknown as Prisma.TransactionClient,
-          {
-            sub: 'cashier-1',
-            role: Role.CASHIER,
-            businessId: 'biz-1',
-            locationId: 'loc-1',
-          },
-          'biz-1',
-          { items: [{ variantId: 'variant-1', quantity: 1 }] },
-          'RCPT-TEST',
-        ),
-      ).rejects.toBeInstanceOf(ConflictException);
+      await service.checkoutWithin(
+        tx as unknown as Prisma.TransactionClient,
+        {
+          sub: 'cashier-1',
+          role: Role.CASHIER,
+          businessId: 'biz-1',
+          locationId: 'loc-1',
+        },
+        'biz-1',
+        { items: [{ variantId: 'variant-1', quantity: 1 }] },
+        'RCPT-TEST',
+      );
+
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ shiftId: null }),
+        }),
+      );
     });
   });
 });

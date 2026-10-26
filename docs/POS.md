@@ -76,8 +76,8 @@
   - **Token Delivery:** Refresh tokens are never exposed in JSON response bodies; they are transmitted exclusively via secure HTTP-Only cookies (`refreshToken`, `httpOnly: true`, `sameSite: 'lax'`, `path: '/api/v1/auth'`).
   - **Role Claim Rules:**
     - `SUPER_ADMIN`: `{ sub, role: 'SUPER_ADMIN' }` (no businessId or locationId embedded).
-    - `ADMIN`: `{ sub, role: 'ADMIN' }` (no businessId or locationId embedded in token; resolved from request or DB ownership).
-    - `CASHIER`: `{ sub, role: 'CASHIER', publicId, businessId, locationId }` (strictly bounded to assigned store location).
+    - `ADMIN`: `{ sub, role: 'ADMIN', businessId, businessIds, locationIds }` (ownership claims are rebuilt from the database on every authenticated request).
+    - `CASHIER`: `{ sub, role: 'CASHIER', publicId, businessId, locationId, businessIds, locationIds }` (strictly bounded to the current assigned store location).
   - **Database Active Check on Every JWT Request:** `JwtStrategy` validates against PostgreSQL on every authenticated request that the account exists, is active (`status: ACTIVE`), and has not been soft-deleted (`deletedAt: null`).
 
 ### 1.5 Rate Limiting (`ThrottlerGuard`)
@@ -100,7 +100,7 @@
 ### 1.7 Integer Currency Discipline & Overflow Protection
 
 - **Files:** [`src/orders/money.ts`](file:///d:/Project/SuntechPOS-backend/src/orders/money.ts), Prisma Schemas.
-- **Storage Standard:** All financial amounts are stored as whole integer numbers representing currency subunits (BDT taka / paisa).
+- **Storage Standard:** All financial amounts are stored as whole integer BDT amounts (for example, `1500` means Tk 1,500; no paisa conversion).
 - **Guards:**
   - Prevents IEEE-754 floating-point inaccuracies (e.g., `0.1 + 0.2 !== 0.3`).
   - Overflow protection asserts amounts do not exceed PostgreSQL 32-bit signed integer limits (`INT_MAX = 2,147,483,647`).
@@ -138,11 +138,11 @@
     - `Category`: `@@unique([businessId, name])`, `@@unique([businessId, slug])`
     - `Product`: `@@unique([businessId, name])`
     - `Variant`: `@@unique([businessId, sku])`, `@@unique([businessId, barcode])`
-    - `Location`: `@@unique([businessId, name])`
+    - `Location`: `@@unique([businessId, name, address])`
     - `User`: `@@unique([businessId, phoneNumber])`
 - **Location Scope Enforcement (`resolveLocationScope`):**
   - **Caller is `CASHIER`:** `businessId` and `locationId` are strictly resolved from the authenticated JWT token. Any attempt to supply a different `locationId` in the query or body throws `403 Forbidden` (`"Cashiers can only access their assigned branch location"`).
-  - **Caller is `ADMIN`:** `businessId` is resolved from query parameter `businessId`, header `x-business-id`, or caller's active `actor.businessId` token claim (verifying `ownerId === admin.sub`). Admin can pass optional `locationId` to filter down to a specific branch, or omit `locationId` to aggregate across all branches.
+  - **Caller is `ADMIN`:** `businessId` is resolved from a validated request parameter or the caller's active `actor.businessId` token claim. It must be present in the current database-derived `businessIds` ownership claim. Admin can pass optional `locationId` to filter down to a specific branch, or omit `locationId` to aggregate across all branches.
   - Cashiers with no assigned `locationId` or `businessId` in DB are blocked from logging in.
 
 ### 1.10 Asynchronous Processing & Queue Roadmap
@@ -175,7 +175,7 @@
 
 ### 1.13 Strict Advance Ledger Salary Cap & Monthly Payroll Lockout
 
-- **Files:** [`src/hr/advance.service.ts`](file:///d:/Project/SuntechPOS-backend/src/hr/advance.service.ts), [`src/shifts/shift.service.ts`](file:///d:/Project/SuntechPOS-backend/src/shifts/shift.service.ts), [`src/hr/payroll.service.ts`](file:///d:/Project/SuntechPOS-backend/src/hr/payroll.service.ts).
+- **Files:** [`src/hr/advance.service.ts`](file:///d:/Project/SuntechPOS-backend/src/hr/advance.service.ts), [`src/hr/payroll.service.ts`](file:///d:/Project/SuntechPOS-backend/src/hr/payroll.service.ts).
 - **Hard Financial Constraint:** Total pending advances for an employee in the current payroll month can **never** exceed their `monthlySalary`:
   ```ts
   currentPendingAdvances + dto.amount <= monthlySalary;
@@ -185,18 +185,17 @@
   - Employees with `monthlySalary <= 0` are blocked with `400 Bad Request: "Employee has no valid monthly salary configured"`.
   - If the employee's payroll record for the current month is already marked as `PAID`, advance issuance is blocked with `400 Bad Request: "Payroll for current month is already settled"`.
 - **Serializable Concurrency Protection:**
-  - Both `AdvanceService.create` and `ShiftService.addAdvance` run inside `Serializable` database isolation transactions (`prisma.$transaction(..., { isolationLevel: 'Serializable' })`), eliminating race conditions where concurrent requests could exceed salary caps.
+  - `AdvanceService.create` runs inside a `Serializable` database transaction (`prisma.$transaction(..., { isolationLevel: 'Serializable' })`), eliminating race conditions where concurrent requests could exceed salary caps.
 - **Enforcement Points:**
   1. **`AdvanceService.create`:** Calculates current UTC month payroll window (`payrollPeriod`), verifies `monthlySalary > 0`, checks for settled payroll, sums existing `PENDING` advances, and throws `400 Bad Request` if exceeded. If the cashier has an open register shift, links `shiftId` automatically.
-  2. **`ShiftService.addAdvance`:** Evaluates the identical salary cap and settled payroll checks within the open shift's serialized transaction.
-  3. **`PayrollService.process`:** Settle payroll throws `400 Bad Request: "Total advances cannot exceed base salary"` if deductions exceed base salary, guaranteeing `netPaid >= 0`.
+  2. **`PayrollService.process`:** Settle payroll throws `400 Bad Request: "Total advances cannot exceed base salary"` if deductions exceed base salary, guaranteeing `netPaid >= 0`.
 
 ### 1.14 Dhaka Timezone Shift Auto-Close & Drawer Refund Accounting
 
 - **Files:** [`src/shifts/shift.service.ts`](file:///d:/Project/SuntechPOS-backend/src/shifts/shift.service.ts), [`src/orders/refund.service.ts`](file:///d:/Project/SuntechPOS-backend/src/orders/refund.service.ts).
 - **Timezone Integrity:** Shift day boundaries are evaluated strictly in `Asia/Dhaka` time using `Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' })`. A shift opened on a prior calendar day in Dhaka triggers the human-error auto-close protocol.
 - **Variance Protection (Same-Day Anti-Tamper):**
-  - Cashiers are strictly blocked from triggering auto-close on same-day shifts to wipe out drawer discrepancies or cash variance. Auto-closing shifts on the same Dhaka calendar day is restricted exclusively to `ADMIN`.
+  - Same-day shifts are never auto-closed, even for admins. A previous-day shift is auto-closed only after the caller explicitly sends `autoClosePrevious: true`.
 - **Refund Drawer Deductions & Multi-Branch Restock:**
   - `RefundService.create`: If order becomes fully refunded, updates `Order.status = REFUNDED`.
   - For COD orders linked to a shift, decrements `ShiftSession.cashCollected` **only if the shift session is currently OPEN** via atomic `updateMany({ where: { id: shiftId, status: 'OPEN' } })`. Closed historical shifts remain immutable.
@@ -254,7 +253,7 @@
 
 - **Files:** [`src/catalog/variant.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/variant.service.ts), [`src/catalog/product.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/product.service.ts), [`src/catalog/category.service.ts`](file:///d:/Project/SuntechPOS-backend/src/catalog/category.service.ts), [`src/orders/order.service.ts`](file:///d:/Project/SuntechPOS-backend/src/orders/order.service.ts), `prisma/schema/pos.prisma`, `prisma/schema/tenant.prisma`.
 - **`LocationStock` Architecture:**
-  - Tracks physical inventory per branch using the composite key `@@id([variantId, locationId])`.
+  - Tracks physical inventory per branch using a UUID primary key plus the composite uniqueness constraint `@@unique([locationId, variantId])`.
   - Global `Variant.stock` represents the organization-wide total, while `LocationStock.stock` tracks quantities at individual store branches.
   - Decremented atomically at checkout (`OrdersService.executeCatalogOrder`) and incremented during returns (`RefundService.create`).
   - Stock transfer transactions include explicit `locationId` on `StockTransaction` for complete audit trails.
@@ -327,7 +326,7 @@ erDiagram
 
 - **Access:** Public (Throttled 5 req/min)
 - **DTO Validation:**
-  - `loginType`: `@IsEnum(LoginType)` (`ADMIN` | `CASHIER` | `BUSINESS_USER`)
+  - `loginType`: `@IsEnum(LoginType)` (`ADMIN` | `BUSINESS_USER`)
   - `email`: `@IsOptional()`, required if `loginType === 'ADMIN'`
   - `publicId`: `@IsOptional()`, required if `loginType !== 'ADMIN'`
   - `password`: `@IsString()`, `@MinLength(1)`
@@ -336,12 +335,12 @@ erDiagram
   - `403 Forbidden`: Account `PENDING_APPROVAL`, `SUSPENDED`, or `REJECTED`.
   - `403 Forbidden`: Cashier without assigned active `businessId` or `locationId`.
   - `400 Bad Request`: Calling with `loginType: ADMIN` using a Cashier account (or vice-versa).
-- **Response:** `{ accessToken, refreshToken, user: { id, publicId, fullName, email, role, status, businessId, locationId } }`.
+- **Response:** `{ accessToken, user: { id, publicId, fullName, email, role, status, businessId, locationId } }`; the refresh token is delivered only through its HttpOnly cookie.
 
 #### `POST /auth/refresh`
 
 - **Access:** Public
-- **DTO:** `{ refreshToken: string }`
+- **DTO:** `{ refreshToken?: string }`; the HttpOnly cookie is preferred, with the body field retained for non-browser clients.
 - **Behavior:** Verifies JWT signature using `JWT_REFRESH_SECRET`, verifies user exists and is active, and issues a fresh `accessToken`.
 - **Edge Cases:** `401 Unauthorized` on expired or tampered token.
 
@@ -349,7 +348,7 @@ erDiagram
 
 - **Access:** Public (Throttled 5 req/min)
 - **DTO Validation:**
-  - `loginType`: `@IsEnum(LoginType)` (`ADMIN` | `CASHIER` | `BUSINESS_USER`)
+  - `loginType`: `@IsEnum(LoginType)` (`ADMIN` | `BUSINESS_USER`)
   - `identifier`: `@IsString()`, `@MinLength(1)` (accepts Email for Admin or Cashier Public ID)
   - `email`: `@IsOptional()`, legacy alias for `identifier`
 - **Behavior & Guardrails:**
@@ -548,7 +547,7 @@ erDiagram
   - `autoClosePrevious?: boolean`: `@IsOptional()`, `@IsBoolean()`
 - **Smart Auto-Close Logic:**
   - Evaluates calendar day boundaries strictly in `Asia/Dhaka` time (`isPreviousCalendarDay`).
-  - **Case A (Stale Shift from Yesterday):** If caller has an `OPEN` shift whose `openedAt` is on a previous calendar day in Dhaka (or `autoClosePrevious === true`), atomically auto-closes the stale shift first:
+  - **Case A (Stale Shift from Yesterday):** If the caller has an `OPEN` shift from a previous Dhaka calendar day and sends `autoClosePrevious: true`, atomically auto-closes the stale shift first. Without confirmation, returns `400 Bad Request`:
     - `cashSales`: Sum of COD orders (`status: { in: [PAID, REFUNDED] }`) minus sum of COD order `Refund.totalRefund`.
     - `advancesOut`: Sum of cash advances paid in that shift.
     - `expectedAmount = startingAmount + cashSales - advancesOut`.
@@ -560,24 +559,13 @@ erDiagram
 
 - **Access:** `@Roles(Role.CASHIER, Role.ADMIN)`
 - **Behavior:** Returns currently active open shift for the caller, including live telemetry: `openingFloat`, `cashSales`, `advancesOut`, `expectedCash`, and full `advanceLedger`.
+- **No Active Shift:** Returns `404 Not Found`.
 
 #### `POST /shifts/close` & `POST /shifts/:id/close`
 
 - **Access:** `@Roles(Role.CASHIER, Role.ADMIN)` (`@Idempotent()`)
 - **DTO:** `{ closingAmount: number, notes?: string }`
 - **Behavior:** Computes `expectedAmount = startingAmount + cashSales - advancesOut`, calculates `variance = closingAmount - expectedAmount`, marks shift as `CLOSED`.
-
-#### `POST /shifts/advances`
-
-- **Access:** `@Roles(Role.CASHIER, Role.ADMIN)` (`@Idempotent()`)
-- **DTO Validation:**
-  - `amount`: `@IsInt()`, `@Min(1)`
-  - `reason`: `@IsString()`, `@IsNotEmpty()`
-- **Guardrails & Invariants:**
-  1. **Strict Salary Cap & Ineligibility:** If cashier has no salary or `monthlySalary <= 0`, rejects with `400 Bad Request: "Employee is not eligible for advances (monthly salary not configured or zero)"`.
-  2. **Monthly Limit:** Queries cashier's `monthlySalary` and current month's `PENDING` advances. If `currentPendingAdvances + amount > cashier.monthlySalary`, rejects immediately with `400 Bad Request: "Advance amount exceeds remaining monthly salary limit"`.
-  3. **Physical Cash Drawer Limit:** Computes current shift expected drawer cash (`expectedCash`). If `amount > expectedCash`, rejects immediately with `400 Bad Request: "Advance amount exceeds physical cash available in drawer"`.
-  4. **Serializable Concurrency:** Executed in a `Serializable` database transaction to prevent simultaneous double-advance race conditions.
 
 #### `GET /shifts`
 
@@ -604,9 +592,9 @@ erDiagram
   - `shiftId?: string`: `@IsOptional()`, `@IsString()`, `@MinLength(1)`, `@MaxLength(64)`
   - `customerName?: string`, `customerPhone?: string`, `notes?: string`
 - **Transaction Execution:**
-  1. **DRY Execution Context (`resolveOrderExecutionContext`):** Centralizes user lookup, location verification, and shift ownership checks. **Strict Location Alignment:** Throws `403 Forbidden: "Active shift belongs to a different branch location. Orders cannot cross branch boundaries."` if `activeShift.locationId !== locationId`.
-  2. **Active Stock Check:** Queries variants and validates active stock: throws `400 Bad Request` if `variant.stock < line.quantity`.
-  3. **Atomic Stock Decrement:** Decrements variant stock atomically and writes `StockTransaction(type: SALE)`.
+  1. **Execution Context (`resolveOrderExecutionContext`):** Centralizes user and location verification. Shifts are optional metadata: an open shift is attached automatically when available, while a missing or closed shift never blocks checkout.
+  2. **Negative Stock Support:** Catalog sales decrement branch and aggregate stock atomically even when the result is zero or negative.
+  3. **Stock Audit:** Writes `StockTransaction(type: SALE)` and `LOW_STOCK_AFTER_SALE` whenever resulting branch stock is `<= 5`.
   4. **Invoice Assign & P2034 Conflict Retry:** Generates unique `invoiceNumber` (`INV-YYYYMMDD-XXXX`). Automatically retries up to `INVOICE_ATTEMPTS = 3` on PostgreSQL transaction serialization conflicts (`P2034`) before throwing `409 Conflict`.
   5. **Financial Ledger Math:** Computes `changeDue = tenderedAmount - totalAmount`.
   6. **COD Drawer Sychronization:** Increments active shift `cashCollected` **only if** `paymentMethod === 'COD'`. Digital payments do not alter cash drawer float.
@@ -614,7 +602,21 @@ erDiagram
 #### `POST /orders/custom`
 
 - **Access:** `@Roles(Role.ADMIN, Role.CASHIER)` (`@Idempotent()`)
-- **Behavior:** Handles unlisted retail accessories, repair services, or custom ad-hoc orders. Bypasses inventory stock deduction while strictly enforcing shift-location alignment and recording full financial and shift ledger data.
+- **Behavior:** Handles unlisted retail accessories, repair services, or custom ad-hoc orders. Product name, quantity, and price come from the cashier/admin. It never queries or mutates catalog inventory. A shift is optional and the order is always fully paid.
+
+#### `GET /offline/bootstrap`
+
+- **Access:** `@Roles(Role.ADMIN, Role.CASHIER)`.
+- **Behavior:** Returns a transactionally consistent snapshot of the JWT-scoped cashier, business, location, active catalog, variant selling prices, branch stock, image URLs, payment methods, and server/snapshot timestamps for IndexedDB storage.
+
+#### `POST /orders/sync`
+
+- **Access:** `@Roles(Role.ADMIN, Role.CASHIER)`. No `Idempotency-Key` is required.
+- **Behavior:** Sequentially processes up to 100 queued orders, each in its own database transaction. Results remain in submitted order and use `ACCEPTED`, `DUPLICATE`, or `REJECTED`.
+- **Durable identity:** The PWA UUID v4 `clientOrderId` is permanently unique. A retry returns the existing server order as `DUPLICATE`, including after the ordinary 24-hour HTTP idempotency window.
+- **Offline catalog rules:** Preserves the cached price actually charged, audits `OFFLINE_PRICE_MISMATCH`, permits negative inventory, and audits `LOW_STOCK_AFTER_SALE` at branch stock `<= 5`. A deleted variant is accepted from cached line snapshots, skips stock mutation, and emits `VARIANT_UNAVAILABLE`.
+- **Dates:** `occurredAt` is the actual client checkout time used by order filters, dashboards, and sales exports. `createdAt` remains the backend synchronization timestamp.
+- **Payment:** `tenderedAmount` must cover the full total. Due and partial-payment orders are not created.
 
 #### `GET /orders`
 
@@ -650,15 +652,15 @@ erDiagram
 
 #### `POST /advances`
 
-- **Access:** `@Roles(Role.ADMIN)` (`@Idempotent()`)
-- **Segregation of Duties:** Off-register administrative advances are strictly restricted to `ADMIN` users. Cashiers must use `POST /shifts/advances` for register drawer advances.
+- **Access:** `@Roles(Role.CASHIER)` (`@Idempotent()`)
+- **Behavior:** This is the single endpoint for recording employee salary advances. It always records the authenticated cashier's own advance; admins manage history and deletion through the other advance endpoints.
 - **DTO Validation:**
   - `amount`: `@IsInt()`, `@Min(1)`
-  - `cashierId`: `@IsString()`
   - `reason?: string`: `@IsOptional()`, `@IsString()`
 - **Guards & Concurrency:**
   - Verifies employee has a configured salary (`monthlySalary > 0`); rejects with `400 Bad Request` if zero or unset.
   - Enforces the strict salary cap: `currentPendingAdvances + dto.amount <= cashier.monthlySalary`.
+  - If the cashier has an active register shift, automatically links the advance to that shift so drawer reconciliation includes it.
   - Wrapped inside a `Serializable` transaction to eliminate concurrent race condition bypasses.
 
 #### `GET /advances`
@@ -858,6 +860,167 @@ erDiagram
   - `DELETE /expenses/:id` (`@Roles(Role.ADMIN)`): Soft-deletes an expense (`deletedAt: new Date()`). Soft-deleted records are strictly excluded from monthly summaries.
 
 ---
+
+## 3.11 Frontend Integration Reference (Complete Route Contract)
+
+This section is the frontend implementation reference. The API base path is `/api/v1`. Successful JSON responses use `{ success: true, message, data, timestamp }`; errors use `{ success: false, message, timestamp }`. Validation errors return a message array. Send `Authorization: Bearer <accessToken>` for protected routes. Browser clients should use `credentials: 'include'` so the HttpOnly refresh cookie is sent.
+
+### Authentication
+
+| Method | Path | Access | Request | Result |
+|---|---|---|---|---|
+| POST | `/auth/register` | Public | `{ fullName, email, password, phoneNumber? }` | Pending admin account. Password is 8–72 characters and must contain upper/lowercase, number, and special character. |
+| POST | `/auth/login` | Public | `ADMIN`: `{ loginType:'ADMIN', email, password }`; `BUSINESS_USER`: `{ loginType:'BUSINESS_USER', publicId, password }` | `{ accessToken, user }`; refresh token is HttpOnly cookie only. `BUSINESS_USER` authenticates an internal `CASHIER` role. |
+| POST | `/auth/refresh` | Public | `{ refreshToken? }` (cookie preferred) | New access token. |
+| POST | `/auth/logout` | Public | No body | Clears access and refresh cookies. |
+| POST | `/auth/forgot-password` | Public | `{ loginType?, email?\|identifier? }` | Always returns `{ accepted:true }` for unknown accounts to prevent enumeration. |
+| POST | `/auth/verify-otp` | Public | `{ email?\|identifier?, loginType?, otp }` | `{ resetToken }`, valid for 10 minutes. |
+| POST | `/auth/reset-password` | Public | `{ resetToken, newPassword }` | Password updated; token cannot be reused after OTP state is cleared. |
+
+Authorization roles remain `SUPER_ADMIN`, `ADMIN`, and `CASHIER`; login types are only `ADMIN` and `BUSINESS_USER`.
+
+### Tenant and staff context
+
+Admin requests must include the selected `businessId` wherever a business context is required and `locationId` wherever a branch context is required. The server verifies current ownership and branch membership in PostgreSQL. Cashiers must not send these identifiers; the server uses the validated token assignment and rejects conflicting values.
+
+| Method | Path | Access | Request/query |
+|---|---|---|---|
+| GET | `/tenant/businesses` | ADMIN | none |
+| POST | `/tenant/business` | ADMIN | `{ name }` |
+| GET | `/tenant/business` | ADMIN | `?businessId=` |
+| PATCH | `/tenant/businesses/:id` | ADMIN | `{ name?, profileImageUrl? }` |
+| DELETE | `/tenant/businesses/:id` or `/tenant/business` | ADMIN | selected business ID; cannot delete with active branches |
+| POST/DELETE | `/tenant/business/profile-image` | ADMIN | multipart field `file`, or image reference according to Swagger |
+| POST | `/tenant/locations` | ADMIN | `{ businessId, name, address? }` |
+| GET | `/tenant/locations` | ADMIN/CASHIER | Admin: `businessId`; optional `locationId`; cashier scope is token-derived |
+| PATCH/DELETE | `/tenant/locations/:id` | ADMIN | `{ name?, address? }`; resource must belong to selected business |
+| GET | `/users/me` | authenticated | none |
+| POST/DELETE | `/users/me/profile-image` | authenticated | multipart `file` / delete |
+| POST | `/users/cashiers` | ADMIN | `{ fullName, email?, phoneNumber?, password, locationId, monthlySalary }` |
+| GET | `/users/cashiers` | ADMIN | `businessId`, `locationId?`, `search?`, `status?`, `page?`, `limit?` |
+| PATCH | `/users/cashiers/:id` | ADMIN | `{ fullName?, phoneNumber?, locationId?, monthlySalary?, password? }` |
+| DELETE | `/users/cashiers/:id` | ADMIN | resource ID; open-shift cashiers cannot be removed |
+| PATCH | `/users/:id/status` | ADMIN/SUPER_ADMIN as documented | `{ status, reason? }` |
+| POST/DELETE | `/users/:id/profile-image` | ADMIN | multipart upload or removal |
+
+### Catalog and inventory
+
+Catalog reads are available to both Admin and Cashier. Catalog writes and manual inventory adjustment are Admin-only. Cashier responses omit `costPrice`, `unitCost`, `marginPercent`, `inventoryValue`, and profitability fields.
+
+| Method | Path | Access | Request/query |
+|---|---|---|---|
+| GET/POST | `/catalog/categories` | ADMIN/CASHIER read; ADMIN write | GET: `businessId?`, `search?`; POST: `{ businessId?, name, slug?, description? }` |
+| GET | `/catalog/categories/:id` | ADMIN/CASHIER | `businessId?` |
+| PATCH | `/catalog/categories/:id` | ADMIN | `{ businessId?, name?, slug?, description?, isActive? }` |
+| DELETE | `/catalog/categories/:id` | ADMIN | `businessId?` |
+| GET/POST | `/catalog/products` | ADMIN/CASHIER read; ADMIN write | GET: `businessId?`, `categoryId?`, `search?`; POST: `{ businessId?, name, description?, categoryId?, customAttributes? }` |
+| GET | `/catalog/products/:id` | ADMIN/CASHIER | `businessId?`, `locationId?` |
+| PATCH | `/catalog/products/:id` | ADMIN | product fields and optional `isActive` |
+| DELETE | `/catalog/products/:id` | ADMIN | `businessId?` |
+| GET/POST | `/catalog/variants` | ADMIN/CASHIER read; ADMIN write | GET: `businessId?`, `locationId?`, `categoryId?`, `productId?`, `search?`, `lowStockOnly?`; POST: `{ businessId?, locationId?, productId, name, sku?, barcode?, sellingPrice, costPrice?, stock? }` |
+| GET | `/catalog/variants/:id` | ADMIN/CASHIER | `businessId?`, `locationId?` |
+| PATCH | `/catalog/variants/:id` | ADMIN | `{ businessId?, locationId?, name?, productId?, sku?, barcode?, sellingPrice?, costPrice?, stock?, isActive? }` |
+| DELETE | `/catalog/variants/:id` | ADMIN | `businessId?` |
+| PATCH/POST | `/catalog/variants/:id/stock` | ADMIN | `{ quantity?\|delta?\|stock?, operation?, allowNegative?, locationId?, notes? }`; creates a stock transaction atomically |
+| PATCH | `/catalog/variants/stock` | ADMIN | same stock DTO plus `variantId` |
+| GET/POST/DELETE | `/catalog/variants/:variantId/images` | ADMIN read/write | multipart image upload for POST; `imageId` for DELETE |
+| POST/DELETE | `/catalog/variants/:variantId/profile-image` | ADMIN | multipart `file` or image removal |
+
+All monetary values above are whole BDT integers. `sellingPrice: 1500` means Tk 1,500. No paisa/cents conversion is performed.
+
+### Shifts
+
+| Method | Path | Access | Request/query |
+|---|---|---|---|
+| POST | `/shifts/open` | ADMIN/CASHIER | `{ startingAmount, locationId?, autoClosePrevious? }` |
+| GET | `/shifts/active` | ADMIN/CASHIER | optional selected `businessId`/`locationId` where supported |
+| POST | `/shifts/close` | ADMIN/CASHIER | `{ closingAmount, notes? }` |
+| POST | `/shifts/:id/close` | ADMIN/CASHIER | `{ closingAmount, notes? }` |
+| GET | `/shifts` | ADMIN/CASHIER | `businessId?`, `locationId?`, `status?`, `page?`, `limit?` |
+
+Shifts are operational metadata, never a checkout prerequisite. A missing, closed, or mismatched submitted shift produces `SHIFT_NOT_ATTACHED` where the order flow supports warnings; the sale is not rejected.
+
+### Orders, offline checkout, and refunds
+
+Catalog request example:
+
+```json
+{
+  "businessId": "business-owned-by-admin",
+  "locationId": "branch-in-that-business",
+  "shiftId": "optional-open-shift",
+  "paymentMethod": "COD",
+  "tenderedAmount": 3500,
+  "lines": [{ "variantId": "variant-id", "quantity": 2, "unitPrice": 1500 }]
+}
+```
+
+Custom request uses the same payment/context fields, but lines are `{ productName, variantName?, quantity, unitPrice }` and never query or mutate catalog inventory. Both flows require full payment (`tenderedAmount >= totalAmount`) and return `changeDue`.
+
+| Method | Path | Access | Behavior |
+|---|---|---|---|
+| POST | `/orders/catalog` | ADMIN/CASHIER | Current catalog price online; negative stock allowed and low-stock audits created. Admin supplies/owns business and branch; cashier context is token-derived. |
+| POST | `/orders/custom` | ADMIN/CASHIER | Free-form sale; no catalog lookup or stock mutation. |
+| POST | `/orders` | ADMIN/CASHIER | Legacy checkout compatibility route; follows the same tenant, payment, and optional-shift rules. |
+| GET | `/orders` | ADMIN/CASHIER/SUPER_ADMIN | `businessId?`, `locationId?`, `orderType?`, `status?`, `paymentMethod?`, `search?`, date filters, `page?`, `limit?`. Admin business is ownership-checked. |
+| POST | `/orders/sync` | ADMIN/CASHIER | No `Idempotency-Key`; maximum 100 orders, independent transaction/result per item. Admin sends top-level `businessId` and `locationId`; cashier uses token context. |
+| POST | `/orders/:id/refunds` | ADMIN/CASHIER | `{ reason?, items:[{ orderItemId, quantity }] }`; partial/full refunds, tenant/branch checked. |
+
+Offline sync request:
+
+```json
+{
+  "deviceId": "counter-01",
+  "businessId": "admin-selected-business",
+  "locationId": "admin-selected-branch",
+  "orders": [{
+    "clientOrderId": "uuid-v4",
+    "clientReceiptNumber": "COUNTER-01-000123",
+    "occurredAt": "2026-10-25T13:30:00+06:00",
+    "orderType": "CATALOG",
+    "paymentMethod": "COD",
+    "tenderedAmount": 1000,
+    "lines": [{ "variantId": "variant-id", "productName": "Cached name", "variantName": "Cached variant", "categoryName": "Cached category", "quantity": 1, "unitPrice": 1000 }]
+  }]
+}
+```
+
+Each result is `{ clientOrderId, status:'ACCEPTED'|'DUPLICATE'|'REJECTED', orderId?, invoiceNumber?, warnings[], error? }`. A cached Tk 100 price remains Tk 100 if the server is now Tk 120; the order is accepted, exactly one `OFFLINE_PRICE_MISMATCH` audit is written, and a retry returns `DUPLICATE` without repeating side effects. Duplicate lookup is tenant/branch/fingerprint checked and never reveals another tenant’s order.
+
+`GET /offline/bootstrap` returns user, selected business, selected location, active categories/products/variants, selling prices, branch stock, image URLs, payment methods, `serverTime`, and `snapshotGeneratedAt`. Admin must provide `?businessId=&locationId=`; cashier context comes from the token.
+
+### Advances, payroll, expenses, reports, and audit
+
+| Method | Path | Access | Request/query |
+|---|---|---|---|
+| POST | `/advances` | CASHIER | `{ amount, reason? }`; own salary advance only |
+| GET | `/advances` | ADMIN/CASHIER | `businessId?`, `locationId?`, `cashierId?`, `status?`, `month?`, `year?`, `page?`, `limit?` |
+| GET | `/advances/summary` | ADMIN/CASHIER | `businessId`, `cashierId?`, `month`, `year` |
+| DELETE | `/advances/:id` | ADMIN | pending advance only |
+| GET | `/payroll/summary` | ADMIN | `businessId`, `locationId?`, `month?`, `year?` |
+| POST | `/payroll/process` | ADMIN | `{ businessId?, cashierId, month, year }` |
+| POST | `/payroll/disburse` | ADMIN | `{ businessId?, locationId?, month, year }` |
+| GET | `/payroll/history` and `/payroll` | ADMIN | `businessId`, `locationId?`, `month?`, `year?` |
+| POST | `/expenses` | ADMIN | `{ businessId?, locationId?, amount, title, category?, note?, spentAt? }` |
+| GET | `/expenses` | ADMIN | `businessId`, `locationId?`, `category?`, `month?`, `year?`, `search?` |
+| GET | `/expenses/summary` | ADMIN | `businessId`, `locationId?`, `category?`, `month?`, `year?` |
+| DELETE | `/expenses/:id` | ADMIN | selected business context |
+| GET | `/reports/dashboard` | ADMIN/CASHIER | date range and authorized `businessId?`/`locationId?` |
+| GET | `/reports/analytics` | ADMIN/CASHIER | date, product/category/location filters |
+| GET | `/reports/transactions` | ADMIN | `businessId`, `locationId?`, actor/entity/date filters, page/limit |
+| GET | `/reports/export` | ADMIN | `type=payroll|sales`, `format=csv|pdf`, `month`, `year`, `locationId?`; streamed file, not JSON envelope |
+| GET | `/audit-logs` | ADMIN | required `businessId`; optional `locationId`, `action`, `entityType`, `entityId`, `actorId`, `from`, `to`, `page` (default 1), `limit` (default 20, max 100) |
+| GET | `/audit-logs/:id` | ADMIN | `businessId` required; returns only an authorized record |
+
+Audit list response data is `{ items, meta:{ page, limit, total, totalPages } }`, newest first with deterministic ID ordering. Offline mismatch metadata includes order/invoice, variant, location, cached and server prices, difference, quantity, device, occurrence time, and synchronization time. Passwords, tokens, OTPs, hashes, and secrets are redacted.
+
+### Idempotency and caching
+
+For routes marked `@Idempotent()`, send a unique `Idempotency-Key` (1–200 characters). The server stores a PostgreSQL replay record for 24 hours, including a canonical request hash. Same actor, method, path, tenant context, and body replays the original envelope; a changed body or tenant returns `409`. Offline `clientOrderId` is a permanent order-level deduplication identity and is separate from the 24-hour HTTP key. The backend has no server-side catalog cache: the PWA owns IndexedDB/service-worker caching; `GET /offline/bootstrap` is a snapshot source.
+
+### Migration and integration verification
+
+For a fresh database, apply the complete schema/migration history. For an existing deployment, take a backup, baseline the existing schema, then apply pending non-destructive migrations. Never run `prisma migrate reset` against production. Before frontend handoff run `npx prisma validate`, `npx prisma generate`, `npm run build`, `npm test -- --runInBand`, and the e2e suite when PostgreSQL is available. Swagger is available at `/api/docs` and should be regenerated whenever DTOs or routes change.
 
 ## 4. Verification & Testing Standards
 

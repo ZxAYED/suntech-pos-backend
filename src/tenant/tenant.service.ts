@@ -135,11 +135,6 @@ export class TenantService {
           'Cashier account must be assigned to an active business and branch location',
         );
       }
-      if (locationId && locationId !== actor.locationId) {
-        throw new ForbiddenException(
-          'Cashiers can only access their assigned branch location',
-        );
-      }
       businessId = actor.businessId;
       locationId = actor.locationId;
     } else {
@@ -194,9 +189,7 @@ export class TenantService {
     });
 
     if (existing) {
-      throw new ConflictException(
-        'You already have a business with this name',
-      );
+      throw new ConflictException('You already have a business with this name');
     }
 
     let created: PresentedBusiness;
@@ -440,9 +433,7 @@ export class TenantService {
 
     const targetName = dto.name !== undefined ? dto.name.trim() : location.name;
     const targetAddress =
-      dto.address !== undefined
-        ? dto.address.trim() || null
-        : location.address;
+      dto.address !== undefined ? dto.address.trim() || null : location.address;
 
     if (dto.name !== undefined || dto.address !== undefined) {
       const duplicate = await this.prisma.location.findFirst({

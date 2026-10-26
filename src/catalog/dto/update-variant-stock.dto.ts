@@ -70,7 +70,7 @@ export class UpdateVariantStockDto {
 
   @ApiPropertyOptional({
     description:
-      'Branch location UUID where stock is deducted or added (Cashier defaults to assigned location from token)',
+      'Branch location UUID for Admin. Cashier stock updates always use the assigned location from the access token and ignore this field.',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @IsOptional()
@@ -79,7 +79,7 @@ export class UpdateVariantStockDto {
 
   @ApiPropertyOptional({
     description:
-      'Tenant business UUID (optional for Admin; Cashier locked to token business)',
+      'Tenant business UUID for Admin. Cashier stock updates always use the business from the access token and ignore this field.',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @IsOptional()

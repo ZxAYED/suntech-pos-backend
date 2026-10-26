@@ -36,7 +36,7 @@ export class OrderLineDto {
 
   @ApiPropertyOptional({
     description:
-      'Price for custom item (in cents/paisa, required if variantId is not provided)',
+      'Price for custom item in whole BDT (required if variantId is not provided)',
     minimum: 0,
     example: 500,
   })

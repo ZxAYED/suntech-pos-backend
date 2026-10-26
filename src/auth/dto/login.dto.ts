@@ -31,7 +31,7 @@ export class LoginDto {
 
   @ApiPropertyOptional({
     description:
-      'Public system ID e.g. ADM-XXXXX or CSH-XXXXX (required when loginType is BUSINESS_USER)',
+      'Cashier public system ID, e.g. CSH-XXXXX (required when loginType is BUSINESS_USER)',
     example: 'CSH-K9M2P',
   })
   @ValidateIf((dto: LoginDto) => dto.loginType === LoginType.BUSINESS_USER)

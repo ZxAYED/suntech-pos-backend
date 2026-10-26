@@ -27,6 +27,7 @@ import { CreateCatalogOrderDto } from './dto/create-catalog-order.dto';
 import { CreateCustomOrderDto } from './dto/create-custom-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { GetOrdersQueryDto } from './dto/get-orders.query';
+import { SyncOrdersDto } from './dto/sync-orders.dto';
 import { OrdersService } from './order.service';
 
 @ApiTags('Orders')
@@ -45,7 +46,7 @@ export class OrdersController {
   @ApiOperation({
     summary: '[ADMIN, CASHIER] Create catalog order',
     description:
-      'Checkout enlisted catalog variants with inventory validation and stock decrement. Supports payment types: COD, BKASH, NAGAD, BANK. Accessible by CASHIER and ADMIN.',
+      'Checkout catalog variants at the current backend price. Stock is decremented atomically, may become negative, and low stock is audited. A shift is optional.',
   })
   @ApiResponse({
     status: 201,
@@ -63,14 +64,7 @@ export class OrdersController {
     status: 400,
     description: 'Validation failed or insufficient tender amount',
   })
-  @ApiResponse({
-    status: 404,
-    description: 'Location, shift, or catalog variant not found',
-  })
-  @ApiResponse({
-    status: 409,
-    description: 'Insufficient variant stock or closed shift',
-  })
+  @ApiResponse({ status: 404, description: 'Location or variant not found' })
   async createCatalogOrder(
     @CurrentUser() actor: AccessTokenPayload,
     @Body() dto: CreateCatalogOrderDto,
@@ -104,16 +98,32 @@ export class OrdersController {
     status: 400,
     description: 'Validation failed or insufficient tender amount',
   })
-  @ApiResponse({ status: 404, description: 'Location or shift not found' })
-  @ApiResponse({
-    status: 409,
-    description: 'Shift requirement conflict or closed shift',
-  })
+  @ApiResponse({ status: 404, description: 'Location not found' })
   async createCustomOrder(
     @CurrentUser() actor: AccessTokenPayload,
     @Body() dto: CreateCustomOrderDto,
   ) {
     return this.ordersService.createCustomOrder(actor, dto);
+  }
+
+  @Post('sync')
+  @Roles('ADMIN', 'CASHIER')
+  @HttpCode(HttpStatus.OK)
+  @ResponseMessage('Offline orders synchronized')
+  @ApiOperation({
+    summary: '[ADMIN, CASHIER] Synchronize queued offline orders',
+    description:
+      'Processes up to 100 locally committed orders independently. Durable deduplication uses each clientOrderId; no Idempotency-Key header is required.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Per-order synchronization results',
+  })
+  syncOrders(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Body() dto: SyncOrdersDto,
+  ) {
+    return this.ordersService.syncOrders(actor, dto);
   }
 
   @Get()
@@ -128,7 +138,8 @@ export class OrdersController {
     name: 'businessId',
     required: false,
     type: String,
-    description: 'Tenant business UUID (Required for Super Admin; optional for Admin with owned business)',
+    description:
+      'Tenant business UUID (Required for Super Admin; optional for Admin with owned business)',
   })
   @ApiQuery({
     name: 'locationId',
@@ -166,15 +177,27 @@ export class OrdersController {
   @ApiQuery({
     name: 'range',
     required: false,
-    enum: ['today', 'yesterday', 'weekly', 'monthly', 'daily', 'quarterly', 'week', 'month', 'year'],
+    enum: [
+      'today',
+      'yesterday',
+      'weekly',
+      'monthly',
+      'daily',
+      'quarterly',
+      'week',
+      'month',
+      'year',
+    ],
     enumName: 'OrderDateRange',
-    description: 'Filter orders by period range ("month" defaults to current month)',
+    description:
+      'Filter orders by period range ("month" defaults to current month)',
   })
   @ApiQuery({
     name: 'month',
     required: false,
     type: String,
-    description: 'Filter by month name or code (e.g. october, oct, 10, current)',
+    description:
+      'Filter by month name or code (e.g. october, oct, 10, current)',
     example: 'october',
   })
   @ApiQuery({
@@ -203,7 +226,8 @@ export class OrdersController {
     name: 'scope',
     required: false,
     enum: ['all', 'my', 'own'],
-    description: 'Scope orders: "all" for all business orders, "my" for admin own sales',
+    description:
+      'Scope orders: "all" for all business orders, "my" for admin own sales',
     example: 'all',
   })
   @ApiQuery({

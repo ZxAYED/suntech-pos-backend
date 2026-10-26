@@ -40,9 +40,9 @@ export class AdvanceController {
 
   @Post()
   @ApiOperation({
-    summary: '[ADMIN, CASHIER] Record employee salary advance',
+    summary: '[CASHIER] Record employee salary advance',
     description:
-      'Cashiers can input fee/advance amount with a note (reason) to immediately record a salary advance. No admin approval is required; it is auto-added to the ledger history (status PENDING until monthly payroll settlement). Admins can also issue an advance on behalf of any cashier. Enforces atomic salary cap check: total pending advances for current payroll month cannot exceed employee monthlySalary.',
+      'Cashiers can input fee/advance amount with a note (reason) to immediately record a salary advance. No admin approval is required; it is auto-added to the ledger history (status PENDING until monthly payroll settlement). Only cashiers can create advances. Admin can view history, summary, and delete. Enforces atomic salary cap check: total pending advances for current payroll month cannot exceed employee monthlySalary.',
   })
   @ApiResponse({ status: 201, description: 'Advance recorded' })
   @ApiResponse({
@@ -50,11 +50,15 @@ export class AdvanceController {
     description: 'Unauthorized - invalid or missing JWT',
   })
   @ApiResponse({
+    status: 403,
+    description: 'Forbidden - only CASHIER role can record salary advances',
+  })
+  @ApiResponse({
     status: 400,
     description:
       'Advance amount exceeds remaining monthly salary limit or cashier has no salary configured',
   })
-  @Roles(Role.ADMIN, Role.CASHIER)
+  @Roles(Role.CASHIER)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Advance recorded')

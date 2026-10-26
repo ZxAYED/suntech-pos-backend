@@ -121,7 +121,7 @@ export class AuthController {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? 'strict' : 'lax',
-      path: '/',
+      path: '/api/v1/auth',
     });
     response.clearCookie('accessToken', {
       httpOnly: true,
@@ -140,7 +140,7 @@ export class AuthController {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? 'strict' : 'lax',
-      path: '/',
+      path: '/api/v1/auth',
       maxAge: thirtyDaysMs,
     });
   }
@@ -183,7 +183,8 @@ export class AuthController {
   @Post('verify-otp')
   @ApiOperation({
     summary: '[PUBLIC] Verify password reset OTP code',
-    description: 'Validates 6-digit OTP code against the registered admin account.',
+    description:
+      'Validates 6-digit OTP code against the registered admin account.',
   })
   @ApiResponse({ status: 200, description: 'OTP verified successfully' })
   @ApiResponse({ status: 400, description: 'Invalid or expired OTP code' })

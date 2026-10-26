@@ -368,6 +368,8 @@ describe('TenantService', () => {
           businessId: 'biz-1',
           locationId: 'loc-1',
         },
+        'biz-other',
+        'loc-other',
       );
       expect(result).toHaveLength(1);
       expect(locationFindMany).toHaveBeenCalledWith({
@@ -513,8 +515,8 @@ describe('TenantService', () => {
       expect(scope).toEqual({ businessId: 'biz-1', locationId: 'loc-csh' });
     });
 
-    it('throws ForbiddenException when cashier tries to access another branch', () => {
-      expect(() =>
+    it('ignores requested business and location IDs for cashier scope', () => {
+      expect(
         resolveLocationScope(
           {
             sub: 'cashier-1',
@@ -523,8 +525,9 @@ describe('TenantService', () => {
             locationId: 'loc-1',
           },
           'loc-2',
+          'biz-2',
         ),
-      ).toThrow('Cashiers can only access their assigned branch location');
+      ).toEqual({ businessId: 'biz-1', locationId: 'loc-1' });
     });
 
     it('throws ForbiddenException when cashier has no locationId in token', () => {
@@ -746,4 +749,3 @@ describe('TenantService', () => {
     });
   });
 });
-

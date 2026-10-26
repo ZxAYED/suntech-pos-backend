@@ -26,7 +26,6 @@ import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { CloseShiftDto } from './dto/close-shift.dto';
-import { CreateShiftAdvanceDto } from './dto/create-shift-advance.dto';
 import { ListShiftsQueryDto } from './dto/list-shifts.query';
 import { OpenShiftDto } from './dto/open-shift.dto';
 import { ShiftService } from './shift.service';
@@ -144,38 +143,6 @@ export class ShiftController {
     @Body() dto: CloseShiftDto,
   ) {
     return this.shifts.close(actor, id, dto);
-  }
-
-  @Post('advances')
-  @ApiOperation({
-    summary: '[ADMIN, CASHIER] Take cash advance from active shift drawer',
-    description:
-      'Withdraws physical cash advance for the cashier. Atomic check enforces that total pending advances cannot exceed monthlySalary and amount cannot exceed drawer cash. Accessible by CASHIER and ADMIN.',
-  })
-  @ApiResponse({ status: 201, description: 'Shift advance recorded' })
-  @ApiResponse({
-    status: 401,
-    description: 'Unauthorized - invalid or missing JWT',
-  })
-  @ApiResponse({
-    status: 403,
-    description: 'Forbidden - requires CASHIER or ADMIN role',
-  })
-  @ApiResponse({
-    status: 400,
-    description:
-      'Advance amount exceeds remaining monthly salary limit or drawer cash',
-  })
-  @ApiResponse({ status: 404, description: 'No active open shift found' })
-  @Roles(Role.CASHIER, Role.ADMIN)
-  @Idempotent()
-  @HttpCode(HttpStatus.CREATED)
-  @ResponseMessage('Shift advance recorded')
-  addAdvance(
-    @CurrentUser() actor: AccessTokenPayload,
-    @Body() dto: CreateShiftAdvanceDto,
-  ) {
-    return this.shifts.addAdvance(actor, dto);
   }
 
   @Get()

@@ -16,9 +16,7 @@ import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { requireBusinessId } from '../hr/require-business-id';
 import { resolveLocationScope } from '../common/utils/location-scope';
 import { PrismaService } from '../prisma/prisma.service';
-import { payrollPeriod } from '../hr/payroll-period';
 import { CloseShiftDto } from './dto/close-shift.dto';
-import { CreateShiftAdvanceDto } from './dto/create-shift-advance.dto';
 import { ListShiftsQueryDto } from './dto/list-shifts.query';
 import { OpenShiftDto } from './dto/open-shift.dto';
 
@@ -120,70 +118,74 @@ export class ShiftService {
           let autoClosedPreviousShiftId: string | undefined;
 
           if (openShift) {
-            const isStale =
-              isPreviousCalendarDay(openShift.openedAt) ||
-              (actor.role === Role.ADMIN && dto.autoClosePrevious === true);
+            const isStale = isPreviousCalendarDay(openShift.openedAt);
 
-            if (isStale) {
-              const refundPromise = tx.refund?.aggregate
-                ? tx.refund.aggregate({
-                    where: {
-                      order: {
-                        shiftId: openShift.id,
-                        paymentMethod: PaymentMethod.COD,
-                      },
-                    },
-                    _sum: { totalRefund: true },
-                  })
-                : Promise.resolve({ _sum: { totalRefund: 0 } });
-
-              const [cashOrdersAgg, advancesAgg, codRefundsAgg] =
-                await Promise.all([
-                  tx.order.aggregate({
-                    where: {
-                      shiftId: openShift.id,
-                      paymentMethod: PaymentMethod.COD,
-                      status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
-                    },
-                    _sum: { totalAmount: true },
-                  }),
-                  tx.employeeAdvance.aggregate({
-                    where: {
-                      shiftId: openShift.id,
-                      businessId,
-                      deletedAt: null,
-                    },
-                    _sum: { amount: true },
-                  }),
-                  refundPromise,
-                ]);
-
-              const rawCashSales = cashOrdersAgg?._sum?.totalAmount ?? 0;
-              const codRefunds = codRefundsAgg?._sum?.totalRefund ?? 0;
-              const cashSales = Math.max(0, rawCashSales - codRefunds);
-              const advancesOut = advancesAgg?._sum?.amount ?? 0;
-              const expectedAmount =
-                (openShift.startingAmount ?? 0) + cashSales - advancesOut;
-
-              await tx.shiftSession.update({
-                where: { id: openShift.id },
-                data: {
-                  status: ShiftStatus.CLOSED,
-                  closingAmount: expectedAmount,
-                  expectedAmount,
-                  variance: 0,
-                  cashSales,
-                  advancesOut,
-                  notes:
-                    'Auto-closed: previous shift was left open before new shift start',
-                  closedAt: new Date(),
-                },
-              });
-
-              autoClosedPreviousShiftId = openShift.id;
-            } else {
+            if (!isStale) {
               throw new ConflictException(ALREADY_OPEN_TODAY);
             }
+
+            if (dto.autoClosePrevious !== true) {
+              throw new BadRequestException(
+                'A previous-day shift is still open; set autoClosePrevious=true to reconcile and close it',
+              );
+            }
+
+            const refundPromise = tx.refund?.aggregate
+              ? tx.refund.aggregate({
+                  where: {
+                    order: {
+                      shiftId: openShift.id,
+                      paymentMethod: PaymentMethod.COD,
+                    },
+                  },
+                  _sum: { totalRefund: true },
+                })
+              : Promise.resolve({ _sum: { totalRefund: 0 } });
+
+            const [cashOrdersAgg, advancesAgg, codRefundsAgg] =
+              await Promise.all([
+                tx.order.aggregate({
+                  where: {
+                    shiftId: openShift.id,
+                    paymentMethod: PaymentMethod.COD,
+                    status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
+                  },
+                  _sum: { totalAmount: true },
+                }),
+                tx.employeeAdvance.aggregate({
+                  where: {
+                    shiftId: openShift.id,
+                    businessId,
+                    deletedAt: null,
+                  },
+                  _sum: { amount: true },
+                }),
+                refundPromise,
+              ]);
+
+            const rawCashSales = cashOrdersAgg?._sum?.totalAmount ?? 0;
+            const codRefunds = codRefundsAgg?._sum?.totalRefund ?? 0;
+            const cashSales = Math.max(0, rawCashSales - codRefunds);
+            const advancesOut = advancesAgg?._sum?.amount ?? 0;
+            const expectedAmount =
+              (openShift.startingAmount ?? 0) + cashSales - advancesOut;
+
+            await tx.shiftSession.update({
+              where: { id: openShift.id },
+              data: {
+                status: ShiftStatus.CLOSED,
+                closingAmount: expectedAmount,
+                expectedAmount,
+                variance: 0,
+                cashSales,
+                advancesOut,
+                notes:
+                  'Auto-closed: previous shift was left open before new shift start',
+                closedAt: new Date(),
+              },
+            });
+
+            autoClosedPreviousShiftId = openShift.id;
           }
 
           const created = await tx.shiftSession.create({
@@ -216,9 +218,7 @@ export class ShiftService {
     }
   }
 
-  async getActive(
-    cashier: AccessTokenPayload,
-  ): Promise<ActiveShiftDetails | null> {
+  async getActive(cashier: AccessTokenPayload): Promise<ActiveShiftDetails> {
     const businessId = requireBusinessId(cashier);
 
     const shift = await this.prisma.shiftSession.findFirst({
@@ -231,7 +231,7 @@ export class ShiftService {
     });
 
     if (!shift) {
-      return null;
+      throw new NotFoundException('No active open shift found');
     }
 
     const { cashSales, advancesOut, advanceLedger } =
@@ -312,121 +312,12 @@ export class ShiftService {
     });
   }
 
-  async addAdvance(cashier: AccessTokenPayload, dto: CreateShiftAdvanceDto) {
-    const businessId = requireBusinessId(cashier);
-
-    const activeShift = await this.prisma.shiftSession.findFirst({
-      where: {
-        businessId,
-        cashierId: cashier.sub,
-        status: ShiftStatus.OPEN,
-      },
-      select: { id: true, startingAmount: true },
-    });
-
-    if (!activeShift) {
-      throw new ConflictException('No open shift found to withdraw cash from');
-    }
-
-    const user = await this.prisma.user?.findFirst?.({
-      where: { id: cashier.sub, businessId, deletedAt: null },
-      select: { monthlySalary: true },
-    });
-
-    const maxSalary = user?.monthlySalary ?? 0;
-    if (maxSalary <= 0) {
-      throw new BadRequestException(
-        'Salary advances require a positive monthly salary configured on your account',
-      );
-    }
-
-    const now = new Date();
-    const month = now.getUTCMonth() + 1;
-    const year = now.getUTCFullYear();
-    const { start, end } = payrollPeriod(year, month);
-
-    const executeInTx = async (tx: any) => {
-      const payrollDelegate =
-        tx.payrollRecord ?? (this.prisma as any).payrollRecord;
-      if (payrollDelegate?.findFirst) {
-        const settled = await payrollDelegate.findFirst({
-          where: {
-            businessId,
-            cashierId: cashier.sub,
-            month,
-            year,
-            status: 'PAID',
-          },
-        });
-        if (settled) {
-          throw new BadRequestException(
-            'Payroll for the current month has already been settled',
-          );
-        }
-      }
-
-      let currentPending = 0;
-      if (tx.employeeAdvance?.aggregate) {
-        const agg = await tx.employeeAdvance.aggregate({
-          where: {
-            businessId,
-            cashierId: cashier.sub,
-            status: 'PENDING',
-            deletedAt: null,
-            takenAt: { gte: start, lt: end },
-          },
-          _sum: { amount: true },
-        });
-        currentPending = agg._sum?.amount ?? 0;
-      } else if (tx.employeeAdvance?.findMany) {
-        const existing = await tx.employeeAdvance.findMany({
-          where: {
-            businessId,
-            cashierId: cashier.sub,
-            status: 'PENDING',
-            deletedAt: null,
-            takenAt: { gte: start, lt: end },
-          },
-        });
-        currentPending = Array.isArray(existing)
-          ? existing.reduce((sum: number, item: any) => sum + (item.amount ?? 0), 0)
-          : 0;
-      }
-
-      if (currentPending + dto.amount > maxSalary) {
-        throw new BadRequestException(
-          'Advance amount exceeds remaining monthly salary limit',
-        );
-      }
-
-      return tx.employeeAdvance.create({
-        data: {
-          businessId,
-          cashierId: cashier.sub,
-          shiftId: activeShift.id,
-          amount: dto.amount,
-          reason: dto.reason.trim(),
-        },
-        select: {
-          id: true,
-          amount: true,
-          reason: true,
-          takenAt: true,
-          status: true,
-        },
-      });
-    };
-
-    if (this.prisma.$transaction) {
-      return this.prisma.$transaction((tx) => executeInTx(tx), {
-        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      });
-    }
-    return executeInTx(this.prisma);
-  }
-
   async list(user: AccessTokenPayload, query: ListShiftsQueryDto) {
-    const scope = resolveLocationScope(user, query.locationId, query.businessId);
+    const scope = resolveLocationScope(
+      user,
+      query.locationId,
+      query.businessId,
+    );
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 10));
     const skip = (page - 1) * limit;

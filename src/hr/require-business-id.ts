@@ -23,13 +23,14 @@ export function requireBusinessId(
     throw new ForbiddenException('Business context is required');
   }
 
-  if (
-    actor.role === Role.ADMIN &&
-    actor.businessIds &&
-    actor.businessIds.length > 0 &&
-    !actor.businessIds.includes(businessId)
-  ) {
-    throw new ForbiddenException('You do not have access to this business');
+  if (actor.role === Role.ADMIN) {
+    const ownedBusinessIds = new Set(actor.businessIds ?? []);
+    if (actor.businessId) {
+      ownedBusinessIds.add(actor.businessId);
+    }
+    if (!ownedBusinessIds.has(businessId)) {
+      throw new ForbiddenException('You do not have access to this business');
+    }
   }
 
   return businessId;

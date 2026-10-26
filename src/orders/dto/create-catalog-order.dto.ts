@@ -4,10 +4,8 @@ import {
   IsArray,
   IsEnum,
   IsInt,
-  IsNotEmpty,
   IsOptional,
   IsString,
-  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -37,20 +35,27 @@ export class CatalogOrderLineItemDto {
 }
 
 export class CreateCatalogOrderDto {
+  @ApiPropertyOptional({
+    description: 'Selected business ID for Admin checkout',
+  })
+  @IsOptional()
+  @IsEntityId()
+  businessId?: string;
   @ApiPropertyOptional({ description: 'Optional shift register ID' })
   @IsOptional()
   @IsEntityId()
   shiftId?: string;
 
   @ApiPropertyOptional({
-    description: 'Store location ID (optional for cashiers)',
+    description:
+      'Store location ID for Admin checkout. Cashier checkout always uses the location in the access token and ignores this field.',
   })
   @IsOptional()
   @IsEntityId()
   locationId?: string;
 
   @ApiProperty({
-    description: 'Amount tendered by customer (in cents/paisa)',
+    description: 'Amount tendered by customer in whole BDT taka',
     minimum: 0,
     example: 3500,
   })

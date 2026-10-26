@@ -2,9 +2,12 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import {
   OrderStatus,
   OrderType,
@@ -17,16 +20,14 @@ import {
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { requireBusinessId } from '../hr/require-business-id';
-import {
-  getDhakaReportDateRange,
-  resolveDhakaDateRange,
-} from '../common/utils/timezone.util';
+import { resolveDhakaDateRange } from '../common/utils/timezone.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCatalogOrderDto } from './dto/create-catalog-order.dto';
 import { CreateCustomOrderDto } from './dto/create-custom-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { GetOrdersQueryDto } from './dto/get-orders.query';
 import { ListOrdersQueryDto } from './dto/list-orders.query';
+import { SyncOrderItemDto, SyncOrdersDto } from './dto/sync-orders.dto';
 import { createInvoiceNumber } from './invoice-number';
 import { lineTotal, sumMoney } from './money';
 import { createReceiptNumber } from './receipt-number';
@@ -49,6 +50,9 @@ export const unifiedOrderSelect = {
   id: true,
   invoiceNumber: true,
   receiptNumber: true,
+  clientOrderId: true,
+  clientReceiptNumber: true,
+  deviceId: true,
   orderType: true,
   status: true,
   locationId: true,
@@ -70,6 +74,7 @@ export const unifiedOrderSelect = {
   customerNumber: true,
   notes: true,
   paymentMethod: true,
+  occurredAt: true,
   createdAt: true,
   updatedAt: true,
   lines: { select: orderLineSelect },
@@ -88,62 +93,40 @@ export interface ListedOrder {
   customerPhone?: string | null;
   totalAmount: number;
   paymentMethod: PaymentMethod;
+  occurredAt: Date;
   createdAt: Date;
   refundStatus: RefundStatus | null;
 }
 
-function getDateRange(
-  range: 'today' | 'yesterday' | 'weekly' | 'monthly',
-  now = new Date(),
-): { gte: Date; lte?: Date } | undefined {
-  const startOfToday = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-  );
-  const endOfToday = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-    23,
-    59,
-    59,
-    999,
-  );
-
-  if (range === 'today') {
-    return { gte: startOfToday, lte: endOfToday };
-  }
-  if (range === 'yesterday') {
-    const startOfYesterday = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate() - 1,
-    );
-    const endOfYesterday = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate() - 1,
-      23,
-      59,
-      59,
-      999,
-    );
-    return { gte: startOfYesterday, lte: endOfYesterday };
-  }
-  if (range === 'weekly') {
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    return { gte: sevenDaysAgo };
-  }
-  if (range === 'monthly') {
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    return { gte: thirtyDaysAgo };
-  }
-  return undefined;
-}
-
 const INVOICE_ATTEMPTS = 3;
-const OPEN_SHIFT_REQUIRED = 'Open a shift before taking an order';
+const LOW_STOCK_THRESHOLD = 5;
+
+type OfflineOrderOptions = {
+  clientOrderId: string;
+  clientReceiptNumber?: string;
+  deviceId: string;
+  occurredAt: Date;
+  warnings: string[];
+};
+
+type CatalogOrderInput = Omit<CreateCatalogOrderDto, 'lines'> & {
+  lines: Array<
+    CreateCatalogOrderDto['lines'][number] & {
+      productName?: string;
+      variantName?: string;
+      categoryName?: string;
+    }
+  >;
+};
+
+export type SyncOrderResult = {
+  clientOrderId: string;
+  status: 'ACCEPTED' | 'DUPLICATE' | 'REJECTED';
+  orderId?: string;
+  invoiceNumber?: string;
+  warnings: string[];
+  error?: string;
+};
 
 @Injectable()
 export class OrdersService {
@@ -151,7 +134,8 @@ export class OrdersService {
 
   async createCatalogOrder(
     actor: AccessTokenPayload | string,
-    dto: CreateCatalogOrderDto,
+    dto: CatalogOrderInput,
+    options?: OfflineOrderOptions,
   ): Promise<PresentedOrder> {
     if (!dto.lines?.length) {
       throw new BadRequestException(
@@ -164,7 +148,13 @@ export class OrdersService {
         return await this.prisma.$transaction(
           async (tx) => {
             const invoiceNumber = createInvoiceNumber();
-            return this.executeCatalogOrder(tx, actor, dto, invoiceNumber);
+            return this.executeCatalogOrder(
+              tx,
+              actor,
+              dto,
+              invoiceNumber,
+              options,
+            );
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
         );
@@ -199,7 +189,8 @@ export class OrdersService {
   private async resolveOrderExecutionContext(
     tx: Prisma.TransactionClient,
     actor: AccessTokenPayload | string,
-    dto: { locationId?: string; shiftId?: string },
+    dto: { businessId?: string; locationId?: string; shiftId?: string },
+    warnings?: string[],
   ): Promise<{
     userId: string;
     businessId: string;
@@ -218,7 +209,6 @@ export class OrdersService {
       include: {
         ownedBusinesses: {
           where: { deletedAt: null },
-          take: 1,
         },
       },
     });
@@ -228,42 +218,59 @@ export class OrdersService {
     }
 
     const effectiveRole = actorRole ?? user.role;
+    const requestedBusinessId = dto.businessId;
+    const ownedBusinessIds = new Set(
+      (user.ownedBusinesses ?? []).map((business) => business.id),
+    );
+    if (!user.ownedBusinesses && actorBusinessId) {
+      ownedBusinessIds.add(actorBusinessId);
+    }
     const effectiveBusinessId =
-      actorBusinessId ?? user.businessId ?? user.ownedBusinesses?.[0]?.id;
+      effectiveRole === Role.CASHIER
+        ? (actorBusinessId ?? user.businessId)
+        : (requestedBusinessId ?? actorBusinessId ?? user.businessId);
     const effectiveLocationId = actorLocationId ?? user.locationId;
 
-    if (effectiveRole !== Role.SUPER_ADMIN && !effectiveBusinessId) {
-      throw new ForbiddenException('Create a business before creating orders');
+    if (!effectiveBusinessId) {
+      throw new BadRequestException(
+        'businessId is required for Admin checkout',
+      );
+    }
+    if (
+      effectiveRole === Role.ADMIN &&
+      !ownedBusinessIds.has(effectiveBusinessId)
+    ) {
+      throw new ForbiddenException('You do not have access to this business');
     }
 
-    let locationId = dto.locationId;
+    let locationId: string | undefined;
     if (effectiveRole === Role.CASHIER) {
-      locationId = effectiveLocationId ?? dto.locationId;
+      if (dto.businessId && dto.businessId !== effectiveBusinessId) {
+        throw new ForbiddenException(
+          'Cashiers cannot override business context',
+        );
+      }
+      locationId = effectiveLocationId ?? undefined;
       if (!locationId) {
         throw new ForbiddenException(
           'A cashier must be assigned to a location before creating orders',
         );
       }
-      if (
-        dto.locationId &&
-        effectiveLocationId &&
-        dto.locationId !== effectiveLocationId
-      ) {
-        throw new ForbiddenException(
-          'Cashiers can only create orders for their assigned location',
-        );
-      }
     } else {
+      locationId = dto.locationId;
       if (!locationId) {
-        locationId = effectiveLocationId ?? undefined;
-      }
-      if (!locationId) {
-        throw new BadRequestException('Location ID is required');
+        throw new BadRequestException(
+          'locationId is required for Admin checkout',
+        );
       }
     }
 
     const location = await tx.location.findFirst({
-      where: { id: locationId, deletedAt: null },
+      where: {
+        id: locationId,
+        businessId: effectiveBusinessId,
+        deletedAt: null,
+      },
     });
 
     if (!location) {
@@ -276,56 +283,41 @@ export class OrdersService {
 
     const businessId = location.businessId;
 
-    let shiftId = dto.shiftId ?? null;
-    if (shiftId) {
+    let shiftId: string | null = null;
+    if (dto.shiftId) {
       const shift = await tx.shiftSession.findFirst({
-        where: { id: shiftId, businessId },
+        where: { id: dto.shiftId, businessId },
         select: { id: true, status: true, locationId: true, cashierId: true },
       });
 
-      if (!shift) {
-        throw new NotFoundException('Shift not found');
+      const canAttach =
+        shift?.status === ShiftStatus.OPEN &&
+        (!shift.locationId || shift.locationId === locationId) &&
+        (effectiveRole !== Role.CASHIER ||
+          !shift.cashierId ||
+          shift.cashierId === user.id);
+      if (canAttach) {
+        shiftId = shift.id;
+      } else {
+        this.addWarning(warnings, 'SHIFT_NOT_ATTACHED');
       }
-
-      if (shift.status !== ShiftStatus.OPEN) {
-        throw new ConflictException('Shift is already closed');
-      }
-
-      if (shift.locationId && shift.locationId !== locationId) {
-        throw new ForbiddenException(
-          'Shift does not belong to the selected location',
-        );
-      }
-
-      if (
-        effectiveRole === Role.CASHIER &&
-        shift.cashierId &&
-        shift.cashierId !== user.id
-      ) {
-        throw new ForbiddenException(
-          'Cannot record orders under another cashier shift',
-        );
-      }
-    } else if (effectiveRole === Role.CASHIER || user.role === Role.CASHIER) {
+    } else {
       const activeShift = await tx.shiftSession.findFirst({
         where: {
           businessId,
-          cashierId: user.id,
+          cashierId: userId,
+          locationId,
           status: ShiftStatus.OPEN,
         },
-        select: { id: true, locationId: true },
+        orderBy: { openedAt: 'desc' },
+        select: { id: true },
       });
 
-      if (!activeShift) {
-        throw new ConflictException(OPEN_SHIFT_REQUIRED);
+      if (activeShift) {
+        shiftId = activeShift.id;
+      } else {
+        this.addWarning(warnings, 'SHIFT_NOT_ATTACHED');
       }
-
-      if (activeShift.locationId && activeShift.locationId !== locationId) {
-        throw new ForbiddenException(
-          'Active shift belongs to a different branch location. Orders cannot cross branch boundaries.',
-        );
-      }
-      shiftId = activeShift.id;
     }
 
     return {
@@ -339,14 +331,22 @@ export class OrdersService {
   async executeCatalogOrder(
     tx: Prisma.TransactionClient,
     actor: AccessTokenPayload | string,
-    dto: CreateCatalogOrderDto,
+    dto: CatalogOrderInput,
     invoiceNumber: string,
+    options?: OfflineOrderOptions,
   ): Promise<PresentedOrder> {
     const { userId, businessId, locationId, shiftId } =
-      await this.resolveOrderExecutionContext(tx, actor, dto);
+      await this.resolveOrderExecutionContext(
+        tx,
+        actor,
+        dto,
+        options?.warnings,
+      );
 
     // 1. Validate Variants & Inventory
-    const variantIds = [...new Set(dto.lines.map((l) => l.variantId))];
+    const variantIds = [
+      ...new Set(dto.lines.map((line) => line.variantId).filter(Boolean)),
+    ];
     const variants = await tx.variant.findMany({
       where: {
         id: { in: variantIds },
@@ -373,43 +373,45 @@ export class OrdersService {
 
     const variantMap = new Map(variants.map((v) => [v.id, v]));
 
+    const unavailableLines: CatalogOrderInput['lines'] = [];
+    const requiredStock = new Map<string, number>();
     for (const line of dto.lines) {
       const variant = variantMap.get(line.variantId);
       if (!variant) {
-        throw new NotFoundException(`Variant not found: ${line.variantId}`);
+        if (!options) {
+          throw new NotFoundException(`Variant not found: ${line.variantId}`);
+        }
+        unavailableLines.push(line);
+        this.addWarning(options.warnings, 'VARIANT_UNAVAILABLE');
+        continue;
       }
-    }
-
-    // Check stock for all requested variant quantities
-    const requiredStock = new Map<string, number>();
-    for (const line of dto.lines) {
       const current = requiredStock.get(line.variantId) ?? 0;
       requiredStock.set(line.variantId, current + line.quantity);
     }
 
-    for (const [vId, totalQty] of requiredStock.entries()) {
-      const variant = variantMap.get(vId)!;
-      const available =
-        (variant as any).locationStocks?.[0]?.stock ?? variant.stock;
-      if (available < totalQty) {
-        throw new BadRequestException(`Insufficient stock for variant ${vId}`);
-      }
-    }
-
     // 2. Compute Totals
     const preparedLines = dto.lines.map((line) => {
-      const variant = variantMap.get(line.variantId)!;
-      const unitPrice = variant.sellingPrice;
+      const variant = variantMap.get(line.variantId);
+      const unitPrice = options ? line.unitPrice : variant!.sellingPrice;
       const subtotal = lineTotal(unitPrice, line.quantity);
 
+      if (options && variant && unitPrice !== variant.sellingPrice) {
+        this.addWarning(options.warnings, 'OFFLINE_PRICE_MISMATCH');
+      }
+
       return {
-        variantId: variant.id,
-        productName: (variant as any).product?.name ?? 'Catalog Item',
-        variantName: variant.name ?? null,
+        variantId: variant?.id ?? null,
+        productName:
+          variant?.product.name ??
+          line.productName?.trim() ??
+          'Unavailable Catalog Item',
+        variantName: variant?.name ?? line.variantName?.trim() ?? null,
         unitPrice,
-        unitCost: variant.costPrice ?? null,
+        unitCost: variant?.costPrice ?? null,
         categoryName:
-          (variant as any).product?.category?.name ?? 'Uncategorized',
+          variant?.product.category?.name ??
+          line.categoryName?.trim() ??
+          'Uncategorized',
         quantity: line.quantity,
         subtotal,
       };
@@ -424,18 +426,29 @@ export class OrdersService {
     const totalAmount = subtotal;
     const changeDue = dto.tenderedAmount - totalAmount;
 
-    // 3. Database Transaction: stock decrement & transactions
+    // 3. Database Transaction: stock decrement & transactions. Stock may go
+    // below zero because delayed offline sales must never disappear.
+    const stockResults: Array<{
+      variantId: string;
+      previousStock: number;
+      quantity: number;
+      resultingStock: number;
+    }> = [];
     for (const [vId, totalQty] of requiredStock.entries()) {
-      const variant = variantMap.get(vId);
-      const locStock = (variant as any)?.locationStocks?.[0];
+      const variant = variantMap.get(vId)!;
+      const locStock = variant.locationStocks?.[0];
+      const previousStock = locStock?.stock ?? 0;
+      let resultingStock = previousStock - totalQty;
 
-      if (locStock && (tx as any).locationStock) {
-        await (tx as any).locationStock.update({
+      if (locStock) {
+        const updated = await tx.locationStock.update({
           where: { id: locStock.id },
           data: { stock: { decrement: totalQty } },
+          select: { stock: true },
         });
-      } else if ((tx as any).locationStock && locationId) {
-        await (tx as any).locationStock.upsert({
+        resultingStock = updated.stock;
+      } else {
+        const updated = await tx.locationStock.upsert({
           where: {
             locationId_variantId: { locationId, variantId: vId },
           },
@@ -444,9 +457,11 @@ export class OrdersService {
             businessId,
             locationId,
             variantId: vId,
-            stock: (variant?.stock ?? 0) - totalQty,
+            stock: -totalQty,
           },
+          select: { stock: true },
         });
+        resultingStock = updated.stock;
       }
 
       await tx.variant.update({
@@ -463,6 +478,13 @@ export class OrdersService {
           notes: invoiceNumber,
         },
       });
+
+      stockResults.push({
+        variantId: vId,
+        previousStock,
+        quantity: totalQty,
+        resultingStock,
+      });
     }
 
     const paymentMethod =
@@ -478,10 +500,14 @@ export class OrdersService {
       });
     }
 
-    return tx.order.create({
+    const order = await tx.order.create({
       data: {
         invoiceNumber,
         receiptNumber: invoiceNumber,
+        clientOrderId: options?.clientOrderId,
+        clientReceiptNumber: options?.clientReceiptNumber,
+        deviceId: options?.deviceId,
+        occurredAt: options?.occurredAt ?? new Date(),
         orderType: OrderType.CATALOG,
         status: OrderStatus.PAID,
         locationId,
@@ -502,11 +528,95 @@ export class OrdersService {
       },
       select: unifiedOrderSelect,
     });
+
+    for (const stock of stockResults) {
+      if (stock.resultingStock <= LOW_STOCK_THRESHOLD) {
+        this.addWarning(options?.warnings, 'LOW_STOCK_AFTER_SALE');
+        await tx.auditLog.create({
+          data: {
+            actorId: userId,
+            businessId,
+            locationId,
+            action: 'LOW_STOCK_AFTER_SALE',
+            entityType: 'VARIANT',
+            entityId: stock.variantId,
+            metadata: {
+              orderId: order.id,
+              invoiceNumber,
+              variantId: stock.variantId,
+              locationId,
+              previousStock: stock.previousStock,
+              quantitySold: stock.quantity,
+              resultingStock: stock.resultingStock,
+              deviceId: options?.deviceId ?? null,
+            },
+          },
+        });
+      }
+    }
+
+    if (options) {
+      for (const line of dto.lines) {
+        const variant = variantMap.get(line.variantId);
+        if (variant && line.unitPrice !== variant.sellingPrice) {
+          await tx.auditLog.create({
+            data: {
+              actorId: userId,
+              businessId,
+              locationId,
+              action: 'OFFLINE_PRICE_MISMATCH',
+              entityType: 'VARIANT',
+              entityId: variant.id,
+              metadata: {
+                orderId: order.id,
+                invoiceNumber,
+                variantId: variant.id,
+                locationId,
+                currentSellingPrice: variant.sellingPrice,
+                chargedUnitPrice: line.unitPrice,
+                unitPriceDifference: line.unitPrice - variant.sellingPrice,
+                quantity: line.quantity,
+                deviceId: options.deviceId,
+                occurredAt: order.occurredAt,
+                synchronizedAt: order.createdAt,
+              },
+            },
+          });
+        }
+      }
+
+      for (const line of unavailableLines) {
+        await tx.auditLog.create({
+          data: {
+            actorId: userId,
+            businessId,
+            locationId,
+            action: 'VARIANT_UNAVAILABLE',
+            entityType: 'VARIANT',
+            entityId: line.variantId,
+            metadata: {
+              orderId: order.id,
+              invoiceNumber,
+              variantId: line.variantId,
+              locationId,
+              productName: line.productName ?? null,
+              variantName: line.variantName ?? null,
+              chargedUnitPrice: line.unitPrice,
+              quantity: line.quantity,
+              deviceId: options.deviceId,
+            },
+          },
+        });
+      }
+    }
+
+    return order;
   }
 
   async createCustomOrder(
     actor: AccessTokenPayload | string,
     dto: CreateCustomOrderDto,
+    options?: OfflineOrderOptions,
   ): Promise<PresentedOrder> {
     if (!dto.lines?.length) {
       throw new BadRequestException(
@@ -519,7 +629,13 @@ export class OrdersService {
         return await this.prisma.$transaction(
           async (tx) => {
             const invoiceNumber = createInvoiceNumber();
-            return this.executeCustomOrder(tx, actor, dto, invoiceNumber);
+            return this.executeCustomOrder(
+              tx,
+              actor,
+              dto,
+              invoiceNumber,
+              options,
+            );
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
         );
@@ -556,9 +672,15 @@ export class OrdersService {
     actor: AccessTokenPayload | string,
     dto: CreateCustomOrderDto,
     invoiceNumber: string,
+    options?: OfflineOrderOptions,
   ): Promise<PresentedOrder> {
-    const { userId, businessId, locationId, shiftId } =
-      await this.resolveOrderExecutionContext(tx, actor, dto);
+    const { userId, locationId, shiftId } =
+      await this.resolveOrderExecutionContext(
+        tx,
+        actor,
+        dto,
+        options?.warnings,
+      );
 
     // 1. Bypass Catalog Lookup & Inventory:
     // Do NOT perform any database variant lookup.
@@ -611,6 +733,10 @@ export class OrdersService {
       data: {
         invoiceNumber,
         receiptNumber: invoiceNumber,
+        clientOrderId: options?.clientOrderId,
+        clientReceiptNumber: options?.clientReceiptNumber,
+        deviceId: options?.deviceId,
+        occurredAt: options?.occurredAt ?? new Date(),
         orderType: OrderType.CUSTOM,
         status: OrderStatus.PAID,
         locationId,
@@ -631,6 +757,253 @@ export class OrdersService {
       },
       select: unifiedOrderSelect,
     });
+  }
+
+  async syncOrders(
+    actor: AccessTokenPayload,
+    dto: SyncOrdersDto,
+  ): Promise<{ results: SyncOrderResult[] }> {
+    const syncActor =
+      actor.role === Role.CASHIER
+        ? actor
+        : { ...actor, businessId: dto.businessId, locationId: dto.locationId };
+    if (
+      actor.role === Role.CASHIER &&
+      ((dto.businessId && dto.businessId !== actor.businessId) ||
+        (dto.locationId && dto.locationId !== actor.locationId))
+    ) {
+      throw new ForbiddenException(
+        'Cashiers cannot override synchronization context',
+      );
+    }
+    if (!syncActor.businessId || !syncActor.locationId) {
+      throw new ForbiddenException(
+        'Offline synchronization requires business and location in the access token',
+      );
+    }
+
+    const results: SyncOrderResult[] = [];
+    for (const rawOrder of dto.orders) {
+      const clientOrderId =
+        typeof rawOrder?.clientOrderId === 'string'
+          ? rawOrder.clientOrderId
+          : '';
+      const item = plainToInstance(SyncOrderItemDto, rawOrder);
+      const validationErrors = await validate(item, {
+        whitelist: true,
+        forbidNonWhitelisted: true,
+      });
+
+      if (validationErrors.length > 0) {
+        results.push({
+          clientOrderId,
+          status: 'REJECTED',
+          warnings: [],
+          error: this.validationMessage(validationErrors),
+        });
+        continue;
+      }
+
+      const shapeError = this.validateSyncOrderShape(item);
+      if (shapeError) {
+        results.push({
+          clientOrderId: item.clientOrderId,
+          status: 'REJECTED',
+          warnings: [],
+          error: shapeError,
+        });
+        continue;
+      }
+
+      const duplicate = this.prisma.order.findFirst
+        ? await this.prisma.order.findFirst({
+            where: {
+              clientOrderId: item.clientOrderId,
+              locationId: syncActor.locationId,
+              cashier: { businessId: syncActor.businessId },
+            },
+            select: { id: true, invoiceNumber: true },
+          })
+        : await this.prisma.order.findUnique({
+            where: { clientOrderId: item.clientOrderId },
+            select: { id: true, invoiceNumber: true },
+          });
+      if (duplicate) {
+        results.push({
+          clientOrderId: item.clientOrderId,
+          status: 'DUPLICATE',
+          orderId: duplicate.id,
+          invoiceNumber: duplicate.invoiceNumber,
+          warnings: [],
+        });
+        continue;
+      }
+
+      const foreignDuplicate = (this.prisma.order as any).findFirst
+        ? await this.prisma.order.findUnique({
+            where: { clientOrderId: item.clientOrderId },
+            select: { id: true },
+          })
+        : null;
+      if (foreignDuplicate) {
+        results.push({
+          clientOrderId: item.clientOrderId,
+          status: 'REJECTED',
+          warnings: [],
+          error: 'clientOrderId is already used in another business or location',
+        });
+        continue;
+      }
+
+      const warnings: string[] = [];
+      const options: OfflineOrderOptions = {
+        clientOrderId: item.clientOrderId,
+        clientReceiptNumber: item.clientReceiptNumber,
+        deviceId: dto.deviceId,
+        occurredAt: new Date(item.occurredAt),
+        warnings,
+      };
+
+      try {
+        const common = {
+          shiftId: item.shiftId,
+          tenderedAmount: item.tenderedAmount,
+          paymentMethod: item.paymentMethod,
+          customerName: item.customerName,
+          customerPhone: item.customerPhone,
+          notes: item.notes,
+        };
+        const order =
+          item.orderType === OrderType.CATALOG
+            ? await this.createCatalogOrder(
+                syncActor,
+                {
+                  ...common,
+                  lines: item.lines.map((line) => ({
+                    variantId: line.variantId!,
+                    productName: line.productName,
+                    variantName: line.variantName,
+                    categoryName: line.categoryName,
+                    quantity: line.quantity,
+                    unitPrice: line.unitPrice,
+                  })),
+                },
+                options,
+              )
+            : await this.createCustomOrder(
+                syncActor,
+                {
+                  ...common,
+                  lines: item.lines.map((line) => ({
+                    productName: line.productName!,
+                    variantName: line.variantName,
+                    quantity: line.quantity,
+                    unitPrice: line.unitPrice,
+                  })),
+                },
+                options,
+              );
+
+        results.push({
+          clientOrderId: item.clientOrderId,
+          status: 'ACCEPTED',
+          orderId: order.id,
+          invoiceNumber: order.invoiceNumber,
+          warnings,
+        });
+      } catch (error) {
+        if (isUniqueConstraintError(error)) {
+          const existing = (this.prisma.order as any).findFirst
+            ? await this.prisma.order.findFirst({
+                where: {
+                  clientOrderId: item.clientOrderId,
+                  locationId: syncActor.locationId,
+                  cashier: { businessId: syncActor.businessId },
+                },
+                select: { id: true, invoiceNumber: true },
+              })
+            : await this.prisma.order.findUnique({
+                where: { clientOrderId: item.clientOrderId },
+                select: { id: true, invoiceNumber: true },
+              });
+          if (existing) {
+            results.push({
+              clientOrderId: item.clientOrderId,
+              status: 'DUPLICATE',
+              orderId: existing.id,
+              invoiceNumber: existing.invoiceNumber,
+              warnings: [],
+            });
+            continue;
+          }
+        }
+
+        results.push({
+          clientOrderId: item.clientOrderId,
+          status: 'REJECTED',
+          warnings,
+          error: this.syncErrorMessage(error),
+        });
+      }
+    }
+
+    return { results };
+  }
+
+  private validateSyncOrderShape(item: SyncOrderItemDto): string | null {
+    if (new Date(item.occurredAt).getTime() > Date.now()) {
+      return 'occurredAt must not be in the future';
+    }
+    if (item.orderType === OrderType.CATALOG) {
+      return item.lines.some((line) => !line.variantId)
+        ? 'Every catalog line requires variantId'
+        : null;
+    }
+    if (item.orderType === OrderType.CUSTOM) {
+      return item.lines.some((line) => !line.productName?.trim())
+        ? 'Every custom line requires productName'
+        : null;
+    }
+    return 'Unsupported orderType';
+  }
+
+  private validationMessage(
+    errors: Awaited<ReturnType<typeof validate>>,
+  ): string {
+    const messages: string[] = [];
+    const visit = (error: (typeof errors)[number], prefix = '') => {
+      const field = prefix ? `${prefix}.${error.property}` : error.property;
+      if (error.constraints) {
+        messages.push(
+          ...Object.values(error.constraints).map((m) => `${field}: ${m}`),
+        );
+      }
+      error.children?.forEach((child) => visit(child, field));
+    };
+    errors.forEach((error) => visit(error));
+    return messages.join('; ') || 'Malformed order';
+  }
+
+  private addWarning(warnings: string[] | undefined, warning: string): void {
+    if (warnings && !warnings.includes(warning)) {
+      warnings.push(warning);
+    }
+  }
+
+  private syncErrorMessage(error: unknown): string {
+    if (error instanceof HttpException) {
+      const response = error.getResponse();
+      if (typeof response === 'string') {
+        return response;
+      }
+      if (response && typeof response === 'object' && 'message' in response) {
+        const message = response.message;
+        return Array.isArray(message) ? message.join('; ') : String(message);
+      }
+    }
+    return error instanceof Error
+      ? error.message
+      : 'Order synchronization failed';
   }
 
   async getOrders(
@@ -658,7 +1031,10 @@ export class OrdersService {
     const where: Prisma.OrderWhereInput = {};
 
     if (actor && actor.role !== Role.SUPER_ADMIN) {
-      let businessId = query.businessId || actor.businessId;
+      let businessId =
+        actor.role === Role.CASHIER
+          ? actor.businessId
+          : query.businessId || actor.businessId;
       if (!businessId && actor.role === Role.ADMIN) {
         const user = await this.prisma.user?.findFirst({
           where: { id: actor.sub, deletedAt: null },
@@ -730,7 +1106,7 @@ export class OrdersService {
         year: query.year,
       });
       if (dateRange) {
-        where.createdAt = {
+        where.occurredAt = {
           gte: dateRange.gte,
           ...(dateRange.lte ? { lte: dateRange.lte } : {}),
         };
@@ -760,7 +1136,7 @@ export class OrdersService {
       this.prisma.order.findMany({
         where,
         select: unifiedOrderSelect,
-        orderBy: { createdAt: 'desc' },
+        orderBy: { occurredAt: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -861,27 +1237,17 @@ export class OrdersService {
       throw new BadRequestException('Location ID is required');
     }
 
-    let shiftId: string | null = null;
-    if (actor.role === Role.CASHIER) {
-      const shift = await tx.shiftSession.findFirst({
-        where: {
-          businessId,
-          cashierId: actor.sub,
-          status: ShiftStatus.OPEN,
-        },
-        select: { id: true, locationId: true },
-      });
-
-      if (!shift) {
-        throw new ConflictException(OPEN_SHIFT_REQUIRED);
-      }
-      if (shift.locationId && shift.locationId !== locationId) {
-        throw new ForbiddenException(
-          'Active shift belongs to a different branch location. Orders cannot cross branch boundaries.',
-        );
-      }
-      shiftId = shift.id;
-    }
+    const shift = await tx.shiftSession.findFirst({
+      where: {
+        businessId,
+        cashierId: actor.sub,
+        status: ShiftStatus.OPEN,
+        locationId,
+      },
+      orderBy: { openedAt: 'desc' },
+      select: { id: true },
+    });
+    const shiftId = shift?.id ?? null;
 
     const variantStockMap = new Map<string, number>();
     for (const item of dto.items) {
@@ -894,13 +1260,14 @@ export class OrdersService {
       }
     }
 
-    for (const [vId, totalQty] of variantStockMap.entries()) {
+    for (const vId of variantStockMap.keys()) {
       const variant = await tx.variant.findFirst({
         where: {
           id: vId,
           businessId,
           deletedAt: null,
-          product: { businessId, deletedAt: null },
+          isActive: true,
+          product: { businessId, deletedAt: null, isActive: true },
         },
         select: {
           id: true,
@@ -915,14 +1282,6 @@ export class OrdersService {
       if (!variant) {
         throw new NotFoundException('Variant not found');
       }
-
-      const available =
-        (variant as any).locationStocks?.[0]?.stock ?? variant.stock;
-      if (available !== undefined && available < totalQty) {
-        throw new BadRequestException(
-          `Insufficient stock for variant ${variant.id}`,
-        );
-      }
     }
 
     const lines = [];
@@ -936,7 +1295,8 @@ export class OrdersService {
             id: variantId,
             businessId,
             deletedAt: null,
-            product: { businessId, deletedAt: null },
+            isActive: true,
+            product: { businessId, deletedAt: null, isActive: true },
           },
           include: {
             product: {
@@ -989,16 +1349,45 @@ export class OrdersService {
       });
     }
 
+    const stockResults: Array<{
+      variantId: string;
+      previousStock: number;
+      quantity: number;
+      resultingStock: number;
+    }> = [];
     for (const [vId, totalQty] of variantStockMap.entries()) {
+      const variant = await tx.variant.findFirst({
+        where: { id: vId, businessId, deletedAt: null },
+        select: { stock: true },
+      });
+      if (!variant) {
+        throw new NotFoundException('Variant not found');
+      }
+      let previousStock = 0;
+      let resultingStock = -totalQty;
       if ((tx as any).locationStock && locationId) {
         const locStock = await (tx as any).locationStock.findUnique({
           where: { locationId_variantId: { locationId, variantId: vId } },
         });
         if (locStock) {
-          await (tx as any).locationStock.update({
+          previousStock = locStock.stock;
+          const updated = await (tx as any).locationStock.update({
             where: { id: locStock.id },
             data: { stock: { decrement: totalQty } },
+            select: { stock: true },
           });
+          resultingStock = updated.stock;
+        } else {
+          const created = await (tx as any).locationStock.create({
+            data: {
+              businessId,
+              locationId,
+              variantId: vId,
+              stock: -totalQty,
+            },
+            select: { stock: true },
+          });
+          resultingStock = created.stock;
         }
       }
 
@@ -1020,6 +1409,12 @@ export class OrdersService {
           notes: receiptNumber,
         },
       });
+      stockResults.push({
+        variantId: vId,
+        previousStock,
+        quantity: totalQty,
+        resultingStock,
+      });
     }
 
     const totalAmount = sumMoney(lines.map((line) => line.subtotal));
@@ -1033,7 +1428,7 @@ export class OrdersService {
       });
     }
 
-    return tx.order.create({
+    const order = await tx.order.create({
       data: {
         invoiceNumber: receiptNumber,
         receiptNumber,
@@ -1066,6 +1461,33 @@ export class OrdersService {
       },
       select: unifiedOrderSelect,
     });
+
+    for (const stock of stockResults) {
+      if (stock.resultingStock <= LOW_STOCK_THRESHOLD) {
+        await tx.auditLog.create({
+          data: {
+            actorId: actor.sub,
+            businessId,
+            locationId,
+            action: 'LOW_STOCK_AFTER_SALE',
+            entityType: 'VARIANT',
+            entityId: stock.variantId,
+            metadata: {
+              orderId: order.id,
+              invoiceNumber: receiptNumber,
+              variantId: stock.variantId,
+              locationId,
+              previousStock: stock.previousStock,
+              quantitySold: stock.quantity,
+              resultingStock: stock.resultingStock,
+              deviceId: null,
+            },
+          },
+        });
+      }
+    }
+
+    return order;
   }
 
   async list(
@@ -1095,6 +1517,7 @@ export class OrdersService {
           totalAmount: true,
           paymentMethod: true,
           createdAt: true,
+          occurredAt: true,
           lines: {
             select: {
               quantity: true,
@@ -1102,7 +1525,7 @@ export class OrdersService {
             },
           },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { occurredAt: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -1119,6 +1542,7 @@ export class OrdersService {
         customerPhone: order.customerPhone,
         totalAmount: order.totalAmount,
         paymentMethod: order.paymentMethod,
+        occurredAt: order.occurredAt,
         createdAt: order.createdAt,
         refundStatus: refundStatus(
           order.lines.map((item) => ({

@@ -9,6 +9,7 @@ import { Prisma, Role, StockTransactionType } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { PrismaService } from '../prisma/prisma.service';
+import { requireBusinessId } from '../hr/require-business-id';
 import { CreateVariantDto } from './dto/create-variant.dto';
 import { ListVariantsQueryDto } from './dto/list-variants.query';
 import {
@@ -107,35 +108,11 @@ export function presentVariant(
 export class VariantService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async resolveBusinessId(
+  private resolveBusinessId(
     actor: AccessTokenPayload,
     requestedBusinessId?: string,
-  ): Promise<string> {
-    if (actor.role === Role.CASHIER) {
-      if (!actor.businessId) {
-        throw new ForbiddenException('Business context is required');
-      }
-      return actor.businessId;
-    }
-    let businessId = requestedBusinessId?.trim() || actor.businessId;
-    if (!businessId && actor.role === Role.ADMIN) {
-      const user = await this.prisma.user.findFirst({
-        where: { id: actor.sub, deletedAt: null },
-        select: {
-          businessId: true,
-          ownedBusinesses: {
-            where: { deletedAt: null },
-            select: { id: true },
-            take: 1,
-          },
-        },
-      });
-      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
-    }
-    if (!businessId) {
-      throw new ForbiddenException('Create a business before continuing');
-    }
-    return businessId;
+  ): string {
+    return requireBusinessId(actor, requestedBusinessId);
   }
 
   async create(
@@ -144,6 +121,9 @@ export class VariantService {
   ): Promise<PresentedVariant> {
     const businessId = await this.resolveBusinessId(admin, dto.businessId);
     await this.assertProduct(businessId, dto.productId);
+    if (dto.locationId?.trim()) {
+      await this.assertLocation(businessId, dto.locationId.trim());
+    }
     const requestedSku = dto.sku?.trim();
     const barcode = dto.barcode?.trim() || null;
 
@@ -314,6 +294,10 @@ export class VariantService {
     );
     const current = await this.findVariant(businessId, variantId);
 
+    if (dto.locationId?.trim()) {
+      await this.assertLocation(businessId, dto.locationId.trim());
+    }
+
     if (dto.productId) {
       await this.assertProduct(businessId, dto.productId);
     }
@@ -419,9 +403,13 @@ export class VariantService {
     );
 
     let targetLocationId =
-      actor.role === Role.CASHIER
-        ? actor.locationId || dto.locationId
-        : dto.locationId;
+      actor.role === Role.CASHIER ? actor.locationId : dto.locationId;
+
+    if (actor.role === Role.CASHIER && !targetLocationId) {
+      throw new ForbiddenException(
+        'Cashier account must be assigned to an active business and branch location',
+      );
+    }
 
     if (!targetLocationId && this.prisma.location?.findFirst) {
       const loc = await this.prisma.location.findFirst({
@@ -432,6 +420,10 @@ export class VariantService {
       if (loc) {
         targetLocationId = loc.id;
       }
+    }
+
+    if (targetLocationId) {
+      await this.assertLocation(businessId, targetLocationId);
     }
 
     const current = await this.prisma.variant.findFirst({
@@ -454,7 +446,11 @@ export class VariantService {
     }
 
     const existingLocStock = current.locationStocks?.[0]?.stock;
-    const currentBaseline = existingLocStock ?? current.stock;
+    // A branch without a LocationStock row starts at zero. Using the global
+    // aggregate here would duplicate stock from other branches.
+    const currentBaseline = targetLocationId
+      ? (existingLocStock ?? 0)
+      : current.stock;
 
     let operation = dto.operation ?? StockOperation.DEDUCT;
     let changeQty = 0;
@@ -564,7 +560,7 @@ export class VariantService {
           quantity: txQty,
           notes:
             dto.notes?.trim() ||
-            `Custom sale stock adjustment (${operation} ${txQty})`,
+            `Inventory stock adjustment (${operation} ${txQty})`,
         },
       });
     }
@@ -642,6 +638,19 @@ export class VariantService {
 
     if (!product) {
       throw new NotFoundException('Product not found');
+    }
+  }
+
+  private async assertLocation(
+    businessId: string,
+    locationId: string,
+  ): Promise<void> {
+    const location = await this.prisma.location.findFirst({
+      where: { id: locationId, businessId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!location) {
+      throw new NotFoundException('Branch location not found');
     }
   }
 

@@ -5,6 +5,13 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 
+export function isAllowedCorsOrigin(
+  origin: string | undefined,
+  allowedOrigins: string[],
+): boolean {
+  return !origin || allowedOrigins.includes(origin);
+}
+
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
@@ -22,17 +29,10 @@ async function bootstrap(): Promise<void> {
       origin: string | undefined,
       callback: (err: Error | null, allow?: boolean | string) => void,
     ) => {
-      if (!origin) {
-        return callback(null, true);
+      if (isAllowedCorsOrigin(origin, allowedOrigins)) {
+        return callback(null, origin ?? true);
       }
-      if (
-        allowedOrigins.includes(origin) ||
-        origin.startsWith('http://localhost:') ||
-        origin.startsWith('http://127.0.0.1:')
-      ) {
-        return callback(null, origin);
-      }
-      return callback(null, origin);
+      return callback(new Error('Origin is not allowed by CORS'));
     },
     credentials: true,
   });

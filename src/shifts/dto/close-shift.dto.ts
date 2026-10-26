@@ -5,7 +5,7 @@ import { IsInt, IsOptional, IsString, Min } from 'class-validator';
 export class CloseShiftDto {
   @ApiProperty({
     description:
-      'Actual physical cash counted in drawer (in BDT / smallest currency units)',
+      'Actual physical cash counted in drawer in whole BDT',
     example: 8500,
     minimum: 0,
   })

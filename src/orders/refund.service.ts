@@ -14,7 +14,6 @@ import {
   StockTransactionType,
 } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
-import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateRefundDto } from './dto/create-refund.dto';
 import { lineTotal, sumMoney } from './money';
@@ -50,14 +49,14 @@ export class RefundService {
   constructor(private readonly prisma: PrismaService) {}
 
   async create(
-    admin: AccessTokenPayload,
+    actor: AccessTokenPayload,
     orderId: string,
     dto: CreateRefundDto,
   ): Promise<PresentedRefund> {
-    let businessId = admin.businessId;
-    if (!businessId && admin.role === Role.ADMIN) {
+    let businessId = actor.businessId;
+    if (!businessId) {
       const user = await this.prisma.user.findFirst({
-        where: { id: admin.sub, deletedAt: null },
+        where: { id: actor.sub, deletedAt: null },
         select: {
           businessId: true,
           ownedBusinesses: {
@@ -70,12 +69,25 @@ export class RefundService {
       businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
     }
     if (!businessId) {
-      throw new ForbiddenException('Create a business before continuing');
+      throw new ForbiddenException('Business context is required');
+    }
+    if (actor.role === Role.CASHIER && !actor.locationId) {
+      throw new ForbiddenException(
+        'Cashier account must be assigned to an active business and branch location',
+      );
     }
 
     try {
       return await this.prisma.$transaction(
-        (tx) => this.createWithin(tx, admin.sub, businessId, orderId, dto),
+        (tx) =>
+          this.createWithin(
+            tx,
+            actor.sub,
+            businessId,
+            orderId,
+            dto,
+            actor.role === Role.CASHIER ? actor.locationId : undefined,
+          ),
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
     } catch (error) {
@@ -92,13 +104,18 @@ export class RefundService {
 
   async createWithin(
     tx: Prisma.TransactionClient,
-    adminId: string,
+    actorId: string,
     businessId: string,
     orderId: string,
     dto: CreateRefundDto,
+    cashierLocationId?: string | null,
   ): Promise<PresentedRefund> {
     const order = await tx.order.findFirst({
-      where: { id: orderId, cashier: { businessId } },
+      where: {
+        id: orderId,
+        cashier: { businessId },
+        ...(cashierLocationId ? { locationId: cashierLocationId } : {}),
+      },
       select: {
         id: true,
         locationId: true,
@@ -238,6 +255,7 @@ export class RefundService {
         where: {
           locationId: order.locationId,
           businessId,
+          cashierId: actorId,
           status: ShiftStatus.OPEN,
         },
         select: { id: true },
@@ -250,7 +268,7 @@ export class RefundService {
     const refund = await tx.refund.create({
       data: {
         orderId: order.id,
-        processedById: adminId,
+        processedById: actorId,
         totalRefund: sumMoney(requested.map((line) => line.refundAmount)),
         reason: dto.reason?.trim() || null,
         payoutShiftId: payoutShiftId ?? null,
@@ -286,10 +304,11 @@ export class RefundService {
       });
     }
 
-    if (order.shiftId && order.paymentMethod === PaymentMethod.COD) {
+    const effectiveShiftId = payoutShiftId ?? order.shiftId;
+    if (effectiveShiftId && order.paymentMethod === PaymentMethod.COD) {
       if (tx.shiftSession?.updateMany) {
         await tx.shiftSession.updateMany({
-          where: { id: order.shiftId, status: ShiftStatus.OPEN },
+          where: { id: effectiveShiftId, status: ShiftStatus.OPEN },
           data: { cashCollected: { decrement: refund.totalRefund } },
         });
       }

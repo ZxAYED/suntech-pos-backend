@@ -10,6 +10,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
+import { createHash } from 'crypto';
 import { Observable, catchError, from, mergeMap, of, throwError } from 'rxjs';
 import { IDEMPOTENT_KEY } from '../decorators/idempotent.decorator';
 import { isUniqueConstraintError } from '../prisma/is-unique-constraint.error';
@@ -69,7 +70,8 @@ export class IdempotencyInterceptor implements NestInterceptor {
 
     const scopeId = this.resolveScopeId(request);
     const path = request.path;
-    const replay = await this.resolveReplay(scopeId, key, path);
+    const requestHash = this.requestHash(request);
+    const replay = await this.resolveReplay(scopeId, key, path, requestHash);
 
     if (replay) {
       response.status(replay.statusCode);
@@ -109,12 +111,36 @@ export class IdempotencyInterceptor implements NestInterceptor {
     return client || request.ip || request.socket.remoteAddress || 'anonymous';
   }
 
+  private requestHash(request: RequestWithUser): string {
+    const canonical = JSON.stringify({
+      method: request.method.toUpperCase(),
+      path: request.path,
+      body: this.sortValue(request.body ?? null),
+      businessId: request.user?.businessId ?? null,
+      locationId: request.user?.locationId ?? null,
+    });
+    return createHash('sha256').update(canonical).digest('hex');
+  }
+
+  private sortValue(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map((item) => this.sortValue(item));
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, item]) => [key, this.sortValue(item)]),
+      );
+    }
+    return value;
+  }
+
   private async resolveReplay(
     scopeId: string,
     key: string,
     path: string,
+    requestHash: string,
   ): Promise<StoredResponse | null> {
-    const existing = await this.readReplay(scopeId, key, path);
+    const existing = await this.readReplay(scopeId, key, path, requestHash);
 
     if (existing) {
       return existing;
@@ -126,6 +152,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
           key,
           scopeId,
           path,
+          requestHash,
           statusCode: PENDING_STATUS,
           responseBody: { pending: true },
           expiresAt: new Date(Date.now() + IDEMPOTENCY_TTL_MS),
@@ -137,7 +164,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
         throw error;
       }
 
-      const replay = await this.readReplay(scopeId, key, path);
+      const replay = await this.readReplay(scopeId, key, path, requestHash);
 
       if (!replay) {
         throw new ConflictException(
@@ -153,6 +180,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
     scopeId: string,
     key: string,
     path: string,
+    requestHash: string,
   ): Promise<StoredResponse | null> {
     const existing = await this.prisma.idempotencyRecord.findUnique({
       where: { scopeId_key: { scopeId, key } },
@@ -172,6 +200,11 @@ export class IdempotencyInterceptor implements NestInterceptor {
     if (existing.path !== path) {
       throw new ConflictException(
         'Idempotency key was already used for a different request',
+      );
+    }
+    if (existing.requestHash && existing.requestHash !== requestHash) {
+      throw new ConflictException(
+        'Idempotency-Key was reused with a different request body',
       );
     }
 

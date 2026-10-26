@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 export interface AuditLogEntry {
   actorId: string;
   businessId?: string | null;
+  locationId?: string | null;
   action: string;
   entityType: string;
   entityId: string;
@@ -21,12 +22,15 @@ export class AuditService {
   async log(entry: AuditLogEntry): Promise<void> {
     try {
       // Security sanitize: Ensure no sensitive secrets or tokens are ever recorded in metadata
-      const sanitizedMeta = entry.metadata ? this.sanitize(entry.metadata) : Prisma.JsonNull;
+      const sanitizedMeta = entry.metadata
+        ? this.sanitize(entry.metadata)
+        : Prisma.JsonNull;
 
       await this.prisma.auditLog.create({
         data: {
           actorId: entry.actorId,
           businessId: entry.businessId ?? null,
+          locationId: entry.locationId ?? null,
           action: entry.action,
           entityType: entry.entityType,
           entityId: entry.entityId,
@@ -41,7 +45,15 @@ export class AuditService {
   }
 
   private sanitize(meta: Record<string, unknown>): Record<string, unknown> {
-    const sensitiveKeys = ['password', 'token', 'secret', 'otp', 'refreshToken', 'accessToken', 'hash'];
+    const sensitiveKeys = [
+      'password',
+      'token',
+      'secret',
+      'otp',
+      'refreshToken',
+      'accessToken',
+      'hash',
+    ];
     const clean: Record<string, unknown> = {};
 
     for (const [key, val] of Object.entries(meta)) {

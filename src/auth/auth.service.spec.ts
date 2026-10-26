@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  ForbiddenException,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { AccountStatus, Role } from '@prisma/client';
 import { EmailTemplateService } from '../identity/email-template.service';
 import { MailService } from '../mail/mail.service';
@@ -25,10 +21,11 @@ jest.mock('bcrypt', () => ({
 
 describe('AuthService', () => {
   const create = jest.fn();
+  const update = jest.fn();
   const findFirst = jest.fn();
   const locationFindFirst = jest.fn();
   const prisma = {
-    user: { create, findFirst },
+    user: { create, update, findFirst },
     location: { findFirst: locationFindFirst },
   } as unknown as PrismaService;
   const signAsync = jest.fn().mockResolvedValue('token');
@@ -42,6 +39,9 @@ describe('AuthService', () => {
     renderPasswordReset: jest.fn().mockReturnValue('<html></html>'),
   } as unknown as EmailTemplateService;
   const configService = {
+    get: jest.fn((key: string) =>
+      key === 'JWT_RESET_SECRET' ? 'reset-secret' : undefined,
+    ),
     getOrThrow: jest.fn((key: string) => {
       const values: Record<string, string> = {
         JWT_REFRESH_SECRET: 'refresh-secret',
@@ -65,6 +65,7 @@ describe('AuthService', () => {
 
   beforeEach(() => {
     create.mockReset();
+    update.mockReset();
     findFirst.mockReset();
     locationFindFirst.mockReset();
     signAsync.mockClear();
@@ -121,7 +122,7 @@ describe('AuthService', () => {
         email: 'cashier@shop.test',
         password: 'password123',
       }),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    ).rejects.toBeInstanceOf(BadRequestException);
 
     await expect(
       service.login({
@@ -180,7 +181,9 @@ describe('AuthService', () => {
         id: 'loc-1',
         businessId: 'biz-1',
         deletedAt: null,
+        business: { deletedAt: null },
       },
+      select: { id: true },
     });
 
     expect(signAsync).toHaveBeenCalledWith(
@@ -287,9 +290,73 @@ describe('AuthService', () => {
 
     await expect(
       service.forgotPassword({
-        loginType: LoginType.CASHIER,
+        loginType: LoginType.BUSINESS_USER,
         identifier: 'CSH-001',
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('does not reveal whether a password-recovery account exists', async () => {
+    findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.forgotPassword({
+        loginType: LoginType.ADMIN,
+        identifier: 'missing@example.com',
+      }),
+    ).resolves.toEqual({ accepted: true });
+  });
+
+  it('returns a short-lived password reset token after OTP verification', async () => {
+    findFirst.mockResolvedValue({
+      id: 'admin-1',
+      email: 'admin@example.com',
+      role: Role.ADMIN,
+      resetOtpHash: 'hashed-otp',
+      otpExpiry: new Date(Date.now() + 60_000),
+    });
+
+    await expect(
+      service.verifyOtp({
+        loginType: LoginType.ADMIN,
+        identifier: 'admin@example.com',
+        otp: '123456',
+      }),
+    ).resolves.toEqual({ resetToken: 'token' });
+    expect(signAsync).toHaveBeenCalledWith(
+      { sub: 'admin-1', purpose: 'password-reset' },
+      { secret: 'reset-secret', expiresIn: '10m' },
+    );
+  });
+
+  it('resets a password only through a valid reset token', async () => {
+    verifyAsync.mockResolvedValue({
+      sub: 'admin-1',
+      purpose: 'password-reset',
+    });
+    findFirst.mockResolvedValue({
+      id: 'admin-1',
+      resetOtpHash: 'hashed-otp',
+      otpExpiry: new Date(Date.now() + 60_000),
+    });
+    update.mockResolvedValue({ id: 'admin-1' });
+
+    await expect(
+      service.resetPassword({
+        resetToken: 'valid-reset-token',
+        newPassword: 'NewPassword123',
+      }),
+    ).resolves.toEqual({ updated: true });
+    expect(verifyAsync).toHaveBeenCalledWith('valid-reset-token', {
+      secret: 'reset-secret',
+    });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: 'admin-1' },
+      data: {
+        password: 'hashed-password',
+        resetOtpHash: null,
+        otpExpiry: null,
+      },
+    });
   });
 });

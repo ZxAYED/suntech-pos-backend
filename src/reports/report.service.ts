@@ -3,13 +3,12 @@ import { OrderStatus, PaymentMethod, Prisma, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { resolveLocationScope } from '../common/utils/location-scope';
 import {
+  getDhakaDateParts,
   getDhakaMonthBounds,
-  getDhakaReportDateRange,
   getDhakaStartOfDay,
   resolveDhakaDateRange,
   ReportDateFilterOptions,
 } from '../common/utils/timezone.util';
-import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { AnalyticsQueryDto } from './dto/analytics.query';
 import { DashboardQueryDto } from './dto/dashboard.query';
@@ -36,6 +35,7 @@ export interface RecentTicket {
   paymentMethod: string;
   totalAmount: number;
   status: string;
+  occurredAt: Date;
   createdAt: Date;
 }
 
@@ -167,11 +167,7 @@ export class ReportService {
     }
 
     if (actor.role === Role.ADMIN) {
-      return this.adminDashboard(
-        scope.businessId,
-        scope.locationId,
-        query,
-      );
+      return this.adminDashboard(scope.businessId, scope.locationId, query);
     }
 
     throw new ForbiddenException(
@@ -221,7 +217,7 @@ export class ReportService {
 
     if (query.range || query.month || query.week || query.year) {
       const dateRange = getReportDateRange(query);
-      where.createdAt = {
+      where.occurredAt = {
         gte: dateRange.gte,
         ...(dateRange.lte ? { lte: dateRange.lte } : {}),
       };
@@ -260,12 +256,13 @@ export class ReportService {
               changeDue: true,
               paymentMethod: true,
               createdAt: true,
+              occurredAt: true,
               cashier: {
                 select: { id: true, fullName: true, publicId: true },
               },
               lines: { select: transactionLineSelect },
             },
-            orderBy: { createdAt: 'desc' },
+            orderBy: { occurredAt: 'desc' },
             skip: (page - 1) * limit,
             take: limit,
           })
@@ -286,6 +283,7 @@ export class ReportService {
       tenderedAmount: order.tenderedAmount,
       changeDue: order.changeDue,
       paymentMethod: order.paymentMethod,
+      occurredAt: order.occurredAt,
       createdAt: order.createdAt,
       cashier: order.cashier,
       lines: order.lines,
@@ -319,9 +317,9 @@ export class ReportService {
 
     const [myDailyRevenue, myMonthlyRevenue, myDailyUnitsSold] =
       await Promise.all([
-        this.netRevenue({ ...mine, createdAt: today }),
-        this.netRevenue({ ...mine, createdAt: month }),
-        this.unitsSold({ ...mine, createdAt: today }),
+        this.netRevenue({ ...mine, occurredAt: today }),
+        this.netRevenue({ ...mine, occurredAt: month }),
+        this.unitsSold({ ...mine, occurredAt: today }),
       ]);
 
     return { myDailyRevenue, myDailyUnitsSold, myMonthlyRevenue };
@@ -359,8 +357,8 @@ export class ReportService {
       periodMetrics,
       recentTickets,
     ] = await Promise.all([
-      this.netRevenue({ ...business, createdAt: today }),
-      this.netRevenue({ ...business, createdAt: rolling }),
+      this.netRevenue({ ...business, occurredAt: today }),
+      this.netRevenue({ ...business, occurredAt: rolling }),
       this.leaderboard(businessId, month, locationId),
       this.computePeriodMetrics(businessId, locationId, periodFilter),
       this.fetchRecentTickets(businessId, locationId),
@@ -412,14 +410,14 @@ export class ReportService {
         ? { range: queryOrRange }
         : (queryOrRange ?? { range: 'monthly' });
     const dateRange = getReportDateRange(options);
-    const createdAt = {
+    const occurredAt = {
       gte: dateRange.gte,
       ...(dateRange.lte ? { lte: dateRange.lte } : {}),
     };
     const periodOrderWhere: Prisma.OrderWhereInput = {
       cashier: { businessId },
       ...(locationId ? { locationId } : {}),
-      createdAt,
+      occurredAt,
     };
 
     const lineDelegate =
@@ -624,6 +622,7 @@ export class ReportService {
         totalAmount: true,
         status: true,
         createdAt: true,
+        occurredAt: true,
         lines: {
           select: {
             productName: true,
@@ -632,7 +631,7 @@ export class ReportService {
           },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { occurredAt: 'desc' },
       take: 5,
     });
 
@@ -656,6 +655,7 @@ export class ReportService {
         paymentMethod: order.paymentMethod,
         totalAmount: order.totalAmount,
         status: order.status,
+        occurredAt: order.occurredAt,
         createdAt: order.createdAt,
       };
     });
@@ -663,11 +663,11 @@ export class ReportService {
 
   private async leaderboard(
     businessId: string,
-    createdAt: { gte: Date; lt: Date },
+    occurredAt: { gte: Date; lt: Date },
     locationId?: string,
   ): Promise<StaffLeaderboardEntry[]> {
     const where: Prisma.OrderWhereInput = {
-      createdAt,
+      occurredAt,
       cashier: {
         businessId,
         role: Role.CASHIER,
@@ -838,7 +838,10 @@ function utcDay(now = new Date()): { gte: Date; lt: Date } {
 }
 
 function utcMonth(now = new Date()): { gte: Date; lt: Date } {
-  const { start, end } = getDhakaMonthBounds();
+  const { year, month } = getDhakaDateParts(now);
+  const { start, end } = getDhakaMonthBounds(
+    `${year}-${String(month).padStart(2, '0')}`,
+  );
 
   return {
     gte: start,

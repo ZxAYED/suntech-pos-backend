@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { AdvanceStatus, PayrollStatus, Prisma, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
+import { getDhakaDateParts } from '../common/utils/timezone.util';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { PrismaService } from '../prisma/prisma.service';
 import { DisbursePayrollDto } from './dto/disburse-payroll.dto';
@@ -139,8 +140,9 @@ export class PayrollService {
   async summary(admin: AccessTokenPayload, query: PayrollHistoryQueryDto) {
     const businessId = requireBusinessId(admin, query.businessId);
     const now = new Date();
-    const month = query.month ?? now.getMonth() + 1;
-    const year = query.year ?? now.getFullYear();
+    const currentPeriod = getDhakaDateParts(now);
+    const month = query.month ?? currentPeriod.month;
+    const year = query.year ?? currentPeriod.year;
 
     const [staffList, existingRecords] = await Promise.all([
       this.prisma.user.findMany({
@@ -345,8 +347,9 @@ export class PayrollService {
   ): Promise<PresentedPayroll[]> {
     const businessId = requireBusinessId(admin, query.businessId);
     const now = new Date();
-    const month = query.month ?? now.getMonth() + 1;
-    const year = query.year ?? now.getFullYear();
+    const currentPeriod = getDhakaDateParts(now);
+    const month = query.month ?? currentPeriod.month;
+    const year = query.year ?? currentPeriod.year;
 
     return this.prisma.payrollRecord.findMany({
       where: {

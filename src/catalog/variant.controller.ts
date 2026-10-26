@@ -161,14 +161,15 @@ export class VariantController {
 
   @Patch('stock')
   @ApiOperation({
-    summary: '[ADMIN | CASHIER] Update variant stock',
+    summary: '[ADMIN] Update variant stock',
     description:
-      'Deducts, adds, or sets variant stock for custom sale or inventory update. Takes variantId from payload body.',
+      'Deducts, adds, or sets inventory stock. Custom sales do not use this endpoint. Takes variantId from payload body.',
   })
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Variant stock updated' })
@@ -181,7 +182,7 @@ export class VariantController {
     description: 'Unauthorized - invalid or missing JWT',
   })
   @ApiResponse({ status: 404, description: 'Variant not found' })
-  @Roles(Role.ADMIN, Role.CASHIER)
+  @Roles(Role.ADMIN)
   @ResponseMessage('Variant stock updated')
   updateStockBatch(
     @CurrentUser() actor: AccessTokenPayload,
@@ -203,15 +204,16 @@ export class VariantController {
 
   @Patch(':id/stock')
   @ApiOperation({
-    summary: '[ADMIN | CASHIER] Update variant stock by ID',
+    summary: '[ADMIN] Update variant stock by ID',
     description:
-      'Deducts, adds, or sets stock for a specific variant (custom sale, restock, manual adjustment). Accessible by Cashier and Admin.',
+      'Deducts, adds, or sets stock for a specific variant as an inventory adjustment.',
   })
   @ApiParam({ name: 'id', description: 'Variant UUID' })
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Variant stock updated' })
@@ -224,7 +226,7 @@ export class VariantController {
     description: 'Unauthorized - invalid or missing JWT',
   })
   @ApiResponse({ status: 404, description: 'Variant not found' })
-  @Roles(Role.ADMIN, Role.CASHIER)
+  @Roles(Role.ADMIN)
   @ResponseMessage('Variant stock updated')
   updateStock(
     @CurrentUser() actor: AccessTokenPayload,
@@ -243,15 +245,15 @@ export class VariantController {
   @Post(':id/stock')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: '[ADMIN | CASHIER] Update variant stock by ID (POST alias)',
-    description:
-      'POST alias for stock deduction / addition needed for custom sales or clients preferring POST.',
+    summary: '[ADMIN] Update variant stock by ID (POST alias)',
+    description: 'POST alias for an inventory stock adjustment.',
   })
   @ApiParam({ name: 'id', description: 'Variant UUID' })
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Variant stock updated' })
@@ -264,7 +266,7 @@ export class VariantController {
     description: 'Unauthorized - invalid or missing JWT',
   })
   @ApiResponse({ status: 404, description: 'Variant not found' })
-  @Roles(Role.ADMIN, Role.CASHIER)
+  @Roles(Role.ADMIN)
   @ResponseMessage('Variant stock updated')
   updateStockPost(
     @CurrentUser() actor: AccessTokenPayload,
@@ -290,7 +292,8 @@ export class VariantController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Variant updated' })
@@ -321,7 +324,8 @@ export class VariantController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Variant removed' })

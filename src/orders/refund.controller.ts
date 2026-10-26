@@ -29,15 +29,15 @@ import { RefundService } from './refund.service';
 @ApiBearerAuth()
 @Controller('orders')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.ADMIN)
+@Roles(Role.ADMIN, Role.CASHIER)
 export class RefundController {
   constructor(private readonly refunds: RefundService) {}
 
   @Post(':id/refunds')
   @ApiOperation({
-    summary: '[ADMIN] Process partial or full order refund',
+    summary: '[ADMIN, CASHIER] Process partial or full order refund',
     description:
-      'Refunds specified order items. If order becomes fully refunded, marks Order.status = REFUNDED. For COD orders associated with a shift, decrements drawer cashCollected. Requires ADMIN role.',
+      'Refunds specified order items. If order becomes fully refunded, marks Order.status = REFUNDED. For COD orders associated with a shift, decrements drawer cashCollected. Accessible by both ADMIN and CASHIER.',
   })
   @ApiParam({ name: 'id', description: 'Order ID' })
   @ApiResponse({ status: 201, description: 'Refund completed' })
@@ -45,7 +45,10 @@ export class RefundController {
     status: 401,
     description: 'Unauthorized - invalid or missing JWT',
   })
-  @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires ADMIN or CASHIER role',
+  })
   @ApiResponse({
     status: 400,
     description: 'Invalid refund quantities or order not refundable',
@@ -55,10 +58,10 @@ export class RefundController {
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Refund completed')
   create(
-    @CurrentUser() admin: AccessTokenPayload,
+    @CurrentUser() actor: AccessTokenPayload,
     @Param('id') id: string,
     @Body() dto: CreateRefundDto,
   ) {
-    return this.refunds.create(admin, id, dto);
+    return this.refunds.create(actor, id, dto);
   }
 }

@@ -5,7 +5,7 @@ import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export class OpenShiftDto {
   @ApiProperty({
-    description: 'Opening cash float amount (in cents/paisa)',
+    description: 'Opening cash float amount in whole BDT',
     example: 5000,
     minimum: 0,
   })
@@ -23,7 +23,8 @@ export class OpenShiftDto {
   autoClosePrevious?: boolean;
 
   @ApiPropertyOptional({
-    description: 'Location ID (required for Admin, implicit for Cashier)',
+    description:
+      'Location ID for Admin. Cashier shifts always use the location in the access token and ignore this field.',
   })
   @IsOptional()
   @IsEntityId()
