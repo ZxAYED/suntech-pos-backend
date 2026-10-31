@@ -81,6 +81,12 @@ export interface DashboardRecentTicket {
   totalAmount: number;
   status: string;
   occurredAt: string;
+  locationId?: string | null;
+  locationName?: string | null;
+  branchName?: string | null;
+  businessName?: string | null;
+  cashierName?: string | null;
+  cashierPublicId?: string | null;
 }
 
 export interface DashboardRecentActivityResponse {
@@ -440,6 +446,26 @@ export class AdminDashboardService {
         totalAmount: true,
         status: true,
         occurredAt: true,
+        locationId: true,
+        location: {
+          select: {
+            id: true,
+            name: true,
+            business: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+          },
+        },
+        cashier: {
+          select: {
+            id: true,
+            fullName: true,
+            publicId: true,
+          },
+        },
         lines: {
           select: {
             productName: true,
@@ -471,6 +497,12 @@ export class AdminDashboardService {
               .join(', ')
           : 'Custom Sale';
 
+      const locationName = (o as any).location?.name ?? null;
+      const branchName = locationName;
+      const businessName = (o as any).location?.business?.name ?? null;
+      const cashierName = (o as any).cashier?.fullName ?? null;
+      const cashierPublicId = (o as any).cashier?.publicId ?? null;
+
       return {
         id: o.id,
         invoiceNumber: o.invoiceNumber,
@@ -482,6 +514,12 @@ export class AdminDashboardService {
         totalAmount: o.totalAmount,
         status: o.status,
         occurredAt: o.occurredAt.toISOString(),
+        locationId: o.locationId,
+        locationName,
+        branchName,
+        businessName,
+        cashierName,
+        cashierPublicId,
       };
     });
 

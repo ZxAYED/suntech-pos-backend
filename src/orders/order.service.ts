@@ -64,12 +64,27 @@ export const unifiedOrderSelect = {
   orderType: true,
   status: true,
   locationId: true,
+  location: {
+    select: {
+      id: true,
+      name: true,
+      address: true,
+      businessId: true,
+      business: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+  },
   shiftId: true,
   cashierId: true,
   cashier: {
     select: {
       id: true,
       fullName: true,
+      publicId: true,
       role: true,
     },
   },
@@ -106,6 +121,13 @@ export type PresentedOrder = Omit<
 > & {
   lines: PresentedOrderLine[];
   totalRefundedAmount?: number;
+  type?: OrderType;
+  businessId?: string | null;
+  businessName?: string | null;
+  locationName?: string | null;
+  branchName?: string | null;
+  cashierName?: string | null;
+  cashierPublicId?: string | null;
 };
 
 export function presentOrderLine(line: RawOrderLine): PresentedOrderLine {
@@ -135,8 +157,30 @@ export function presentOrder(order: any): PresentedOrder {
     (sum: number, line: PresentedOrderLine) => sum + (line.refundedAmount ?? 0),
     0,
   );
+
+  const locationName = order.location?.name ?? order.locationName ?? null;
+  const branchName = locationName;
+  const businessId =
+    order.location?.businessId ??
+    order.businessId ??
+    order.location?.business?.id ??
+    null;
+  const businessName =
+    order.location?.business?.name ?? order.businessName ?? null;
+  const cashierName =
+    order.cashier?.fullName ?? order.cashierName ?? null;
+  const cashierPublicId =
+    order.cashier?.publicId ?? order.cashierPublicId ?? null;
+
   return {
     ...order,
+    type: order.orderType ?? order.type,
+    businessId,
+    businessName,
+    locationName,
+    branchName,
+    cashierName,
+    cashierPublicId,
     lines,
     totalRefundedAmount,
   };

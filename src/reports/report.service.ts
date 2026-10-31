@@ -248,6 +248,21 @@ export class ReportService {
               receiptNumber: true,
               orderType: true,
               status: true,
+              locationId: true,
+              location: {
+                select: {
+                  id: true,
+                  name: true,
+                  address: true,
+                  businessId: true,
+                  business: {
+                    select: {
+                      id: true,
+                      name: true,
+                    },
+                  },
+                },
+              },
               customerName: true,
               customerPhone: true,
               customerNumber: true,
@@ -270,35 +285,54 @@ export class ReportService {
         : Promise.resolve([]),
     ]);
 
-    const items = (orders || []).map((order) => ({
-      id: order.id,
-      invoiceNumber: order.invoiceNumber,
-      receiptNumber: order.invoiceNumber ?? order.receiptNumber,
-      orderType: order.orderType,
-      status: order.status,
-      customerName: order.customerName,
-      customerPhone: order.customerPhone,
-      customerNumber: order.customerNumber ?? order.customerPhone,
-      totalAmount: order.totalAmount,
-      subtotal: order.subtotal,
-      tenderedAmount: order.tenderedAmount,
-      changeDue: order.changeDue,
-      paymentMethod: order.paymentMethod,
-      occurredAt: order.occurredAt,
-      createdAt: order.createdAt,
-      cashier: order.cashier,
-      lines: order.lines,
-      items: (order.lines || []).map((line) => ({
-        id: line.id,
-        variantId: line.variantId,
-        customItemName: line.variantId
-          ? null
-          : (line.variantName ?? line.productName),
-        price: line.unitPrice,
-        quantity: line.quantity,
-        subtotal: line.subtotal,
-      })),
-    }));
+    const items = (orders || []).map((order) => {
+      const locationName = (order as any).location?.name ?? null;
+      const branchName = locationName;
+      const businessId = (order as any).location?.businessId ?? null;
+      const businessName = (order as any).location?.business?.name ?? null;
+      const cashierName = (order as any).cashier?.fullName ?? null;
+      const cashierPublicId = (order as any).cashier?.publicId ?? null;
+
+      return {
+        id: order.id,
+        invoiceNumber: order.invoiceNumber,
+        receiptNumber: order.invoiceNumber ?? order.receiptNumber,
+        orderType: order.orderType,
+        type: order.orderType,
+        status: order.status,
+        locationId: order.locationId,
+        locationName,
+        branchName,
+        businessId,
+        businessName,
+        cashierId: (order as any).cashier?.id ?? null,
+        cashierName,
+        cashierPublicId,
+        cashier: order.cashier,
+        location: (order as any).location,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        customerNumber: order.customerNumber ?? order.customerPhone,
+        totalAmount: order.totalAmount,
+        subtotal: order.subtotal,
+        tenderedAmount: order.tenderedAmount,
+        changeDue: order.changeDue,
+        paymentMethod: order.paymentMethod,
+        occurredAt: order.occurredAt,
+        createdAt: order.createdAt,
+        lines: order.lines,
+        items: (order.lines || []).map((line) => ({
+          id: line.id,
+          variantId: line.variantId,
+          customItemName: line.variantId
+            ? null
+            : (line.variantName ?? line.productName),
+          price: line.unitPrice,
+          quantity: line.quantity,
+          subtotal: line.subtotal,
+        })),
+      };
+    });
 
     return { items, page, limit, total };
   }
