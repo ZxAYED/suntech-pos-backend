@@ -127,10 +127,8 @@ export function presentOrderLine(line: RawOrderLine): PresentedOrderLine {
   };
 }
 
-export function presentOrder(
-  order: any,
-): PresentedOrder {
-  if (!order) return order as unknown as PresentedOrder;
+export function presentOrder(order: any): PresentedOrder {
+  if (!order) return order;
   const rawLines = Array.isArray(order.lines) ? order.lines : [];
   const lines = rawLines.map(presentOrderLine);
   const totalRefundedAmount = lines.reduce(
@@ -922,7 +920,8 @@ export class OrdersService {
           clientOrderId: item.clientOrderId,
           status: 'REJECTED',
           warnings: [],
-          error: 'clientOrderId is already used in another business or location',
+          error:
+            'clientOrderId is already used in another business or location',
         });
         continue;
       }
@@ -1169,7 +1168,9 @@ export class OrdersService {
             );
           }
         } else {
-          throw new ForbiddenException('You do not have access to this business');
+          throw new ForbiddenException(
+            'You do not have access to this business',
+          );
         }
       }
 

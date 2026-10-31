@@ -177,7 +177,8 @@ export class AdvanceController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Advance removed' })

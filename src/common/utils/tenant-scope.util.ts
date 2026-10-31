@@ -59,7 +59,8 @@ export async function resolveTenantContext(
       },
     });
 
-    businessId = adminUser?.businessId || adminUser?.ownedBusinesses?.[0]?.id || undefined;
+    businessId =
+      adminUser?.businessId || adminUser?.ownedBusinesses?.[0]?.id || undefined;
   }
 
   if (!businessId) {

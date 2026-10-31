@@ -365,7 +365,8 @@ export class TenantController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Target business UUID (optional for Admin; defaults to active business)',
+    description:
+      'Target business UUID (optional for Admin; defaults to active business)',
   })
   @ApiBody({
     schema: {
@@ -409,7 +410,8 @@ export class TenantController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Target business UUID (optional for Admin; defaults to owned business)',
+    description:
+      'Target business UUID (optional for Admin; defaults to owned business)',
   })
   @ApiResponse({ status: 200, description: 'Business logo removed' })
   @ApiResponse({
@@ -423,10 +425,6 @@ export class TenantController {
     @CurrentUser() admin: AccessTokenPayload,
     @Query('businessId') queryBusinessId?: string,
   ) {
-    return this.tenantService.clearBusinessProfileImage(
-      admin,
-      queryBusinessId,
-    );
+    return this.tenantService.clearBusinessProfileImage(admin, queryBusinessId);
   }
 }
-

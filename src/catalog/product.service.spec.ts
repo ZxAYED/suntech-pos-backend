@@ -309,7 +309,9 @@ describe('ProductService', () => {
       },
     ]);
 
-    const res = await service.list(cashier, { businessId: 'biz-attempt-bypass' });
+    const res = await service.list(cashier, {
+      businessId: 'biz-attempt-bypass',
+    });
 
     const findCall = (
       productFindMany.mock.calls as unknown as Array<
@@ -348,7 +350,12 @@ describe('ProductService', () => {
     expect(variantUpdate).toHaveBeenCalledTimes(2);
     const var1Update = (
       variantUpdate.mock.calls as unknown as Array<
-        [{ where: { id: string }; data: { sku: string; barcode: string | null } }]
+        [
+          {
+            where: { id: string };
+            data: { sku: string; barcode: string | null };
+          },
+        ]
       >
     )[0][0];
     expect(var1Update.where.id).toBe('var-1');
@@ -357,7 +364,12 @@ describe('ProductService', () => {
 
     const var2Update = (
       variantUpdate.mock.calls as unknown as Array<
-        [{ where: { id: string }; data: { sku: string; barcode: string | null } }]
+        [
+          {
+            where: { id: string };
+            data: { sku: string; barcode: string | null };
+          },
+        ]
       >
     )[1][0];
     expect(var2Update.where.id).toBe('var-2');
@@ -400,4 +412,3 @@ describe('ProductService', () => {
     });
   });
 });
-

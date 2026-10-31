@@ -203,10 +203,7 @@ describe('TenantService', () => {
 
     it('throws BadRequestException if businessId is empty', async () => {
       await expect(
-        service.selectBusiness(
-          { sub: 'admin-1', role: Role.ADMIN },
-          '',
-        ),
+        service.selectBusiness({ sub: 'admin-1', role: Role.ADMIN }, ''),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
@@ -267,11 +264,9 @@ describe('TenantService', () => {
         .mockResolvedValueOnce({ id: 'biz-2', name: 'Duplicate' });
 
       await expect(
-        service.updateBusiness(
-          { sub: 'admin-1', role: Role.ADMIN },
-          'biz-1',
-          { name: 'Duplicate' },
-        ),
+        service.updateBusiness({ sub: 'admin-1', role: Role.ADMIN }, 'biz-1', {
+          name: 'Duplicate',
+        }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
   });
@@ -282,10 +277,7 @@ describe('TenantService', () => {
       locationCount.mockResolvedValue(1);
 
       await expect(
-        service.deleteBusiness(
-          { sub: 'admin-1', role: Role.ADMIN },
-          'biz-1',
-        ),
+        service.deleteBusiness({ sub: 'admin-1', role: Role.ADMIN }, 'biz-1'),
       ).rejects.toThrow(
         'Cannot delete business with existing branch locations. Please delete all branches first.',
       );
@@ -300,15 +292,16 @@ describe('TenantService', () => {
       });
 
       await expect(
-        service.deleteBusiness(
-          { sub: 'admin-1', role: Role.ADMIN },
-          'biz-1',
-        ),
+        service.deleteBusiness({ sub: 'admin-1', role: Role.ADMIN }, 'biz-1'),
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
     it('soft deletes business when no branches exist', async () => {
-      businessFindFirst.mockResolvedValue({ id: 'biz-1', name: 'Biz 1', ownerId: 'admin-1' });
+      businessFindFirst.mockResolvedValue({
+        id: 'biz-1',
+        name: 'Biz 1',
+        ownerId: 'admin-1',
+      });
       locationCount.mockResolvedValue(0);
       shiftSessionFindFirst.mockResolvedValue(null);
 

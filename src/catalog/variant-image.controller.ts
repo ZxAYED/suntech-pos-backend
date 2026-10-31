@@ -53,7 +53,8 @@ export class VariantImageController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiConsumes('multipart/form-data')
@@ -84,7 +85,12 @@ export class VariantImageController {
     @UploadedFile() file: UploadedImage,
     @Query('businessId') businessId?: string,
   ) {
-    return this.variantImages.setProfileImage(admin, variantId, file, businessId);
+    return this.variantImages.setProfileImage(
+      admin,
+      variantId,
+      file,
+      businessId,
+    );
   }
 
   @Delete(':variantId/profile-image')
@@ -97,7 +103,8 @@ export class VariantImageController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Variant image removed' })
@@ -126,7 +133,8 @@ export class VariantImageController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Variant images loaded' })
@@ -154,7 +162,8 @@ export class VariantImageController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiConsumes('multipart/form-data')
@@ -195,11 +204,15 @@ export class VariantImageController {
       'Deletes image from media storage and detaches from variant. Accepts image ID or storage publicId/key. Requires ADMIN role.',
   })
   @ApiParam({ name: 'variantId', description: 'Variant ID' })
-  @ApiParam({ name: 'imageId', description: 'Image ID or storage key/publicId' })
+  @ApiParam({
+    name: 'imageId',
+    description: 'Image ID or storage key/publicId',
+  })
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Variant image removed' })
@@ -216,6 +229,11 @@ export class VariantImageController {
     @Param('imageId') imageId: string,
     @Query('businessId') businessId?: string,
   ) {
-    return this.variantImages.removeImage(admin, variantId, imageId, businessId);
+    return this.variantImages.removeImage(
+      admin,
+      variantId,
+      imageId,
+      businessId,
+    );
   }
 }

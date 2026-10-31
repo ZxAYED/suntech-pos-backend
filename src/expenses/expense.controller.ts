@@ -45,7 +45,10 @@ export class ExpenseController {
   })
   @ApiResponse({ status: 201, description: 'Expense recorded successfully' })
   @ApiResponse({ status: 400, description: 'Validation failed' })
-  @ApiResponse({ status: 403, description: 'Forbidden / Unauthorized business' })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden / Unauthorized business',
+  })
   @ResponseMessage('Expense recorded successfully')
   create(
     @CurrentUser() admin: AccessTokenPayload,
@@ -140,7 +143,10 @@ export class ExpenseController {
     required: false,
     description: 'Optional business ID for multi-business admins',
   })
-  @ApiResponse({ status: 200, description: 'Expense summary retrieved successfully' })
+  @ApiResponse({
+    status: 200,
+    description: 'Expense summary retrieved successfully',
+  })
   @ResponseMessage('Expense summary retrieved successfully')
   summary(
     @CurrentUser() admin: AccessTokenPayload,

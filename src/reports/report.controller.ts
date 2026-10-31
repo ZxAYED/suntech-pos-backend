@@ -34,15 +34,27 @@ export class ReportController {
   @ApiQuery({
     name: 'range',
     required: false,
-    enum: ['today', 'yesterday', 'weekly', 'monthly', 'daily', 'quarterly', 'week', 'month', 'year'],
+    enum: [
+      'today',
+      'yesterday',
+      'weekly',
+      'monthly',
+      'daily',
+      'quarterly',
+      'week',
+      'month',
+      'year',
+    ],
     enumName: 'DashboardDateRange',
-    description: 'Filter dashboard metrics by period range ("month" defaults to current month)',
+    description:
+      'Filter dashboard metrics by period range ("month" defaults to current month)',
   })
   @ApiQuery({
     name: 'month',
     required: false,
     type: String,
-    description: 'Filter by month name or code (e.g. october, oct, 10, current)',
+    description:
+      'Filter by month name or code (e.g. october, oct, 10, current)',
     example: 'october',
   })
   @ApiQuery({
@@ -96,14 +108,16 @@ export class ReportController {
     required: false,
     enum: ['daily', 'weekly', 'monthly', 'quarterly', 'week', 'month', 'year'],
     enumName: 'AnalyticsDateRange',
-    description: 'Filter period analytics by range (default monthly, "month" = current month)',
+    description:
+      'Filter period analytics by range (default monthly, "month" = current month)',
     example: 'monthly',
   })
   @ApiQuery({
     name: 'month',
     required: false,
     type: String,
-    description: 'Filter by month name or code (e.g. october, oct, 10, current)',
+    description:
+      'Filter by month name or code (e.g. october, oct, 10, current)',
     example: 'october',
   })
   @ApiQuery({
@@ -184,7 +198,17 @@ export class ReportController {
   @ApiQuery({
     name: 'range',
     required: false,
-    enum: ['today', 'yesterday', 'daily', 'weekly', 'monthly', 'quarterly', 'week', 'month', 'year'],
+    enum: [
+      'today',
+      'yesterday',
+      'daily',
+      'weekly',
+      'monthly',
+      'quarterly',
+      'week',
+      'month',
+      'year',
+    ],
     enumName: 'TransactionLogDateRange',
     description: 'Date range filter ("month" = current month)',
   })
@@ -192,7 +216,8 @@ export class ReportController {
     name: 'month',
     required: false,
     type: String,
-    description: 'Filter by month name or code (e.g. october, oct, 10, current)',
+    description:
+      'Filter by month name or code (e.g. october, oct, 10, current)',
     example: 'october',
   })
   @ApiQuery({

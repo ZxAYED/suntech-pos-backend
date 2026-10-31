@@ -589,12 +589,10 @@ describe('OrdersService', () => {
 
     it('returns independent accepted, duplicate, and rejected results', async () => {
       shiftFindFirst.mockResolvedValue(null);
-      orderFindUnique
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({
-          id: 'order-existing',
-          invoiceNumber: 'INV-OLD',
-        });
+      orderFindUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
+        id: 'order-existing',
+        invoiceNumber: 'INV-OLD',
+      });
 
       const result = await service.syncOrders(actor, {
         deviceId: 'counter-01',

@@ -73,4 +73,3 @@ export class CreateProductDto {
   @IsOptional()
   attachments?: CustomAttributeDto[] | Record<string, any>;
 }
-

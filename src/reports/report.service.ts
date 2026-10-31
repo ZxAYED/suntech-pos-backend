@@ -512,8 +512,7 @@ export class ReportService {
     };
     for (const group of paymentGroups || []) {
       if (group.paymentMethod && group.paymentMethod in byMethod) {
-        byMethod[group.paymentMethod as PaymentMethod] =
-          group._sum.totalAmount ?? 0;
+        byMethod[group.paymentMethod] = group._sum.totalAmount ?? 0;
       }
     }
     for (const ref of periodRefunds || []) {
@@ -534,8 +533,8 @@ export class ReportService {
     const categoryRevenueMap = new Map<string, number>();
 
     for (const line of lines || []) {
-      const refundItems = Array.isArray((line as any).refundItems)
-        ? (line as any).refundItems
+      const refundItems = Array.isArray(line.refundItems)
+        ? line.refundItems
         : [];
       const refundedQty = refundItems.reduce(
         (sum: number, r: any) => sum + (r.quantity ?? 0),
@@ -553,9 +552,7 @@ export class ReportService {
       }
 
       const unitCost =
-        (line as any).unitCost != null
-          ? (line as any).unitCost
-          : line.variant?.costPrice;
+        line.unitCost != null ? line.unitCost : line.variant?.costPrice;
 
       if (line.variantId && unitCost != null) {
         catalogRevenue += subtotal;
@@ -563,7 +560,7 @@ export class ReportService {
       }
 
       const rawCategoryName =
-        (line as any).categoryName ||
+        line.categoryName ||
         line.variant?.product?.category?.name ||
         'Uncategorized';
       const categoryName = rawCategoryName.replace(/__del_\d+$/, '');

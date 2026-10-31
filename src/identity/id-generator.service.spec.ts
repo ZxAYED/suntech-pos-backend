@@ -132,9 +132,9 @@ describe('IdGeneratorService', () => {
     it('stops after three unique collisions', async () => {
       updateMany.mockRejectedValue(uniqueError);
 
-      await expect(service.assignUniquePublicId('user-1')).rejects.toBeInstanceOf(
-        InternalServerErrorException,
-      );
+      await expect(
+        service.assignUniquePublicId('user-1'),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
       expect(updateMany).toHaveBeenCalledTimes(3);
     });
 

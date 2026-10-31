@@ -114,19 +114,22 @@ export class ProductController {
 
   @Get('summary')
   @ApiOperation({
-    summary: '[ADMIN, CASHIER, SUPER_ADMIN] Get products and inventory summary metrics',
+    summary:
+      '[ADMIN, CASHIER, SUPER_ADMIN] Get products and inventory summary metrics',
     description:
       'Returns aggregate counts: products count, units in branch, low stock SKUs count, and total inventory value.',
   })
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID (extracted from token for Admin/Cashier)',
+    description:
+      'Optional business UUID (extracted from token for Admin/Cashier)',
   })
   @ApiQuery({
     name: 'locationId',
     required: false,
-    description: 'Optional branch location UUID to scope inventory to a specific branch',
+    description:
+      'Optional branch location UUID to scope inventory to a specific branch',
   })
   @ApiResponse({ status: 200, description: 'Products summary loaded' })
   @Roles(Role.ADMIN, Role.CASHIER, Role.SUPER_ADMIN)
@@ -141,7 +144,8 @@ export class ProductController {
 
   @Get('metrics')
   @ApiOperation({
-    summary: '[ADMIN, CASHIER, SUPER_ADMIN] Get products and inventory summary metrics (alias of /summary)',
+    summary:
+      '[ADMIN, CASHIER, SUPER_ADMIN] Get products and inventory summary metrics (alias of /summary)',
   })
   @Roles(Role.ADMIN, Role.CASHIER, Role.SUPER_ADMIN)
   @ResponseMessage('Products summary loaded')
@@ -155,7 +159,8 @@ export class ProductController {
 
   @Get('stats')
   @ApiOperation({
-    summary: '[ADMIN, CASHIER, SUPER_ADMIN] Get products and inventory summary metrics (alias of /summary)',
+    summary:
+      '[ADMIN, CASHIER, SUPER_ADMIN] Get products and inventory summary metrics (alias of /summary)',
   })
   @Roles(Role.ADMIN, Role.CASHIER, Role.SUPER_ADMIN)
   @ResponseMessage('Products summary loaded')
@@ -214,7 +219,8 @@ export class ProductController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Product updated' })
@@ -247,7 +253,8 @@ export class ProductController {
   @ApiQuery({
     name: 'businessId',
     required: false,
-    description: 'Optional business UUID for Admin to target a specific business',
+    description:
+      'Optional business UUID for Admin to target a specific business',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiResponse({ status: 200, description: 'Product deleted' })

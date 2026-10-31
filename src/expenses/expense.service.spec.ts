@@ -47,7 +47,12 @@ describe('ExpenseService', () => {
         createdAt: new Date(),
         updatedAt: new Date(),
         location: null,
-        user: { id: 'admin-1', fullName: 'Admin', email: 'admin@suntech.com', role: Role.ADMIN },
+        user: {
+          id: 'admin-1',
+          fullName: 'Admin',
+          email: 'admin@suntech.com',
+          role: Role.ADMIN,
+        },
       };
 
       expenseCreate.mockResolvedValue(mockCreated);

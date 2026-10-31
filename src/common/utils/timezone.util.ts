@@ -49,7 +49,8 @@ export function getDhakaStartOfDay(date = new Date()): Date {
  */
 export function getDhakaEndOfDay(date = new Date()): Date {
   const { year, month, day } = getDhakaDateParts(date);
-  const utcMs = Date.UTC(year, month - 1, day, 23, 59, 59, 999) - DHAKA_OFFSET_MS;
+  const utcMs =
+    Date.UTC(year, month - 1, day, 23, 59, 59, 999) - DHAKA_OFFSET_MS;
   return new Date(utcMs);
 }
 
@@ -65,7 +66,9 @@ export function getDhakaReportDateRange(
 
   switch (range?.toLowerCase()) {
     case 'yesterday': {
-      const yesterdayRef = new Date(startOfToday.getTime() - 12 * 60 * 60 * 1000);
+      const yesterdayRef = new Date(
+        startOfToday.getTime() - 12 * 60 * 60 * 1000,
+      );
       return {
         gte: getDhakaStartOfDay(yesterdayRef),
         lte: getDhakaEndOfDay(yesterdayRef),
@@ -76,16 +79,22 @@ export function getDhakaReportDateRange(
       return { gte: startOfToday, lte: endOfToday };
     }
     case 'weekly': {
-      const sevenDaysAgo = new Date(startOfToday.getTime() - 6 * 24 * 60 * 60 * 1000);
+      const sevenDaysAgo = new Date(
+        startOfToday.getTime() - 6 * 24 * 60 * 60 * 1000,
+      );
       return { gte: sevenDaysAgo, lte: endOfToday };
     }
     case 'quarterly': {
-      const ninetyDaysAgo = new Date(startOfToday.getTime() - 89 * 24 * 60 * 60 * 1000);
+      const ninetyDaysAgo = new Date(
+        startOfToday.getTime() - 89 * 24 * 60 * 60 * 1000,
+      );
       return { gte: ninetyDaysAgo, lte: endOfToday };
     }
     case 'monthly':
     default: {
-      const thirtyDaysAgo = new Date(startOfToday.getTime() - 29 * 24 * 60 * 60 * 1000);
+      const thirtyDaysAgo = new Date(
+        startOfToday.getTime() - 29 * 24 * 60 * 60 * 1000,
+      );
       return { gte: thirtyDaysAgo, lte: endOfToday };
     }
   }
@@ -188,10 +197,8 @@ export interface ReportDateFilterOptions {
  * Returns UTC boundaries for a specific calendar month in Asia/Dhaka.
  */
 export function getDhakaMonthRange(year: number, month: number): DateRange {
-  const startUtcMs =
-    Date.UTC(year, month - 1, 1, 0, 0, 0, 0) - DHAKA_OFFSET_MS;
-  const endUtcMs =
-    Date.UTC(year, month, 1, 0, 0, 0, 0) - 1 - DHAKA_OFFSET_MS;
+  const startUtcMs = Date.UTC(year, month - 1, 1, 0, 0, 0, 0) - DHAKA_OFFSET_MS;
+  const endUtcMs = Date.UTC(year, month, 1, 0, 0, 0, 0) - 1 - DHAKA_OFFSET_MS;
   return {
     gte: new Date(startUtcMs),
     lte: new Date(endUtcMs),
@@ -263,7 +270,11 @@ export function resolveDhakaDateRange(
   const { range, month: rawMonth, year: rawYear, week: rawWeek } = options;
 
   let year: number = getDhakaDateParts(now).year;
-  if (rawYear !== undefined && rawYear !== null && String(rawYear).trim() !== '') {
+  if (
+    rawYear !== undefined &&
+    rawYear !== null &&
+    String(rawYear).trim() !== ''
+  ) {
     const parsedYear = Number(rawYear);
     if (!isNaN(parsedYear) && parsedYear >= 2000 && parsedYear <= 2100) {
       year = parsedYear;
