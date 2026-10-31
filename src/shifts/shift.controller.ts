@@ -73,6 +73,12 @@ export class ShiftController {
     description:
       'Retrieves current open shift details with real-time drawer metrics and advance subtractions. Accessible by CASHIER and ADMIN.',
   })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description:
+      'Branch location UUID to check for active shift (Admin lookup). Cashier defaults to assigned location.',
+  })
   @ApiResponse({ status: 200, description: 'Active shift loaded' })
   @ApiResponse({
     status: 401,
@@ -85,8 +91,11 @@ export class ShiftController {
   @ApiResponse({ status: 404, description: 'No active open shift found' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @ResponseMessage('Active shift loaded')
-  getActive(@CurrentUser() actor: AccessTokenPayload) {
-    return this.shifts.getActive(actor);
+  getActive(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.shifts.getActive(actor, locationId);
   }
 
   @Post('close')

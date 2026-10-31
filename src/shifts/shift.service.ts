@@ -218,15 +218,35 @@ export class ShiftService {
     }
   }
 
-  async getActive(cashier: AccessTokenPayload): Promise<ActiveShiftDetails> {
-    const businessId = requireBusinessId(cashier);
+  async getActive(
+    actor: AccessTokenPayload,
+    locationId?: string,
+  ): Promise<ActiveShiftDetails> {
+    const effectiveLocationId =
+      locationId?.trim() ||
+      (actor.role === Role.CASHIER ? actor.locationId : undefined);
+
+    let businessId: string;
+    if (effectiveLocationId) {
+      const loc = this.prisma.location?.findUnique
+        ? await this.prisma.location.findUnique({
+            where: { id: effectiveLocationId },
+            select: { id: true, businessId: true },
+          })
+        : null;
+      businessId = loc?.businessId ?? requireBusinessId(actor);
+    } else {
+      businessId = requireBusinessId(actor);
+    }
 
     const shift = await this.prisma.shiftSession.findFirst({
       where: {
         businessId,
-        cashierId: cashier.sub,
+        ...(effectiveLocationId ? { locationId: effectiveLocationId } : {}),
+        ...(actor.role === Role.CASHIER ? { cashierId: actor.sub } : {}),
         status: ShiftStatus.OPEN,
       },
+      orderBy: { openedAt: 'desc' },
       select: shiftSelect,
     });
 
