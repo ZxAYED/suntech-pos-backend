@@ -15,10 +15,15 @@ describe('VariantService', () => {
   const variantCreate = jest.fn();
   const variantUpdate = jest.fn();
   const variantUpdateMany = jest.fn();
+  const variantDelete = jest.fn();
   const locationStockUpsert = jest.fn();
   const locationStockAggregate = jest.fn();
+  const locationStockDeleteMany = jest.fn();
+  const variantImageDeleteMany = jest.fn();
   const stockTransactionCreate = jest.fn();
+  const stockTransactionDeleteMany = jest.fn();
   const locationFindFirst = jest.fn();
+  const orderLineCount = jest.fn();
 
   const prisma = {
     product: { findFirst: productFindFirst },
@@ -28,16 +33,25 @@ describe('VariantService', () => {
       create: variantCreate,
       update: variantUpdate,
       updateMany: variantUpdateMany,
+      delete: variantDelete,
     },
     locationStock: {
       upsert: locationStockUpsert,
       aggregate: locationStockAggregate,
+      deleteMany: locationStockDeleteMany,
+    },
+    variantImage: {
+      deleteMany: variantImageDeleteMany,
     },
     stockTransaction: {
       create: stockTransactionCreate,
+      deleteMany: stockTransactionDeleteMany,
     },
     location: {
       findFirst: locationFindFirst,
+    },
+    orderLine: {
+      count: orderLineCount,
     },
   } as unknown as PrismaService;
 
@@ -51,15 +65,21 @@ describe('VariantService', () => {
     variantCreate.mockReset();
     variantUpdate.mockReset();
     variantUpdateMany.mockReset();
+    variantDelete.mockReset();
     locationStockUpsert.mockReset();
     locationStockAggregate.mockReset();
+    locationStockDeleteMany.mockReset();
+    variantImageDeleteMany.mockReset();
     stockTransactionCreate.mockReset();
+    stockTransactionDeleteMany.mockReset();
     locationFindFirst.mockReset();
+    orderLineCount.mockReset();
 
     productFindFirst.mockResolvedValue({ id: 'product-1' });
     variantFindFirst.mockResolvedValue(null);
     locationStockAggregate.mockResolvedValue({ _sum: { stock: 10 } });
     locationFindFirst.mockResolvedValue({ id: 'loc-1' });
+    orderLineCount.mockResolvedValue(0);
   });
 
   describe('presentVariant helper', () => {
@@ -175,6 +195,65 @@ describe('VariantService', () => {
         }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
+
+    it('auto-restores soft-deleted variant when re-creating with identical SKU', async () => {
+      variantFindFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: 'var-old',
+          sku: 'IPH-RESTORE__del_123',
+        });
+      variantUpdate.mockResolvedValueOnce({
+        id: 'var-old',
+        productId: 'product-1',
+        name: 'Restored iPhone',
+        sku: 'IPH-RESTORE',
+        barcode: null,
+        sellingPrice: 999,
+        costPrice: 500,
+        stock: 5,
+        isActive: true,
+        deletedAt: null,
+        product: {
+          id: 'product-1',
+          name: 'Product',
+          categoryId: null,
+          category: null,
+        },
+      });
+
+      const res = await service.create(admin, {
+        productId: 'product-1',
+        name: 'Restored iPhone',
+        sku: 'IPH-RESTORE',
+        sellingPrice: 999,
+        costPrice: 500,
+        stock: 5,
+      });
+
+      expect(variantFindFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            businessId: 'biz-1',
+            deletedAt: { not: null },
+          }),
+        }),
+      );
+      expect(variantUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'var-old' },
+          data: expect.objectContaining({
+            sku: 'IPH-RESTORE',
+            isActive: true,
+            deletedAt: null,
+          }),
+        }),
+      );
+      expect(res.id).toBe('var-old');
+      expect(res.sku).toBe('IPH-RESTORE');
+      expect(res.isActive).toBe(true);
+      expect(res.status).toBe('ACTIVE');
+    });
   });
 
   describe('list', () => {
@@ -238,12 +317,13 @@ describe('VariantService', () => {
   });
 
   describe('remove', () => {
-    it('soft-deletes variant with __del_ suffix on sku and barcode', async () => {
+    it('soft-deletes variant with __del_ suffix on sku and barcode when sales exist', async () => {
       variantFindFirst.mockResolvedValue({
         id: 'var-1',
         sku: 'SKU-100',
         barcode: 'BAR-100',
       });
+      orderLineCount.mockResolvedValue(3);
 
       const res = await service.remove(admin, 'var-1');
 
@@ -271,6 +351,7 @@ describe('VariantService', () => {
         sku: 'SKU-200',
         barcode: null,
       });
+      orderLineCount.mockResolvedValue(1);
 
       await service.remove(admin, 'var-2');
 
@@ -288,6 +369,22 @@ describe('VariantService', () => {
       expect(updateCall.data.sku).toMatch(/^SKU-200__del_\d+$/);
       expect(updateCall.data.barcode).toBeNull();
       expect(updateCall.data.deletedAt).toBeInstanceOf(Date);
+    });
+
+    it('hard-deletes variant permanently when zero sales history exists', async () => {
+      variantFindFirst.mockResolvedValue({
+        id: 'var-fresh',
+        sku: 'FRESH-1',
+        barcode: null,
+      });
+      orderLineCount.mockResolvedValue(0);
+
+      const res = await service.remove(admin, 'var-fresh');
+
+      expect(res.id).toBe('var-fresh');
+      expect(variantDelete).toHaveBeenCalledWith({
+        where: { id: 'var-fresh' },
+      });
     });
 
     it('throws NotFoundException when removing a non-existent variant', async () => {

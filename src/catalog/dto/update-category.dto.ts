@@ -45,6 +45,15 @@ export class UpdateCategoryDto {
   isActive?: boolean;
 
   @ApiPropertyOptional({
+    description: 'Explicit status string ("ACTIVE" or "INACTIVE")',
+    example: 'ACTIVE',
+    enum: ['ACTIVE', 'INACTIVE'],
+  })
+  @IsOptional()
+  @IsString()
+  status?: 'ACTIVE' | 'INACTIVE';
+
+  @ApiPropertyOptional({
     description: 'Optional business UUID for Admin validation',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })

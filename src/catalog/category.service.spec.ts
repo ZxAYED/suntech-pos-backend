@@ -9,7 +9,10 @@ describe('CategoryService', () => {
   const categoryCreate = jest.fn();
   const categoryUpdate = jest.fn();
   const categoryUpdateMany = jest.fn();
+  const categoryDelete = jest.fn();
+  const productCount = jest.fn();
   const orderLineFindMany = jest.fn();
+  const orderLineCount = jest.fn();
 
   const prisma = {
     category: {
@@ -18,9 +21,14 @@ describe('CategoryService', () => {
       create: categoryCreate,
       update: categoryUpdate,
       updateMany: categoryUpdateMany,
+      delete: categoryDelete,
+    },
+    product: {
+      count: productCount,
     },
     orderLine: {
       findMany: orderLineFindMany,
+      count: orderLineCount,
     },
   } as unknown as PrismaService;
 
@@ -37,20 +45,27 @@ describe('CategoryService', () => {
     categoryCreate.mockReset();
     categoryUpdate.mockReset();
     categoryUpdateMany.mockReset();
+    categoryDelete.mockReset();
+    productCount.mockReset();
     orderLineFindMany.mockReset();
+    orderLineCount.mockReset();
 
     categoryFindFirst.mockResolvedValue(null);
+    productCount.mockResolvedValue(0);
+    orderLineCount.mockResolvedValue(0);
     categoryCreate.mockImplementation(
       ({ data }: { data: Record<string, unknown> }) =>
         Promise.resolve({
           id: 'cat-1',
           createdAt: new Date(),
           updatedAt: new Date(),
+          isActive: true,
           ...data,
         }),
     );
     categoryUpdate.mockResolvedValue({ id: 'cat-1' });
     categoryUpdateMany.mockResolvedValue({ count: 1 });
+    categoryDelete.mockResolvedValue({ id: 'cat-1' });
   });
 
   it('creates a category with auto-generated slug when none provided', async () => {
@@ -69,6 +84,7 @@ describe('CategoryService', () => {
       name: 'Smartphones & Tablets',
       slug: 'smartphones-tablets',
       description: 'Mobile devices',
+      isActive: true,
     });
     expect(res.name).toBe('Smartphones & Tablets');
     expect(res.slug).toBe('smartphones-tablets');
@@ -82,6 +98,46 @@ describe('CategoryService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
+  it('auto-restores soft-deleted category when re-creating with the same name', async () => {
+    // 1st findFirst: assertNameAvailable returns null (no active category)
+    categoryFindFirst.mockResolvedValueOnce(null);
+    // 2nd findFirst: finds previous soft-deleted category
+    categoryFindFirst.mockResolvedValueOnce({
+      id: 'cat-old-1',
+      name: 'Smartphones__del_12345',
+      deletedAt: new Date(),
+    });
+    categoryUpdate.mockResolvedValueOnce({
+      id: 'cat-old-1',
+      name: 'Smartphones',
+      slug: 'smartphones',
+      description: 'Restored phones',
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const res = await service.create(admin, {
+      name: 'Smartphones',
+      description: 'Restored phones',
+    });
+
+    expect(categoryUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'cat-old-1' },
+        data: expect.objectContaining({
+          name: 'Smartphones',
+          slug: 'smartphones',
+          isActive: true,
+          deletedAt: null,
+        }),
+      }),
+    );
+    expect(res.id).toBe('cat-old-1');
+    expect(res.name).toBe('Smartphones');
+    expect(res.status).toBe('ACTIVE');
+  });
+
   it('lists categories enriched with activeSkus, totalUnits, inventoryValue and sales metrics', async () => {
     categoryFindMany.mockResolvedValue([
       {
@@ -89,6 +145,7 @@ describe('CategoryService', () => {
         name: 'Smartphones',
         slug: 'smartphones',
         description: 'Phones',
+        isActive: true,
         createdAt: new Date(),
         updatedAt: new Date(),
         products: [
@@ -119,6 +176,7 @@ describe('CategoryService', () => {
     expect(cat.inventoryValue).toBe(350000); // 10*20000 + 5*30000
     expect(cat.salesCount).toBe(4); // 3 + 1
     expect(cat.salesRevenue).toBe(90000); // 60000 + 30000
+    expect(cat.status).toBe('ACTIVE');
   });
 
   it('filters categories by search keyword matching name or description', async () => {
@@ -148,6 +206,7 @@ describe('CategoryService', () => {
       name: 'Chargers',
       slug: 'chargers',
       description: 'Adapters',
+      isActive: true,
       createdAt: new Date(),
       updatedAt: new Date(),
       products: [
@@ -167,36 +226,66 @@ describe('CategoryService', () => {
     expect(cat.inventoryValue).toBe(50000);
     expect(cat.salesCount).toBe(10);
     expect(cat.salesRevenue).toBe(10000);
+    expect(cat.status).toBe('ACTIVE');
   });
 
-  it('soft-deletes category with __del_ suffix on name and slug', async () => {
+  it('blocks category deletion when active products exist under it', async () => {
+    categoryFindFirst.mockResolvedValue({
+      id: 'cat-1',
+      name: 'Audio & Headphones',
+      slug: 'audio-headphones',
+    });
+    productCount.mockResolvedValue(2);
+
+    await expect(service.remove(admin, 'cat-1')).rejects.toThrow(
+      ConflictException,
+    );
+    expect(categoryUpdate).not.toHaveBeenCalled();
+    expect(categoryDelete).not.toHaveBeenCalled();
+  });
+
+  it('soft-deletes category with __del_ suffix when sales history exists', async () => {
     categoryFindFirst.mockResolvedValue({
       id: 'cat-1',
       name: 'Smartphones',
       slug: 'smartphones',
     });
+    productCount.mockResolvedValue(0);
+    orderLineCount.mockResolvedValue(5);
 
     const res = await service.remove(admin, 'cat-1');
 
     expect(res.id).toBe('cat-1');
     expect(res.deletedAt).toBeInstanceOf(Date);
-    const updateCall = (
-      categoryUpdate.mock.calls as unknown as Array<
-        [
-          {
-            where: { id: string };
-            data: { name: string; slug: string; deletedAt: Date };
-          },
-        ]
-      >
-    )[0][0];
+    expect(categoryUpdate).toHaveBeenCalled();
+    const updateCall = categoryUpdate.mock.calls[0][0];
     expect(updateCall.where.id).toBe('cat-1');
     expect(updateCall.data.name).toMatch(/^Smartphones__del_\d+$/);
     expect(updateCall.data.slug).toMatch(/^smartphones__del_\d+$/);
+    expect(updateCall.data.isActive).toBe(false);
     expect(updateCall.data.deletedAt).toBeInstanceOf(Date);
+    expect(categoryDelete).not.toHaveBeenCalled();
   });
 
-  it('throws NotFoundException when soft-deleting non-existent category', async () => {
+  it('hard-deletes category when no active products and no sales history exist', async () => {
+    categoryFindFirst.mockResolvedValue({
+      id: 'cat-mistake',
+      name: 'Typo Category',
+      slug: 'typo-category',
+    });
+    productCount.mockResolvedValue(0);
+    orderLineCount.mockResolvedValue(0);
+
+    const res = await service.remove(admin, 'cat-mistake');
+
+    expect(res.id).toBe('cat-mistake');
+    expect(categoryDelete).toHaveBeenCalledWith({
+      where: { id: 'cat-mistake' },
+    });
+    expect(categoryUpdate).not.toHaveBeenCalled();
+  });
+
+  it('throws NotFoundException when deleting non-existent category', async () => {
     categoryFindFirst.mockResolvedValue(null);
 
     await expect(service.remove(admin, 'cat-unknown')).rejects.toBeInstanceOf(

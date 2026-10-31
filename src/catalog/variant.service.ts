@@ -28,6 +28,7 @@ const variantSelect = {
   sellingPrice: true,
   costPrice: true,
   stock: true,
+  isActive: true,
   profileImageUrl: true,
   profileImagePublicId: true,
   profileImageKey: true,
@@ -65,6 +66,8 @@ export type PresentedVariant = VariantRow & {
   categoryName: string;
   price: number;
   marginPercent: number | null;
+  isActive: boolean;
+  status: 'ACTIVE' | 'INACTIVE';
 };
 
 const CODE_TAKEN = 'A variant with that SKU or barcode already exists';
@@ -100,6 +103,8 @@ export function presentVariant(
   return {
     ...variant,
     stock,
+    isActive: (variant as any).isActive !== false,
+    status: (variant as any).isActive === false ? 'INACTIVE' : 'ACTIVE',
     locationStocks,
     productName: variant.product?.name ?? '',
     categoryId:
@@ -140,6 +145,92 @@ export class VariantService {
       });
     }
 
+    if (requestedSku) {
+      const softDeleted = await this.prisma.variant.findFirst({
+        where: {
+          businessId,
+          deletedAt: { not: null },
+          OR: [
+            { sku: { equals: requestedSku, mode: 'insensitive' } },
+            {
+              sku: {
+                startsWith: `${requestedSku}__del_`,
+                mode: 'insensitive',
+              },
+            },
+          ],
+        },
+        orderBy: { deletedAt: 'desc' },
+      });
+
+      if (softDeleted) {
+        const restored = await this.prisma.variant.update({
+          where: { id: softDeleted.id },
+          data: {
+            productId: dto.productId,
+            name: dto.name.trim(),
+            sku: requestedSku,
+            barcode,
+            sellingPrice: dto.sellingPrice,
+            costPrice: dto.costPrice ?? null,
+            stock: dto.stock ?? 0,
+            isActive: true,
+            deletedAt: null,
+          },
+          select: variantSelect,
+        });
+
+        if (dto.stock !== undefined && dto.stock !== null) {
+          let targetLocationId = dto.locationId?.trim();
+          if (!targetLocationId && this.prisma.location?.findFirst) {
+            const loc = await this.prisma.location.findFirst({
+              where: { businessId, deletedAt: null },
+              select: { id: true },
+              orderBy: { createdAt: 'asc' },
+            });
+            if (loc) {
+              targetLocationId = loc.id;
+            }
+          }
+
+          if (targetLocationId && this.prisma.locationStock?.upsert) {
+            await this.prisma.locationStock.upsert({
+              where: {
+                locationId_variantId: {
+                  locationId: targetLocationId,
+                  variantId: restored.id,
+                },
+              },
+              create: {
+                businessId,
+                locationId: targetLocationId,
+                variantId: restored.id,
+                stock: dto.stock,
+              },
+              update: {
+                stock: dto.stock,
+              },
+            });
+
+            if (this.prisma.locationStock.aggregate) {
+              const agg = await this.prisma.locationStock.aggregate({
+                where: { variantId: restored.id },
+                _sum: { stock: true },
+              });
+              const totalStock = agg._sum.stock ?? dto.stock;
+              await this.prisma.variant.update({
+                where: { id: restored.id },
+                data: { stock: totalStock },
+              });
+              restored.stock = totalStock;
+            }
+          }
+        }
+
+        return presentVariant(restored, dto.locationId);
+      }
+    }
+
     const attempts = requestedSku ? 1 : SKU_ATTEMPTS;
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -156,6 +247,12 @@ export class VariantService {
             sellingPrice: dto.sellingPrice,
             costPrice: dto.costPrice ?? null,
             stock: dto.stock ?? 0,
+            isActive:
+              dto.isActive !== undefined
+                ? dto.isActive
+                : dto.status !== undefined
+                  ? dto.status === 'ACTIVE'
+                  : true,
           },
           select: variantSelect,
         });
@@ -247,11 +344,19 @@ export class VariantService {
         }
       : {};
 
+    const statusFilter = query?.status
+      ? query.status.toUpperCase() === 'ACTIVE'
+        ? { isActive: true }
+        : query.status.toUpperCase() === 'INACTIVE'
+          ? { isActive: false }
+          : {}
+      : {};
+
     const variants = await this.prisma.variant.findMany({
       where: {
         businessId,
         deletedAt: null,
-        ...(actor.role === Role.CASHIER ? { isActive: true } : {}),
+        ...(actor.role === Role.CASHIER ? { isActive: true } : statusFilter),
         product: {
           businessId,
           deletedAt: null,
@@ -320,6 +425,13 @@ export class VariantService {
       );
     }
 
+    const isActive =
+      dto.isActive !== undefined
+        ? dto.isActive
+        : dto.status !== undefined
+          ? dto.status === 'ACTIVE'
+          : undefined;
+
     try {
       const updated = await this.prisma.variant.updateMany({
         where: { id: current.id, businessId, deletedAt: null },
@@ -333,7 +445,7 @@ export class VariantService {
             : {}),
           ...(dto.costPrice !== undefined ? { costPrice: dto.costPrice } : {}),
           ...(dto.stock !== undefined ? { stock: dto.stock } : {}),
-          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+          ...(isActive !== undefined ? { isActive } : {}),
         },
       });
 
@@ -589,23 +701,56 @@ export class VariantService {
       throw new NotFoundException('Variant not found');
     }
 
-    const timestamp = Date.now();
-    const deletedAt = new Date();
-    const suffixedSku = `${variant.sku}__del_${timestamp}`;
-    const suffixedBarcode = variant.barcode
-      ? `${variant.barcode}__del_${timestamp}`
-      : null;
+    // Sales history check in orderLine
+    const salesCount = this.prisma.orderLine?.count
+      ? await this.prisma.orderLine.count({
+          where: { variantId: variant.id },
+        })
+      : 0;
 
-    await this.prisma.variant.update({
-      where: { id: variant.id },
-      data: {
-        sku: suffixedSku,
-        barcode: suffixedBarcode,
-        deletedAt,
-      },
-    });
+    if (salesCount > 0) {
+      // Soft-delete: retain historical analytics & sales records
+      const timestamp = Date.now();
+      const deletedAt = new Date();
+      const suffixedSku = `${variant.sku}__del_${timestamp}`;
+      const suffixedBarcode = variant.barcode
+        ? `${variant.barcode}__del_${timestamp}`
+        : null;
 
-    return { id: variantId, deletedAt };
+      await this.prisma.variant.update({
+        where: { id: variant.id },
+        data: {
+          sku: suffixedSku,
+          barcode: suffixedBarcode,
+          isActive: false,
+          deletedAt,
+        },
+      });
+
+      return { id: variantId, deletedAt };
+    } else {
+      // Hard-delete: clean permanent removal for variants with zero sales history
+      if (this.prisma.locationStock?.deleteMany) {
+        await this.prisma.locationStock.deleteMany({
+          where: { variantId: variant.id },
+        });
+      }
+      if (this.prisma.variantImage?.deleteMany) {
+        await this.prisma.variantImage.deleteMany({
+          where: { variantId: variant.id },
+        });
+      }
+      if (this.prisma.stockTransaction?.deleteMany) {
+        await this.prisma.stockTransaction.deleteMany({
+          where: { variantId: variant.id },
+        });
+      }
+      await this.prisma.variant.delete({
+        where: { id: variant.id },
+      });
+
+      return { id: variantId, deletedAt: new Date() };
+    }
   }
 
   private visibleWhere(businessId: string): Prisma.VariantWhereInput {
@@ -668,11 +813,11 @@ export class VariantService {
     const matches: Prisma.VariantWhereInput[] = [];
 
     if (codes.sku) {
-      matches.push({ sku: codes.sku });
+      matches.push({ sku: { equals: codes.sku, mode: 'insensitive' } });
     }
 
     if (codes.barcode) {
-      matches.push({ barcode: codes.barcode });
+      matches.push({ barcode: { equals: codes.barcode, mode: 'insensitive' } });
     }
 
     if (matches.length === 0) {

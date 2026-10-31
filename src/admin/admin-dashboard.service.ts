@@ -502,6 +502,8 @@ export class AdminDashboardService {
       const businessName = (o as any).location?.business?.name ?? null;
       const cashierName = (o as any).cashier?.fullName ?? null;
       const cashierPublicId = (o as any).cashier?.publicId ?? null;
+      const sellerName = cashierName;
+      const sellerRole = (o as any).cashier?.role ?? null;
 
       return {
         id: o.id,
@@ -520,6 +522,8 @@ export class AdminDashboardService {
         businessName,
         cashierName,
         cashierPublicId,
+        sellerName,
+        sellerRole,
       };
     });
 

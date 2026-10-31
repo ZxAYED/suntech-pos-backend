@@ -212,7 +212,7 @@ export class ReportService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const where: Prisma.OrderWhereInput = {
-      cashier: { businessId: scope.businessId },
+      location: { businessId: scope.businessId },
       ...(scope.locationId ? { locationId: scope.locationId } : {}),
     };
 
@@ -292,6 +292,8 @@ export class ReportService {
       const businessName = (order as any).location?.business?.name ?? null;
       const cashierName = (order as any).cashier?.fullName ?? null;
       const cashierPublicId = (order as any).cashier?.publicId ?? null;
+      const sellerName = cashierName;
+      const sellerRole = (order as any).cashier?.role ?? null;
 
       return {
         id: order.id,
@@ -308,6 +310,8 @@ export class ReportService {
         cashierId: (order as any).cashier?.id ?? null,
         cashierName,
         cashierPublicId,
+        sellerName,
+        sellerRole,
         cashier: order.cashier,
         location: (order as any).location,
         customerName: order.customerName,
@@ -346,7 +350,7 @@ export class ReportService {
     const month = utcMonth();
     const mine: Prisma.OrderWhereInput = {
       cashierId,
-      cashier: { businessId },
+      location: { businessId },
       ...(locationId ? { locationId } : {}),
     };
 
@@ -388,7 +392,7 @@ export class ReportService {
     };
     const month = utcMonth();
     const business: Prisma.OrderWhereInput = {
-      cashier: { businessId },
+      location: { businessId },
       ...(locationId ? { locationId } : {}),
     };
 
@@ -462,7 +466,7 @@ export class ReportService {
       ...(dateRange.lte ? { lte: dateRange.lte } : {}),
     };
     const periodOrderWhere: Prisma.OrderWhereInput = {
-      cashier: { businessId },
+      location: { businessId },
       ...(locationId ? { locationId } : {}),
       occurredAt,
     };
@@ -655,7 +659,7 @@ export class ReportService {
 
     const orders = await this.prisma.order.findMany({
       where: {
-        cashier: { businessId },
+        location: { businessId },
         ...(locationId ? { locationId } : {}),
       },
       select: {
@@ -712,11 +716,10 @@ export class ReportService {
   ): Promise<StaffLeaderboardEntry[]> {
     const where: Prisma.OrderWhereInput = {
       occurredAt,
+      location: { businessId },
       cashier: {
-        businessId,
         role: Role.CASHIER,
         deletedAt: null,
-        ...(locationId ? { locationId } : {}),
       },
       ...(locationId ? { locationId } : {}),
     };
@@ -838,7 +841,7 @@ export class ReportService {
     }
 
     const lines = await lineDelegate.findMany({
-      where: { order: { cashier: { businessId } } },
+      where: { order: { location: { businessId } } },
       select: {
         variantName: true,
         productName: true,

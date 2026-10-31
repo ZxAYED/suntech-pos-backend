@@ -9,10 +9,13 @@ describe('ProductService', () => {
   const productCreate = jest.fn();
   const productUpdate = jest.fn();
   const productUpdateMany = jest.fn();
+  const productDelete = jest.fn();
   const productCount = jest.fn();
   const categoryFindFirst = jest.fn();
   const variantFindMany = jest.fn();
   const variantUpdate = jest.fn();
+  const variantCount = jest.fn();
+  const orderLineCount = jest.fn();
 
   const prisma = {
     product: {
@@ -22,13 +25,18 @@ describe('ProductService', () => {
       create: productCreate,
       update: productUpdate,
       updateMany: productUpdateMany,
+      delete: productDelete,
     },
     category: {
       findFirst: categoryFindFirst,
     },
     variant: {
+      count: variantCount,
       findMany: variantFindMany,
       update: variantUpdate,
+    },
+    orderLine: {
+      count: orderLineCount,
     },
   } as unknown as PrismaService;
 
@@ -45,16 +53,22 @@ describe('ProductService', () => {
     productCreate.mockReset();
     productUpdate.mockReset();
     productUpdateMany.mockReset();
+    productDelete.mockReset();
     productCount.mockReset();
     categoryFindFirst.mockReset();
     variantFindMany.mockReset();
     variantUpdate.mockReset();
+    variantCount.mockReset();
+    orderLineCount.mockReset();
 
     productCount.mockResolvedValue(2);
     productFindFirst.mockResolvedValue(null);
     categoryFindFirst.mockResolvedValue({ id: 'cat-1' });
     variantFindMany.mockResolvedValue([]);
     variantUpdate.mockResolvedValue({ id: 'var-1' });
+    variantCount.mockResolvedValue(0);
+    orderLineCount.mockResolvedValue(0);
+    productDelete.mockResolvedValue({ id: 'prod-1' });
     productCreate.mockImplementation(
       ({ data }: { data: Record<string, unknown> }) =>
         Promise.resolve({
@@ -63,6 +77,7 @@ describe('ProductService', () => {
           updatedAt: new Date(),
           category: { id: 'cat-1', name: 'Electronics', deletedAt: null },
           variants: [],
+          isActive: true,
           ...data,
         }),
     );
@@ -87,6 +102,7 @@ describe('ProductService', () => {
       name: 'iPhone 15 Pro',
       description: 'Flagship phone',
       categoryId: 'cat-1',
+      isActive: true,
       customAttributes: Prisma.DbNull,
     });
     expect(res.name).toBe('iPhone 15 Pro');
@@ -233,27 +249,99 @@ describe('ProductService', () => {
     expect(res[0].name).toBe('iPhone 15 Pro');
   });
 
-  it('soft-deletes product with __del_ suffix on name', async () => {
+  it('auto-restores soft-deleted product when re-creating with the same name', async () => {
+    productFindFirst.mockResolvedValueOnce(null); // assertNameAvailable returns null
+    productFindFirst.mockResolvedValueOnce({
+      id: 'prod-old',
+      name: 'iPhone 15 Pro__del_9999',
+      deletedAt: new Date(),
+    });
+    productUpdate.mockResolvedValueOnce({
+      id: 'prod-old',
+      name: 'iPhone 15 Pro',
+      description: 'Restored phone',
+      categoryId: 'cat-1',
+      isActive: true,
+      customAttributes: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      category: { id: 'cat-1', name: 'Electronics', deletedAt: null },
+      variants: [],
+    });
+
+    const res = await service.create(admin, {
+      name: 'iPhone 15 Pro',
+      description: 'Restored phone',
+      categoryId: 'cat-1',
+    });
+
+    expect(productUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'prod-old' },
+        data: expect.objectContaining({
+          name: 'iPhone 15 Pro',
+          isActive: true,
+          deletedAt: null,
+        }),
+      }),
+    );
+    expect(res.id).toBe('prod-old');
+    expect(res.name).toBe('iPhone 15 Pro');
+  });
+
+  it('blocks product deletion when active variants exist under it', async () => {
     productFindFirst.mockResolvedValue({
       id: 'prod-1',
       name: 'iPhone 15 Pro',
     });
+    variantCount.mockResolvedValue(2);
+
+    await expect(service.remove(admin, 'prod-1')).rejects.toThrow(
+      ConflictException,
+    );
+    expect(productUpdate).not.toHaveBeenCalled();
+    expect(productDelete).not.toHaveBeenCalled();
+  });
+
+  it('soft-deletes product with __del_ suffix when sales history exists', async () => {
+    productFindFirst.mockResolvedValue({
+      id: 'prod-1',
+      name: 'iPhone 15 Pro',
+    });
+    variantCount.mockResolvedValue(0);
+    orderLineCount.mockResolvedValue(4);
 
     const res = await service.remove(admin, 'prod-1');
 
     expect(res.id).toBe('prod-1');
     expect(res.deletedAt).toBeInstanceOf(Date);
-    const updateCall = (
-      productUpdate.mock.calls as unknown as Array<
-        [{ where: { id: string }; data: { name: string; deletedAt: Date } }]
-      >
-    )[0][0];
+    expect(productUpdate).toHaveBeenCalled();
+    const updateCall = productUpdate.mock.calls[0][0];
     expect(updateCall.where.id).toBe('prod-1');
     expect(updateCall.data.name).toMatch(/^iPhone 15 Pro__del_\d+$/);
+    expect(updateCall.data.isActive).toBe(false);
     expect(updateCall.data.deletedAt).toBeInstanceOf(Date);
+    expect(productDelete).not.toHaveBeenCalled();
   });
 
-  it('throws NotFoundException when soft-deleting non-existent product', async () => {
+  it('hard-deletes product when no active variants and zero sales history exist', async () => {
+    productFindFirst.mockResolvedValue({
+      id: 'prod-fresh',
+      name: 'Typo Phone',
+    });
+    variantCount.mockResolvedValue(0);
+    orderLineCount.mockResolvedValue(0);
+
+    const res = await service.remove(admin, 'prod-fresh');
+
+    expect(res.id).toBe('prod-fresh');
+    expect(productDelete).toHaveBeenCalledWith({
+      where: { id: 'prod-fresh' },
+    });
+    expect(productUpdate).not.toHaveBeenCalled();
+  });
+
+  it('throws NotFoundException when deleting non-existent product', async () => {
     productFindFirst.mockResolvedValue(null);
 
     await expect(service.remove(admin, 'prod-unknown')).rejects.toBeInstanceOf(
@@ -277,7 +365,7 @@ describe('ProductService', () => {
     expect(findCall.where.businessId).toBe('biz-2');
   });
 
-  it('scopes Cashier to token businessId and location stock', async () => {
+  it('scopes Cashier to token businessId and returns lean product item', async () => {
     const cashier = {
       sub: 'cashier-1',
       role: Role.CASHIER,
@@ -291,21 +379,13 @@ describe('ProductService', () => {
         name: 'iPhone 15 Pro',
         description: 'Flagship phone',
         categoryId: 'cat-1',
+        isActive: true,
         createdAt: new Date(),
         updatedAt: new Date(),
         category: null,
-        variants: [
-          {
-            id: 'var-1',
-            name: '128GB',
-            sku: 'IPH-128',
-            stock: 100, // global aggregate
-            locationStocks: [
-              { locationId: 'loc-branch-1', stock: 15 },
-              { locationId: 'loc-branch-2', stock: 85 },
-            ],
-          },
-        ],
+        _count: {
+          variants: 2,
+        },
       },
     ]);
 
@@ -321,60 +401,8 @@ describe('ProductService', () => {
     // Cashier cannot bypass businessId from query; token is used
     expect(findCall.where.businessId).toBe('biz-cashier');
     expect(findCall.where.isActive).toBe(true);
-    // Stock is resolved specifically for cashier branch location
-    expect(res[0].variants[0].stock).toBe(15);
-  });
-
-  it('removes product and soft-deletes its variants with suffixed SKU and barcode', async () => {
-    productFindFirst.mockResolvedValue({
-      id: 'prod-1',
-      name: 'Old Product',
-    });
-    variantFindMany.mockResolvedValue([
-      { id: 'var-1', sku: 'SKU-1', barcode: 'BAR-1' },
-      { id: 'var-2', sku: 'SKU-2', barcode: null },
-    ]);
-
-    const res = await service.remove(admin, 'prod-1');
-
-    expect(res.id).toBe('prod-1');
-    expect(productUpdate).toHaveBeenCalledTimes(1);
-    const prodUpdateCall = (
-      productUpdate.mock.calls as unknown as Array<
-        [{ where: { id: string }; data: { name: string; deletedAt: Date } }]
-      >
-    )[0][0];
-    expect(prodUpdateCall.where.id).toBe('prod-1');
-    expect(prodUpdateCall.data.name).toContain('Old Product__del_');
-
-    expect(variantUpdate).toHaveBeenCalledTimes(2);
-    const var1Update = (
-      variantUpdate.mock.calls as unknown as Array<
-        [
-          {
-            where: { id: string };
-            data: { sku: string; barcode: string | null };
-          },
-        ]
-      >
-    )[0][0];
-    expect(var1Update.where.id).toBe('var-1');
-    expect(var1Update.data.sku).toContain('SKU-1__del_');
-    expect(var1Update.data.barcode).toContain('BAR-1__del_');
-
-    const var2Update = (
-      variantUpdate.mock.calls as unknown as Array<
-        [
-          {
-            where: { id: string };
-            data: { sku: string; barcode: string | null };
-          },
-        ]
-      >
-    )[1][0];
-    expect(var2Update.where.id).toBe('var-2');
-    expect(var2Update.data.sku).toContain('SKU-2__del_');
-    expect(var2Update.data.barcode).toBeNull();
+    expect(res[0]._count.variants).toBe(2);
+    expect(res[0].variantsCount).toBe(2);
   });
 
   describe('getSummary', () => {

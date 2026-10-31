@@ -108,7 +108,7 @@ export class ExportService {
   ) {
     const period = payrollPeriod(query.year, query.month);
     const where: Prisma.OrderWhereInput = {
-      cashier: { businessId },
+      location: { businessId },
       occurredAt: { gte: period.start, lt: period.end },
       ...(query.locationId ? { locationId: query.locationId } : {}),
     };

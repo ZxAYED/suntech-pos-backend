@@ -50,4 +50,12 @@ export class ListVariantsQueryDto {
   @IsOptional()
   @IsString()
   businessId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Filter variants by status ("ACTIVE", "INACTIVE", or "ALL")',
+    example: 'ACTIVE',
+  })
+  @IsOptional()
+  @IsString()
+  status?: string;
 }

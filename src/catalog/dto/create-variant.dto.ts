@@ -92,4 +92,20 @@ export class CreateVariantDto {
   @IsOptional()
   @IsString()
   businessId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Variant active status for sales and display',
+    example: true,
+  })
+  @IsOptional()
+  isActive?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Explicit status string ("ACTIVE" or "INACTIVE")',
+    example: 'ACTIVE',
+    enum: ['ACTIVE', 'INACTIVE'],
+  })
+  @IsOptional()
+  @IsString()
+  status?: 'ACTIVE' | 'INACTIVE';
 }

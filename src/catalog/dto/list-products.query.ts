@@ -34,4 +34,12 @@ export class ListProductsQueryDto {
   @IsOptional()
   @IsString()
   businessId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Filter products by status ("ACTIVE", "INACTIVE", or "ALL")',
+    example: 'ACTIVE',
+  })
+  @IsOptional()
+  @IsString()
+  status?: string;
 }

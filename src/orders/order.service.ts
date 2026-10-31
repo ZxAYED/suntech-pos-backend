@@ -128,6 +128,8 @@ export type PresentedOrder = Omit<
   branchName?: string | null;
   cashierName?: string | null;
   cashierPublicId?: string | null;
+  sellerName?: string | null;
+  sellerRole?: string | null;
 };
 
 export function presentOrderLine(line: RawOrderLine): PresentedOrderLine {
@@ -171,6 +173,8 @@ export function presentOrder(order: any): PresentedOrder {
     order.cashier?.fullName ?? order.cashierName ?? null;
   const cashierPublicId =
     order.cashier?.publicId ?? order.cashierPublicId ?? null;
+  const sellerName = cashierName;
+  const sellerRole = order.cashier?.role ?? order.sellerRole ?? null;
 
   return {
     ...order,
@@ -181,6 +185,8 @@ export function presentOrder(order: any): PresentedOrder {
     branchName,
     cashierName,
     cashierPublicId,
+    sellerName,
+    sellerRole,
     lines,
     totalRefundedAmount,
   };
@@ -624,7 +630,7 @@ export class OrdersService {
         totalAmount,
         tenderedAmount: dto.tenderedAmount,
         changeDue,
-        customerName: dto.customerName?.trim() || null,
+        customerName: dto.customerName?.trim() || 'Walk-in Customer',
         customerPhone: dto.customerPhone?.trim() || null,
         customerNumber: dto.customerPhone?.trim() || null,
         notes: dto.notes?.trim() || null,
@@ -858,7 +864,7 @@ export class OrdersService {
         totalAmount,
         tenderedAmount: dto.tenderedAmount,
         changeDue,
-        customerName: dto.customerName?.trim() || null,
+        customerName: dto.customerName?.trim() || 'Walk-in Customer',
         customerPhone: dto.customerPhone?.trim() || null,
         customerNumber: dto.customerPhone?.trim() || null,
         notes: dto.notes?.trim() || null,
@@ -1785,7 +1791,7 @@ export class OrdersService {
         receiptNumber: order.receiptNumber ?? order.invoiceNumber,
         customerNumber:
           order.customerNumber ?? order.customerPhone ?? order.customerName,
-        customerName: order.customerName,
+        customerName: order.customerName || 'Walk-in Customer',
         customerPhone: order.customerPhone,
         totalAmount: order.totalAmount,
         paymentMethod: order.paymentMethod,

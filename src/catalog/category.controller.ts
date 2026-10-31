@@ -105,6 +105,7 @@ export class CategoryController {
       query?.search,
       query?.locationId,
       query?.businessId,
+      query?.status,
     );
   }
 

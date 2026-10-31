@@ -21,6 +21,7 @@ const variantSelect = {
   sellingPrice: true,
   costPrice: true,
   stock: true,
+  isActive: true,
   profileImageUrl: true,
   profileImagePublicId: true,
   profileImageKey: true,
@@ -44,6 +45,7 @@ const productSelect = {
   name: true,
   description: true,
   categoryId: true,
+  isActive: true,
   customAttributes: true,
   createdAt: true,
   updatedAt: true,
@@ -58,6 +60,31 @@ const productSelect = {
 } satisfies Prisma.ProductSelect;
 
 type ProductRow = Prisma.ProductGetPayload<{ select: typeof productSelect }>;
+
+export const productListItemSelect = {
+  id: true,
+  name: true,
+  description: true,
+  categoryId: true,
+  isActive: true,
+  customAttributes: true,
+  createdAt: true,
+  updatedAt: true,
+  category: {
+    select: { id: true, name: true, deletedAt: true },
+  },
+  _count: {
+    select: {
+      variants: {
+        where: { deletedAt: null },
+      },
+    },
+  },
+} satisfies Prisma.ProductSelect;
+
+type ProductListItemRow = Prisma.ProductGetPayload<{
+  select: typeof productListItemSelect;
+}>;
 
 export type PresentedLocationStock = {
   locationId: string;
@@ -76,7 +103,55 @@ export type PresentedVariant = Omit<
 export type PresentedProduct = Omit<ProductRow, 'category' | 'variants'> & {
   category: { id: string; name: string } | null;
   variants: PresentedVariant[];
+  status: 'ACTIVE' | 'INACTIVE';
 };
+
+export type PresentedProductListItem = {
+  id: string;
+  name: string;
+  description: string | null;
+  categoryId: string | null;
+  category: { id: string; name: string } | null;
+  isActive: boolean;
+  status: 'ACTIVE' | 'INACTIVE';
+  _count: {
+    variants: number;
+  };
+  variantsCount?: number;
+  customAttributes?: any;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export function presentProductListItem(
+  product: ProductListItemRow,
+): PresentedProductListItem {
+  const category =
+    product.category && !product.category.deletedAt
+      ? { id: product.category.id, name: product.category.name }
+      : null;
+
+  const variantsCount = product._count?.variants ?? 0;
+
+  return {
+    id: product.id,
+    name: product.name,
+    description: product.description,
+    categoryId: product.categoryId,
+    category,
+    isActive: product.isActive,
+    status: product.isActive === false ? 'INACTIVE' : 'ACTIVE',
+    _count: {
+      variants: variantsCount,
+    },
+    variantsCount,
+    ...(product.customAttributes
+      ? { customAttributes: product.customAttributes }
+      : {}),
+    createdAt: product.createdAt,
+    updatedAt: product.updatedAt,
+  };
+}
 
 const NAME_TAKEN = 'A product with that name already exists';
 
@@ -110,6 +185,45 @@ export class ProductService {
       dto.attachments;
     const customAttributes = normalizeCustomAttributes(rawAttrs);
 
+    // Check if product was previously soft-deleted
+    const softDeleted = await this.prisma.product.findFirst({
+      where: {
+        businessId,
+        deletedAt: { not: null },
+        OR: [
+          { name: { equals: name, mode: 'insensitive' } },
+          { name: { startsWith: `${name}__del_`, mode: 'insensitive' } },
+        ],
+      },
+      orderBy: { deletedAt: 'desc' },
+    });
+
+    if (softDeleted) {
+      const restored = await this.prisma.product.update({
+        where: { id: softDeleted.id },
+        data: {
+          name,
+          description: dto.description?.trim() || null,
+          categoryId: dto.categoryId ?? null,
+          customAttributes:
+            (customAttributes as unknown as Prisma.InputJsonValue) ??
+            Prisma.DbNull,
+          isActive: true,
+          deletedAt: null,
+        },
+        select: productSelect,
+      });
+
+      return presentProduct(restored);
+    }
+
+    const isActive =
+      dto.isActive !== undefined
+        ? dto.isActive
+        : dto.status !== undefined
+          ? dto.status === 'ACTIVE'
+          : true;
+
     try {
       const product = await this.prisma.product.create({
         data: {
@@ -117,6 +231,7 @@ export class ProductService {
           name,
           description: dto.description?.trim() || null,
           categoryId: dto.categoryId ?? null,
+          isActive,
           customAttributes:
             (customAttributes as unknown as Prisma.InputJsonValue) ??
             Prisma.DbNull,
@@ -137,7 +252,7 @@ export class ProductService {
   async list(
     actor: AccessTokenPayload,
     query?: ListProductsQueryDto,
-  ): Promise<PresentedProduct[]> {
+  ): Promise<PresentedProductListItem[]> {
     const businessId = await this.resolveBusinessId(actor, query?.businessId);
     const search = query?.search?.trim();
 
@@ -172,22 +287,27 @@ export class ProductService {
         }
       : {};
 
+    const statusFilter = query?.status
+      ? query.status.toUpperCase() === 'ACTIVE'
+        ? { isActive: true }
+        : query.status.toUpperCase() === 'INACTIVE'
+          ? { isActive: false }
+          : {}
+      : {};
+
     const products = await this.prisma.product.findMany({
       where: {
         businessId,
         deletedAt: null,
-        ...(actor.role === Role.CASHIER ? { isActive: true } : {}),
+        ...(actor.role === Role.CASHIER ? { isActive: true } : statusFilter),
         ...(query?.categoryId ? { categoryId: query.categoryId } : {}),
         ...searchFilter,
       },
-      select: productSelect,
+      select: productListItemSelect,
       orderBy: { name: 'asc' },
     });
-    const effectiveLocationId =
-      actor.role === Role.CASHIER
-        ? actor.locationId
-        : query?.locationId?.trim() || undefined;
-    return products.map((p) => presentProduct(p, effectiveLocationId));
+
+    return products.map((p) => presentProductListItem(p));
   }
 
   async getSummary(
@@ -327,13 +447,20 @@ export class ProductService {
             ? dto.attributes
             : dto.attachments;
 
+    const isActive =
+      dto.isActive !== undefined
+        ? dto.isActive
+        : dto.status !== undefined
+          ? dto.status === 'ACTIVE'
+          : undefined;
+
     const data: Prisma.ProductUpdateManyMutationInput = {
       ...(name ? { name } : {}),
       ...(dto.description !== undefined
         ? { description: dto.description.trim() || null }
         : {}),
       ...(dto.categoryId !== undefined ? { categoryId: dto.categoryId } : {}),
-      ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+      ...(isActive !== undefined ? { isActive } : {}),
       ...(rawAttrs !== undefined
         ? {
             customAttributes:
@@ -379,43 +506,84 @@ export class ProductService {
       throw new NotFoundException('Product not found');
     }
 
-    const timestamp = Date.now();
-    const deletedAt = new Date();
-    const suffixedName = `${product.name}__del_${timestamp}`;
-
-    const activeVariants = this.prisma.variant?.findMany
-      ? await this.prisma.variant.findMany({
+    // 1. Safeguard: Product CANNOT be deleted if it contains active variants
+    const activeVariantsCount = this.prisma.variant?.count
+      ? await this.prisma.variant.count({
           where: { productId: product.id, deletedAt: null },
-          select: { id: true, sku: true, barcode: true },
         })
-      : [];
+      : 0;
 
-    await this.prisma.product.update({
-      where: { id: product.id },
-      data: {
-        name: suffixedName,
-        deletedAt,
-      },
-    });
-
-    if (this.prisma.variant?.update) {
-      for (const v of activeVariants) {
-        const suffixedSku = `${v.sku}__del_${timestamp}`;
-        const suffixedBarcode = v.barcode
-          ? `${v.barcode}__del_${timestamp}`
-          : null;
-        await this.prisma.variant.update({
-          where: { id: v.id },
-          data: {
-            sku: suffixedSku,
-            barcode: suffixedBarcode,
-            deletedAt,
-          },
-        });
-      }
+    if (activeVariantsCount > 0) {
+      throw new ConflictException(
+        `Cannot delete product "${product.name}" because it still contains ${activeVariantsCount} active variant(s). Please delete all variants under this product first.`,
+      );
     }
 
-    return { id: productId, deletedAt };
+    // 2. Sales history check: OrderLines containing this product or its variants
+    const salesCount = this.prisma.orderLine?.count
+      ? await this.prisma.orderLine.count({
+          where: {
+            OR: [
+              { variant: { productId: product.id } },
+              { productName: { equals: product.name, mode: 'insensitive' } },
+            ],
+          },
+        })
+      : 0;
+
+    if (salesCount > 0) {
+      // Soft-delete: retain historical analytics & sales records
+      const timestamp = Date.now();
+      const deletedAt = new Date();
+      const suffixedName = `${product.name}__del_${timestamp}`;
+
+      await this.prisma.product.update({
+        where: { id: product.id },
+        data: {
+          name: suffixedName,
+          isActive: false,
+          deletedAt,
+        },
+      });
+
+      return { id: productId, deletedAt };
+    } else {
+      // Hard-delete: clean permanent removal for products with zero sales history
+      if (this.prisma.variant?.findMany) {
+        const remainingVariants = await this.prisma.variant.findMany({
+          where: { productId: product.id },
+          select: { id: true },
+        });
+        for (const v of remainingVariants) {
+          if (this.prisma.locationStock?.deleteMany) {
+            await this.prisma.locationStock.deleteMany({
+              where: { variantId: v.id },
+            });
+          }
+          if (this.prisma.variantImage?.deleteMany) {
+            await this.prisma.variantImage.deleteMany({
+              where: { variantId: v.id },
+            });
+          }
+          if (this.prisma.stockTransaction?.deleteMany) {
+            await this.prisma.stockTransaction.deleteMany({
+              where: { variantId: v.id },
+            });
+          }
+        }
+        if (this.prisma.variant?.deleteMany) {
+          await this.prisma.variant.deleteMany({
+            where: { productId: product.id },
+          });
+        }
+      }
+
+      await this.prisma.product.delete({
+        where: { id: product.id },
+      });
+
+      return { id: productId, deletedAt: new Date() };
+    }
   }
 
   private async findProduct(businessId: string, productId: string) {
@@ -453,7 +621,7 @@ export class ProductService {
     const existing = await this.prisma.product.findFirst({
       where: {
         businessId,
-        name,
+        name: { equals: name, mode: 'insensitive' },
         deletedAt: null,
         ...(ignoreId ? { id: { not: ignoreId } } : {}),
       },
@@ -502,5 +670,11 @@ export function presentProduct(
     };
   });
 
-  return { ...product, variants, category };
+  return {
+    ...product,
+    isActive: product.isActive,
+    status: product.isActive === false ? 'INACTIVE' : 'ACTIVE',
+    variants,
+    category,
+  };
 }

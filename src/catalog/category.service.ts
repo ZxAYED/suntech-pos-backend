@@ -16,6 +16,7 @@ export interface CategoryWithAnalytics {
   name: string;
   slug: string;
   description: string | null;
+  isActive: boolean;
   status: 'ACTIVE' | 'INACTIVE';
   productsCount: number;
   activeSkus: number;
@@ -60,6 +61,68 @@ export class CategoryService {
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-|-$/g, '');
 
+    // Check if category was previously soft-deleted (clean name or suffixed with __del_)
+    const softDeleted = await this.prisma.category.findFirst({
+      where: {
+        businessId,
+        deletedAt: { not: null },
+        OR: [
+          { name: { equals: name, mode: 'insensitive' } },
+          { name: { startsWith: `${name}__del_`, mode: 'insensitive' } },
+        ],
+      },
+      orderBy: { deletedAt: 'desc' },
+    });
+
+    if (softDeleted) {
+      const restored = await this.prisma.category.update({
+        where: { id: softDeleted.id },
+        data: {
+          name,
+          slug,
+          description: dto.description?.trim() || null,
+          isActive: true,
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          description: true,
+          isActive: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return {
+        id: restored.id,
+        name: restored.name,
+        slug: restored.slug || slug,
+        description: restored.description,
+        isActive: true,
+        status: 'ACTIVE',
+        productsCount: 0,
+        activeSkus: 0,
+        totalUnits: 0,
+        inventoryValue: 0,
+        salesCount: 0,
+        salesRevenue: 0,
+        createdAt: restored.createdAt,
+        updatedAt: restored.updatedAt,
+        _count: {
+          products: 0,
+        },
+      };
+    }
+
+    const isActive =
+      dto.isActive !== undefined
+        ? dto.isActive
+        : dto.status !== undefined
+          ? dto.status === 'ACTIVE'
+          : true;
+
     try {
       const created = await this.prisma.category.create({
         data: {
@@ -67,12 +130,14 @@ export class CategoryService {
           name,
           slug,
           description: dto.description?.trim() || null,
+          isActive,
         },
         select: {
           id: true,
           name: true,
           slug: true,
           description: true,
+          isActive: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -83,7 +148,8 @@ export class CategoryService {
         name: created.name,
         slug: created.slug || slug,
         description: created.description,
-        status: 'ACTIVE',
+        isActive: created.isActive ?? true,
+        status: created.isActive === false ? 'INACTIVE' : 'ACTIVE',
         productsCount: 0,
         activeSkus: 0,
         totalUnits: 0,
@@ -110,6 +176,7 @@ export class CategoryService {
     search?: string,
     locationId?: string,
     requestedBusinessId?: string,
+    status?: string,
   ): Promise<PresentedCategory[]> {
     const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     const searchFilter = search?.trim()
@@ -128,11 +195,19 @@ export class CategoryService {
         }
       : {};
 
+    const statusFilter = status
+      ? status.toUpperCase() === 'ACTIVE'
+        ? { isActive: true }
+        : status.toUpperCase() === 'INACTIVE'
+          ? { isActive: false }
+          : {}
+      : {};
+
     const categories = await this.prisma.category.findMany({
       where: {
         businessId,
         deletedAt: null,
-        ...(admin.role === Role.CASHIER ? { isActive: true } : {}),
+        ...(admin.role === Role.CASHIER ? { isActive: true } : statusFilter),
         ...searchFilter,
       },
       select: {
@@ -140,6 +215,7 @@ export class CategoryService {
         name: true,
         slug: true,
         description: true,
+        isActive: true,
         createdAt: true,
         updatedAt: true,
         products: {
@@ -195,7 +271,7 @@ export class CategoryService {
             subtotal: g._sum?.subtotal ?? 0,
           });
         }
-      } else {
+      } else if (this.prisma.orderLine?.findMany) {
         const orderLines = await this.prisma.orderLine.findMany({
           where: {
             variantId: { in: allVariantIds },
@@ -269,7 +345,8 @@ export class CategoryService {
         name: cat.name,
         slug: cat.slug || defaultSlug,
         description: cat.description,
-        status: 'ACTIVE',
+        isActive: (cat as any).isActive ?? true,
+        status: (cat as any).isActive === false ? 'INACTIVE' : 'ACTIVE',
         productsCount: cat.products.length,
         activeSkus: variants.length,
         totalUnits,
@@ -299,6 +376,7 @@ export class CategoryService {
         name: true,
         slug: true,
         description: true,
+        isActive: true,
         createdAt: true,
         updatedAt: true,
         products: {
@@ -342,7 +420,7 @@ export class CategoryService {
         });
         salesCount = agg._sum?.quantity ?? 0;
         salesRevenue = agg._sum?.subtotal ?? 0;
-      } else {
+      } else if (this.prisma.orderLine?.findMany) {
         const orderLines = await this.prisma.orderLine.findMany({
           where: {
             variantId: { in: variantIds },
@@ -377,7 +455,8 @@ export class CategoryService {
       name: cat.name,
       slug: cat.slug || defaultSlug,
       description: cat.description,
-      status: 'ACTIVE',
+      isActive: (cat as any).isActive ?? true,
+      status: (cat as any).isActive === false ? 'INACTIVE' : 'ACTIVE',
       productsCount: cat.products.length,
       activeSkus: variants.length,
       totalUnits,
@@ -418,6 +497,13 @@ export class CategoryService {
             .replace(/^-|-$/g, '')
         : undefined);
 
+    const isActive =
+      dto.isActive !== undefined
+        ? dto.isActive
+        : dto.status !== undefined
+          ? dto.status === 'ACTIVE'
+          : undefined;
+
     try {
       const updated = await this.prisma.category.updateMany({
         where: { id: categoryId, businessId, deletedAt: null },
@@ -427,7 +513,7 @@ export class CategoryService {
           ...(dto.description !== undefined
             ? { description: dto.description.trim() || null }
             : {}),
-          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+          ...(isActive !== undefined ? { isActive } : {}),
         },
       });
 
@@ -460,23 +546,59 @@ export class CategoryService {
       throw new NotFoundException('Category not found');
     }
 
-    const timestamp = Date.now();
-    const deletedAt = new Date();
-    const suffixedName = `${category.name}__del_${timestamp}`;
-    const suffixedSlug = category.slug
-      ? `${category.slug}__del_${timestamp}`
-      : null;
+    // 1. Safeguard: Category CANNOT be deleted if it contains active products
+    const activeProductsCount = this.prisma.product?.count
+      ? await this.prisma.product.count({
+          where: { categoryId: category.id, deletedAt: null },
+        })
+      : 0;
 
-    await this.prisma.category.update({
-      where: { id: category.id },
-      data: {
-        name: suffixedName,
-        slug: suffixedSlug,
-        deletedAt,
-      },
-    });
+    if (activeProductsCount > 0) {
+      throw new ConflictException(
+        `Cannot delete category "${category.name}" because it still contains ${activeProductsCount} active product(s). Please delete all products under this category first.`,
+      );
+    }
 
-    return { id: categoryId, deletedAt };
+    // 2. Sales history check: OrderLines containing this category or its variants
+    const salesCount = this.prisma.orderLine?.count
+      ? await this.prisma.orderLine.count({
+          where: {
+            OR: [
+              { variant: { product: { categoryId: category.id } } },
+              { categoryName: { equals: category.name, mode: 'insensitive' } },
+            ],
+          },
+        })
+      : 0;
+
+    if (salesCount > 0) {
+      // Soft-delete: retain historical analytics & sales records
+      const timestamp = Date.now();
+      const deletedAt = new Date();
+      const suffixedName = `${category.name}__del_${timestamp}`;
+      const suffixedSlug = category.slug
+        ? `${category.slug}__del_${timestamp}`
+        : null;
+
+      await this.prisma.category.update({
+        where: { id: category.id },
+        data: {
+          name: suffixedName,
+          slug: suffixedSlug,
+          isActive: false,
+          deletedAt,
+        },
+      });
+
+      return { id: categoryId, deletedAt };
+    } else {
+      // Hard-delete: clean permanent delete for items with zero sales history (e.g. typos, mistakes)
+      await this.prisma.category.delete({
+        where: { id: category.id },
+      });
+
+      return { id: categoryId, deletedAt: new Date() };
+    }
   }
 
   private async findCategory(businessId: string, categoryId: string) {
@@ -500,7 +622,7 @@ export class CategoryService {
     const existing = await this.prisma.category.findFirst({
       where: {
         businessId,
-        name,
+        name: { equals: name, mode: 'insensitive' },
         deletedAt: null,
         ...(ignoreId ? { id: { not: ignoreId } } : {}),
       },

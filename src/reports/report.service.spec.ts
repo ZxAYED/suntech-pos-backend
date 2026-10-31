@@ -70,7 +70,7 @@ describe('ReportService', () => {
     expect(orderAggregate).toHaveBeenCalledWith({
       where: {
         cashierId: 'cashier-1',
-        cashier: { businessId: 'biz-1' },
+        location: { businessId: 'biz-1' },
         locationId: 'loc-1',
         occurredAt: expect.any(Object) as object,
       },
@@ -309,7 +309,7 @@ describe('ReportService', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           locationId: 'loc-1',
-          cashier: { businessId: 'biz-1' },
+          location: { businessId: 'biz-1' },
           OR: expect.arrayContaining([
             { customerName: { contains: 'Karim', mode: 'insensitive' } },
           ]),
@@ -403,7 +403,7 @@ describe('ReportService', () => {
     expect(orderFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          cashier: { businessId: 'biz-1' },
+          location: { businessId: 'biz-1' },
           occurredAt: expect.objectContaining({
             gte: expect.any(Date),
             lte: expect.any(Date),

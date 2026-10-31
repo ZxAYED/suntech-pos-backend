@@ -121,7 +121,7 @@ describe('ExportService', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           locationId: 'loc-1',
-          cashier: { businessId: 'biz-1' },
+          location: { businessId: 'biz-1' },
           OR: expect.arrayContaining([
             { customerName: { contains: 'Karim', mode: 'insensitive' } },
           ]),
