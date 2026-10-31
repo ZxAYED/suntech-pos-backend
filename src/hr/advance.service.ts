@@ -204,8 +204,19 @@ export class AdvanceService {
     const businessId = requireBusinessId(actor, query.businessId);
     const where: Prisma.EmployeeAdvanceWhereInput = {
       businessId,
-      deletedAt: null,
     };
+
+    if (query.status === 'VOIDED') {
+      where.deletedAt = { not: null };
+    } else if (query.status === AdvanceStatus.PENDING) {
+      where.status = AdvanceStatus.PENDING;
+      where.deletedAt = null;
+    } else if (query.status === AdvanceStatus.DEDUCTED) {
+      where.status = AdvanceStatus.DEDUCTED;
+      where.deletedAt = null;
+    } else if (!query.includeDeleted) {
+      where.deletedAt = null;
+    }
 
     if (actor.role === Role.CASHIER) {
       where.cashierId = actor.sub;
@@ -222,10 +233,6 @@ export class AdvanceService {
           locationId: query.locationId,
         };
       }
-    }
-
-    if (query.status) {
-      where.status = query.status;
     }
 
     if (query.month || query.year) {
@@ -245,6 +252,7 @@ export class AdvanceService {
         amount: true,
         reason: true,
         status: true,
+        deletedAt: true,
         takenAt: true,
         createdAt: true,
         cashier: {
@@ -272,22 +280,25 @@ export class AdvanceService {
       locationName: adv.cashier.location?.name ?? 'Unassigned',
       amount: adv.amount,
       reason: adv.reason,
-      status: adv.status,
+      status: adv.deletedAt ? 'VOIDED' : adv.status,
+      deletedAt: adv.deletedAt ?? null,
       takenAt: adv.takenAt,
       createdAt: adv.createdAt,
     }));
 
     const totalActiveAdvances = advances
-      .filter((a) => a.status === AdvanceStatus.PENDING)
+      .filter((a) => !a.deletedAt && a.status === AdvanceStatus.PENDING)
       .reduce((sum, a) => sum + a.amount, 0);
 
     const pendingCount = advances.filter(
-      (a) => a.status === AdvanceStatus.PENDING,
+      (a) => !a.deletedAt && a.status === AdvanceStatus.PENDING,
     ).length;
 
     const deductedCount = advances.filter(
-      (a) => a.status === AdvanceStatus.DEDUCTED,
+      (a) => !a.deletedAt && a.status === AdvanceStatus.DEDUCTED,
     ).length;
+
+    const voidedCount = advances.filter((a) => Boolean(a.deletedAt)).length;
 
     return {
       items,
@@ -295,6 +306,7 @@ export class AdvanceService {
         totalActiveAdvances,
         pendingCount,
         deductedCount,
+        voidedCount,
       },
     };
   }

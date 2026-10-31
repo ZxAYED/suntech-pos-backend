@@ -19,6 +19,7 @@ import { ExpenseCategory, Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
+import { Idempotent } from '../common/decorators/idempotent.decorator';
 import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -36,6 +37,7 @@ export class ExpenseController {
 
   @Post()
   @Roles(Role.ADMIN)
+  @Idempotent()
   @ApiOperation({
     summary: 'Record a business/operational expense (Admin Ledger)',
     description:

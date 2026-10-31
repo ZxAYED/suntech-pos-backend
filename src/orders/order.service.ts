@@ -44,6 +44,14 @@ export const orderLineSelect = {
   quantity: true,
   unitPrice: true,
   subtotal: true,
+  refundItems: {
+    select: {
+      id: true,
+      quantity: true,
+      refundAmount: true,
+      createdAt: true,
+    },
+  },
 } satisfies Prisma.OrderLineSelect;
 
 export const unifiedOrderSelect = {
@@ -80,9 +88,61 @@ export const unifiedOrderSelect = {
   lines: { select: orderLineSelect },
 } satisfies Prisma.OrderSelect;
 
-export type PresentedOrder = Prisma.OrderGetPayload<{
-  select: typeof unifiedOrderSelect;
+export type RawOrderLine = Prisma.OrderLineGetPayload<{
+  select: typeof orderLineSelect;
 }>;
+
+export type PresentedOrderLine = RawOrderLine & {
+  refundedQuantity: number;
+  refundableQuantity: number;
+  refundedAmount: number;
+};
+
+export type PresentedOrder = Omit<
+  Prisma.OrderGetPayload<{
+    select: typeof unifiedOrderSelect;
+  }>,
+  'lines'
+> & {
+  lines: PresentedOrderLine[];
+  totalRefundedAmount?: number;
+};
+
+export function presentOrderLine(line: RawOrderLine): PresentedOrderLine {
+  const refundedQuantity = (line.refundItems ?? []).reduce(
+    (sum, item) => sum + (item.quantity ?? 0),
+    0,
+  );
+  const refundedAmount = (line.refundItems ?? []).reduce(
+    (sum, item) => sum + (item.refundAmount ?? 0),
+    0,
+  );
+  const refundableQuantity = Math.max(0, line.quantity - refundedQuantity);
+
+  return {
+    ...line,
+    refundedQuantity,
+    refundableQuantity,
+    refundedAmount,
+  };
+}
+
+export function presentOrder(
+  order: any,
+): PresentedOrder {
+  if (!order) return order as unknown as PresentedOrder;
+  const rawLines = Array.isArray(order.lines) ? order.lines : [];
+  const lines = rawLines.map(presentOrderLine);
+  const totalRefundedAmount = lines.reduce(
+    (sum: number, line: PresentedOrderLine) => sum + (line.refundedAmount ?? 0),
+    0,
+  );
+  return {
+    ...order,
+    lines,
+    totalRefundedAmount,
+  };
+}
 
 export interface ListedOrder {
   id: string;
@@ -489,6 +549,11 @@ export class OrdersService {
 
     const paymentMethod =
       dto.paymentMethod ?? dto.paymentType ?? PaymentMethod.COD;
+    if (!Object.values(PaymentMethod).includes(paymentMethod)) {
+      throw new BadRequestException(
+        'Explicit payment method is required: COD, BKASH, NAGAD, BANK',
+      );
+    }
 
     // Only COD orders increment physical drawer cash
     if (shiftId && paymentMethod === PaymentMethod.COD) {
@@ -610,7 +675,7 @@ export class OrdersService {
       }
     }
 
-    return order;
+    return presentOrder(order);
   }
 
   async createCustomOrder(
@@ -717,6 +782,11 @@ export class OrdersService {
     const changeDue = dto.tenderedAmount - totalAmount;
     const paymentMethod =
       dto.paymentMethod ?? dto.paymentType ?? PaymentMethod.COD;
+    if (!Object.values(PaymentMethod).includes(paymentMethod)) {
+      throw new BadRequestException(
+        'Explicit payment method is required: COD, BKASH, NAGAD, BANK',
+      );
+    }
 
     // 3. Database Transaction
     // Only COD orders increment physical drawer cash
@@ -729,7 +799,7 @@ export class OrdersService {
       });
     }
 
-    return tx.order.create({
+    const order = await tx.order.create({
       data: {
         invoiceNumber,
         receiptNumber: invoiceNumber,
@@ -757,6 +827,8 @@ export class OrdersService {
       },
       select: unifiedOrderSelect,
     });
+
+    return presentOrder(order);
   }
 
   async syncOrders(
@@ -868,7 +940,7 @@ export class OrdersService {
         const common = {
           shiftId: item.shiftId,
           tenderedAmount: item.tenderedAmount,
-          paymentMethod: item.paymentMethod,
+          paymentMethod: item.paymentMethod ?? PaymentMethod.COD,
           customerName: item.customerName,
           customerPhone: item.customerPhone,
           notes: item.notes,
@@ -1030,57 +1102,114 @@ export class OrdersService {
 
     const where: Prisma.OrderWhereInput = {};
 
-    if (actor && actor.role !== Role.SUPER_ADMIN) {
-      let businessId =
-        actor.role === Role.CASHIER
-          ? actor.businessId
-          : query.businessId || actor.businessId;
-      if (!businessId && actor.role === Role.ADMIN) {
-        const user = await this.prisma.user?.findFirst({
-          where: { id: actor.sub, deletedAt: null },
-          select: {
-            businessId: true,
-            ownedBusinesses: {
-              where: { deletedAt: null },
-              select: { id: true },
-              take: 1,
-            },
-          },
-        });
-        businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
-      }
-      if (!businessId) {
-        throw new ForbiddenException('Create a business before continuing');
-      }
-      where.location = { businessId };
-    } else if (actor?.role === Role.SUPER_ADMIN && query.businessId) {
-      where.location = { businessId: query.businessId };
-    } else if (actor?.businessId) {
-      where.location = { businessId: actor.businessId };
-    }
-
     const isOwnOrders =
       query.ownOrders === true ||
       (query.ownOrders as unknown as string) === 'true' ||
       query.scope === 'my' ||
       query.scope === 'own';
 
-    if (actor?.role === Role.CASHIER) {
-      if (actor.locationId) {
-        where.locationId = actor.locationId;
+    if (actor && actor.role === Role.CASHIER) {
+      if (!actor.businessId || !actor.locationId) {
+        throw new ForbiddenException(
+          'Cashier account must be assigned to an active business and branch location',
+        );
       }
+      where.location = { businessId: actor.businessId };
+      where.locationId = actor.locationId;
       if (isOwnOrders) {
         where.cashierId = actor.sub;
       }
-    } else if (actor?.role === Role.ADMIN || actor?.role === Role.SUPER_ADMIN) {
+    } else if (actor && actor.role === Role.ADMIN) {
+      let resolvedBiz = query.businessId?.trim() || actor.businessId;
+      if (!resolvedBiz) {
+        if (actor.businessIds && actor.businessIds.length === 1) {
+          resolvedBiz = actor.businessIds[0];
+        } else if (this.prisma.user?.findFirst) {
+          const user = await this.prisma.user.findFirst({
+            where: { id: actor.sub, deletedAt: null },
+            select: {
+              businessId: true,
+              ownedBusinesses: {
+                where: { deletedAt: null },
+                select: { id: true },
+                take: 1,
+              },
+            },
+          });
+          resolvedBiz = user?.businessId || user?.ownedBusinesses?.[0]?.id;
+        }
+      }
+      if (!resolvedBiz) {
+        throw new ForbiddenException('Create a business before continuing');
+      }
+
+      const ownedBusinessIds = new Set(actor.businessIds ?? []);
+      if (actor.businessId) {
+        ownedBusinessIds.add(actor.businessId);
+      }
+      if (!ownedBusinessIds.has(resolvedBiz)) {
+        if (this.prisma.user?.findFirst) {
+          const user = await this.prisma.user.findFirst({
+            where: { id: actor.sub, deletedAt: null },
+            select: {
+              businessId: true,
+              ownedBusinesses: {
+                where: { deletedAt: null },
+                select: { id: true },
+              },
+            },
+          });
+          const dbOwned = new Set(
+            user?.ownedBusinesses?.map((b) => b.id) ?? [],
+          );
+          if (user?.businessId) dbOwned.add(user.businessId);
+          if (!dbOwned.has(resolvedBiz)) {
+            throw new ForbiddenException(
+              'You do not have access to this business',
+            );
+          }
+        } else {
+          throw new ForbiddenException('You do not have access to this business');
+        }
+      }
+
+      where.location = { businessId: resolvedBiz };
+
+      if (query.locationId) {
+        if (this.prisma.location?.findFirst) {
+          const loc = await this.prisma.location.findFirst({
+            where: {
+              id: query.locationId,
+              businessId: resolvedBiz,
+              deletedAt: null,
+            },
+            select: { id: true },
+          });
+          if (!loc) {
+            throw new NotFoundException(
+              'Location not found in the selected business',
+            );
+          }
+        }
+        where.locationId = query.locationId;
+      }
+
       if (isOwnOrders) {
         where.cashierId = actor.sub;
       } else if (query.cashierId) {
         where.cashierId = query.cashierId;
       }
-
+    } else if (actor?.role === Role.SUPER_ADMIN) {
+      if (query.businessId) {
+        where.location = { businessId: query.businessId };
+      }
       if (query.locationId) {
         where.locationId = query.locationId;
+      }
+      if (isOwnOrders) {
+        where.cashierId = actor.sub;
+      } else if (query.cashierId) {
+        where.cashierId = query.cashierId;
       }
     } else if (query.locationId) {
       where.locationId = query.locationId;
@@ -1131,7 +1260,7 @@ export class OrdersService {
       ];
     }
 
-    const [total, items] = await Promise.all([
+    const [total, rawItems] = await Promise.all([
       this.prisma.order.count({ where }),
       this.prisma.order.findMany({
         where,
@@ -1142,12 +1271,85 @@ export class OrdersService {
       }),
     ]);
 
+    const items = rawItems.map((order) => presentOrder(order));
+
     return {
       items,
       page,
       limit,
       total,
     };
+  }
+
+  async getOrderById(
+    actor: AccessTokenPayload,
+    orderId: string,
+  ): Promise<PresentedOrder> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: {
+        ...unifiedOrderSelect,
+        location: {
+          select: {
+            id: true,
+            businessId: true,
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    if (actor.role === Role.CASHIER) {
+      if (!actor.businessId || !actor.locationId) {
+        throw new ForbiddenException(
+          'Cashier account must be assigned to an active business and branch location',
+        );
+      }
+      if (
+        order.location?.businessId !== actor.businessId ||
+        order.locationId !== actor.locationId
+      ) {
+        throw new ForbiddenException('You do not have access to this order');
+      }
+    } else if (actor.role === Role.ADMIN) {
+      const ownedBusinessIds = new Set(actor.businessIds ?? []);
+      if (actor.businessId) {
+        ownedBusinessIds.add(actor.businessId);
+      }
+      if (
+        !order.location?.businessId ||
+        !ownedBusinessIds.has(order.location.businessId)
+      ) {
+        if (this.prisma.user?.findFirst) {
+          const user = await this.prisma.user.findFirst({
+            where: { id: actor.sub, deletedAt: null },
+            select: {
+              businessId: true,
+              ownedBusinesses: {
+                where: { deletedAt: null },
+                select: { id: true },
+              },
+            },
+          });
+          const dbOwned = new Set(
+            user?.ownedBusinesses?.map((b) => b.id) ?? [],
+          );
+          if (user?.businessId) dbOwned.add(user.businessId);
+          if (!dbOwned.has(order.location?.businessId ?? '')) {
+            throw new ForbiddenException(
+              'You do not have access to this order',
+            );
+          }
+        } else {
+          throw new ForbiddenException('You do not have access to this order');
+        }
+      }
+    }
+
+    return presentOrder(order);
   }
 
   // Legacy checkout support
@@ -1487,7 +1689,7 @@ export class OrdersService {
       }
     }
 
-    return order;
+    return presentOrder(order);
   }
 
   async list(

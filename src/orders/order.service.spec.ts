@@ -976,4 +976,119 @@ describe('OrdersService', () => {
       );
     });
   });
+
+  describe('Cross-tenant authorization in getOrders', () => {
+    it('throws ForbiddenException when admin attempts to query orders of an unowned business', async () => {
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+        businessIds: ['biz-1'],
+      };
+
+      await expect(
+        service.getOrders(adminActor, { businessId: 'biz-foreign' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('throws ForbiddenException when cashier has no business or location assigned', async () => {
+      const incompleteCashier = {
+        sub: 'csh-no-loc',
+        role: Role.CASHIER,
+      };
+
+      await expect(
+        service.getOrders(incompleteCashier as never, {}),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
+
+  describe('getOrderById', () => {
+    it('returns order with authoritative per-line refunded and remaining refundable quantities', async () => {
+      orderFindUnique.mockResolvedValue({
+        id: 'order-101',
+        invoiceNumber: 'INV-101',
+        receiptNumber: 'RCPT-101',
+        totalAmount: 1200,
+        subtotal: 1200,
+        status: OrderStatus.PAID,
+        paymentMethod: PaymentMethod.COD,
+        locationId: 'loc-1',
+        location: { id: 'loc-1', businessId: 'biz-1', name: 'Main Branch' },
+        lines: [
+          {
+            id: 'line-1',
+            productName: 'Polo Shirt',
+            variantName: 'Red / XL',
+            unitPrice: 600,
+            quantity: 2,
+            subtotal: 1200,
+            refundItems: [
+              {
+                id: 'rf-item-1',
+                quantity: 1,
+                refundAmount: 600,
+                createdAt: new Date(),
+              },
+            ],
+          },
+        ],
+      });
+
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+        businessIds: ['biz-1'],
+      };
+
+      const result = await service.getOrderById(adminActor, 'order-101');
+
+      expect(result.id).toBe('order-101');
+      expect(result.totalRefundedAmount).toBe(600);
+      expect(result.lines[0].refundedQuantity).toBe(1);
+      expect(result.lines[0].refundableQuantity).toBe(1);
+      expect(result.lines[0].refundedAmount).toBe(600);
+    });
+
+    it('rejects cashier attempting to access an order from a different branch location', async () => {
+      orderFindUnique.mockResolvedValue({
+        id: 'order-202',
+        locationId: 'loc-branch-2',
+        location: { id: 'loc-branch-2', businessId: 'biz-1' },
+        lines: [],
+      });
+
+      const cashierActor = {
+        sub: 'cashier-1',
+        role: Role.CASHIER,
+        businessId: 'biz-1',
+        locationId: 'loc-branch-1',
+      };
+
+      await expect(
+        service.getOrderById(cashierActor, 'order-202'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('throws ForbiddenException when order does not belong to any admin owned business', async () => {
+      orderFindUnique.mockResolvedValue({
+        id: 'order-303',
+        locationId: 'loc-other',
+        location: { id: 'loc-other', businessId: 'biz-other' },
+        lines: [],
+      });
+
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+        businessIds: ['biz-1'],
+      };
+
+      await expect(
+        service.getOrderById(adminActor, 'order-303'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
 });

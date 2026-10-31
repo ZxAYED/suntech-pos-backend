@@ -1,7 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AccountStatus, PrismaClient, Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { internalCashierEmail } from '../users/user-profile.select';
 import { PrismaService } from '../prisma/prisma.service';
 
 const BCRYPT_ROUNDS = 10;
@@ -11,41 +10,14 @@ export async function runDatabaseSeed(
 ): Promise<void> {
   const logger = new Logger('DatabaseSeed');
 
-  // 1. Purge legacy insecure test credentials if they exist in the database
-  try {
-    await prisma.user.deleteMany({
-      where: {
-        OR: [
-          { email: { in: ['superadmin@suntech.pos', 'admin@suntechpos.bd'] } },
-          { publicId: 'CSH-UTT01' },
-        ],
-      },
-    });
-  } catch {
-    // If foreign key constraints exist on legacy test accounts, deactivate them
-    try {
-      await prisma.user.updateMany({
-        where: {
-          OR: [
-            {
-              email: { in: ['superadmin@suntech.pos', 'admin@suntechpos.bd'] },
-            },
-            { publicId: 'CSH-UTT01' },
-          ],
-        },
-        data: {
-          status: AccountStatus.SUSPENDED,
-          deletedAt: new Date(),
-        },
-      });
-    } catch {
-      // Ignore if table doesn't exist yet
-    }
-  }
-
-  // 2. Super Admin Account (Configured strictly via environment variables)
-  const superAdminEmail = process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase();
-  const superAdminPasswordRaw = process.env.SUPER_ADMIN_PASSWORD;
+  // 1. Super Admin Account (Configured via environment variables)
+  const superAdminEmail = (
+    process.env.SUPER_ADMIN_EMAIL || process.env.ADMIN_EMAIL
+  )
+    ?.trim()
+    .toLowerCase();
+  const superAdminPasswordRaw =
+    process.env.SUPER_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD;
 
   if (superAdminEmail && superAdminPasswordRaw) {
     const superAdminPassword = await bcrypt.hash(
@@ -53,7 +25,20 @@ export async function runDatabaseSeed(
       BCRYPT_ROUNDS,
     );
 
-    await prisma.user.upsert({
+    // Ensure publicId 'ADM-SUPER' does not collide with a different user on creation
+    let defaultSuperAdminPublicId: string | undefined = 'ADM-SUPER';
+    const existingWithPublicId = await prisma.user.findFirst({
+      where: {
+        publicId: defaultSuperAdminPublicId,
+        email: { not: superAdminEmail },
+      },
+      select: { id: true },
+    });
+    if (existingWithPublicId) {
+      defaultSuperAdminPublicId = undefined;
+    }
+
+    const superAdmin = await prisma.user.upsert({
       where: { email: superAdminEmail },
       update: {
         password: superAdminPassword,
@@ -64,25 +49,56 @@ export async function runDatabaseSeed(
       create: {
         email: superAdminEmail,
         password: superAdminPassword,
-        fullName: process.env.SUPER_ADMIN_NAME?.trim() || 'Super Admin',
+        fullName:
+          process.env.SUPER_ADMIN_NAME?.trim() ||
+          process.env.ADMIN_NAME?.trim() ||
+          'Super Admin',
         role: Role.SUPER_ADMIN,
         status: AccountStatus.ACTIVE,
-        publicId: 'ADM-SUPER',
+        ...(defaultSuperAdminPublicId
+          ? { publicId: defaultSuperAdminPublicId }
+          : {}),
       },
     });
-    logger.log(`Super Admin initialized for email: ${superAdminEmail}`);
+
+    logger.log(
+      `Super Admin bootstrapped successfully for email: ${superAdminEmail} (Role: ${superAdmin.role})`,
+    );
   } else {
     logger.warn(
       'SUPER_ADMIN_EMAIL or SUPER_ADMIN_PASSWORD environment variables not configured. Skipping Super Admin bootstrap.',
     );
   }
 
-  // 3. Optional Default Store Admin (Configured via environment variables)
-  const adminEmail = process.env.DEFAULT_ADMIN_EMAIL?.trim().toLowerCase();
-  const adminPasswordRaw = process.env.DEFAULT_ADMIN_PASSWORD;
+  // 2. Store Admin Account (Optional, configured via environment variables)
+  const adminEmail = (
+    process.env.DEFAULT_ADMIN_EMAIL ||
+    (process.env.ADMIN_EMAIL !== superAdminEmail
+      ? process.env.ADMIN_EMAIL
+      : undefined)
+  )
+    ?.trim()
+    .toLowerCase();
+  const adminPasswordRaw =
+    process.env.DEFAULT_ADMIN_PASSWORD ||
+    (process.env.ADMIN_EMAIL !== superAdminEmail
+      ? process.env.ADMIN_PASSWORD
+      : undefined);
 
-  if (adminEmail && adminPasswordRaw) {
+  if (adminEmail && adminPasswordRaw && adminEmail !== superAdminEmail) {
     const adminPassword = await bcrypt.hash(adminPasswordRaw, BCRYPT_ROUNDS);
+
+    let defaultAdminPublicId: string | undefined = 'ADM-STORE';
+    const existingAdminWithPublicId = await prisma.user.findFirst({
+      where: {
+        publicId: defaultAdminPublicId,
+        email: { not: adminEmail },
+      },
+      select: { id: true },
+    });
+    if (existingAdminWithPublicId) {
+      defaultAdminPublicId = undefined;
+    }
 
     const admin = await prisma.user.upsert({
       where: { email: adminEmail },
@@ -95,89 +111,19 @@ export async function runDatabaseSeed(
       create: {
         email: adminEmail,
         password: adminPassword,
-        fullName: process.env.DEFAULT_ADMIN_NAME?.trim() || 'Store Admin',
+        fullName:
+          process.env.DEFAULT_ADMIN_NAME?.trim() ||
+          process.env.ADMIN_NAME?.trim() ||
+          'Store Admin',
         role: Role.ADMIN,
         status: AccountStatus.ACTIVE,
-        publicId: 'ADM-STORE',
+        ...(defaultAdminPublicId ? { publicId: defaultAdminPublicId } : {}),
       },
     });
 
-    const businessName =
-      process.env.DEFAULT_BUSINESS_NAME?.trim() || 'Suntech Retail';
-    let business = await prisma.business.findFirst({
-      where: { ownerId: admin.id, deletedAt: null },
-    });
-
-    if (!business) {
-      business = await prisma.business.create({
-        data: {
-          name: businessName,
-          ownerId: admin.id,
-        },
-      });
-    }
-
-    await prisma.user.update({
-      where: { id: admin.id },
-      data: { businessId: business.id },
-    });
-
-    const branchName = process.env.DEFAULT_BRANCH_NAME?.trim() || 'Main Branch';
-    let location = await prisma.location.findFirst({
-      where: {
-        businessId: business.id,
-        name: branchName,
-      },
-    });
-
-    if (!location) {
-      location = await prisma.location.create({
-        data: {
-          name: branchName,
-          address: 'Main Store Address',
-          businessId: business.id,
-        },
-      });
-    }
-
-    // 4. Optional Cashier (Configured via environment variables)
-    const cashierPublicId = process.env.DEFAULT_CASHIER_PUBLIC_ID?.trim();
-    const cashierPasswordRaw = process.env.DEFAULT_CASHIER_PASSWORD;
-
-    if (cashierPublicId && cashierPasswordRaw) {
-      const cashierEmail = internalCashierEmail(cashierPublicId);
-      const cashierPassword = await bcrypt.hash(
-        cashierPasswordRaw,
-        BCRYPT_ROUNDS,
-      );
-
-      let cashier = await prisma.user.findUnique({
-        where: { publicId: cashierPublicId },
-      });
-
-      if (!cashier) {
-        cashier = await prisma.user.findUnique({
-          where: { email: cashierEmail },
-        });
-      }
-
-      if (!cashier) {
-        await prisma.user.create({
-          data: {
-            fullName:
-              process.env.DEFAULT_CASHIER_NAME?.trim() || 'Store Cashier',
-            publicId: cashierPublicId,
-            email: cashierEmail,
-            password: cashierPassword,
-            role: Role.CASHIER,
-            status: AccountStatus.ACTIVE,
-            businessId: business.id,
-            locationId: location.id,
-            monthlySalary: 35000,
-          },
-        });
-      }
-    }
+    logger.log(
+      `Store Admin bootstrapped successfully for email: ${adminEmail} (Role: ${admin.role})`,
+    );
   }
 }
 
@@ -193,17 +139,7 @@ export class SeedService implements OnModuleInit {
     }
 
     try {
-      const superAdmin = await this.prisma.user.findFirst({
-        where: { role: Role.SUPER_ADMIN, deletedAt: null },
-      });
-
-      if (!superAdmin) {
-        this.logger.log(
-          'No SUPER_ADMIN found in database. Running automated seed...',
-        );
-        await runDatabaseSeed(this.prisma);
-        this.logger.log('Automated database seed completed successfully.');
-      }
+      await runDatabaseSeed(this.prisma);
     } catch (error: unknown) {
       const err = error as { code?: string; message?: string };
       if (err?.code === 'P2021') {

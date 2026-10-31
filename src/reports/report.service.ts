@@ -17,6 +17,7 @@ import { TransactionLogQueryDto } from './dto/transaction-log.query';
 export interface CashierDashboard {
   myDailyRevenue: number;
   myDailyUnitsSold: number;
+  myDailyOrdersCount: number;
   myMonthlyRevenue: number;
 }
 
@@ -315,14 +316,26 @@ export class ReportService {
       ...(locationId ? { locationId } : {}),
     };
 
-    const [myDailyRevenue, myMonthlyRevenue, myDailyUnitsSold] =
-      await Promise.all([
-        this.netRevenue({ ...mine, occurredAt: today }),
-        this.netRevenue({ ...mine, occurredAt: month }),
-        this.unitsSold({ ...mine, occurredAt: today }),
-      ]);
+    const [
+      myDailyRevenue,
+      myMonthlyRevenue,
+      myDailyUnitsSold,
+      myDailyOrdersCount,
+    ] = await Promise.all([
+      this.netRevenue({ ...mine, occurredAt: today }),
+      this.netRevenue({ ...mine, occurredAt: month }),
+      this.unitsSold({ ...mine, occurredAt: today }),
+      this.prisma.order.count
+        ? this.prisma.order.count({ where: { ...mine, occurredAt: today } })
+        : Promise.resolve(0),
+    ]);
 
-    return { myDailyRevenue, myDailyUnitsSold, myMonthlyRevenue };
+    return {
+      myDailyRevenue,
+      myDailyUnitsSold,
+      myDailyOrdersCount,
+      myMonthlyRevenue,
+    };
   }
 
   private async adminDashboard(

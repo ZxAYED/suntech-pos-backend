@@ -218,6 +218,8 @@ describe('PayrollService', () => {
     expect(res.employees[1].status).toBe('PAID');
     expect(res.employees[1].netPay).toBe(24000);
     expect(res.totalMonthlyPayroll).toBe(58000);
+    expect(res.outstandingPayroll).toBe(34000);
+    expect(res.totalPaidPayroll).toBe(24000);
   });
 
   it('bulk disburses payroll for all pending employees', async () => {

@@ -127,7 +127,7 @@ export class UserService {
     admin: AccessTokenPayload,
     dto: CreateCashierDto,
   ): Promise<PresentedProfile> {
-    const businessId = await this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin, dto.businessId);
     const location = await this.prisma.location.findFirst({
       where: {
         id: dto.locationId,
@@ -180,7 +180,7 @@ export class UserService {
     cashierId: string,
     dto: UpdateCashierDto,
   ): Promise<PresentedCashier> {
-    const businessId = await this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin, dto.businessId);
 
     const cashier = await this.prisma.user.findFirst({
       where: {
@@ -568,6 +568,14 @@ export class UserService {
         ownedBusinessIds.add(admin.businessId);
       }
       if (!ownedBusinessIds.has(businessId)) {
+        if (this.prisma.business?.findFirst) {
+          const owned = await this.prisma.business.findFirst({
+            where: { id: businessId, ownerId: admin.sub, deletedAt: null },
+          });
+          if (owned) {
+            return businessId;
+          }
+        }
         throw new ForbiddenException('You do not have access to this business');
       }
     }

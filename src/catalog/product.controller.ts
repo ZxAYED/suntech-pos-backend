@@ -112,6 +112,61 @@ export class ProductController {
     return this.products.list(actor, query);
   }
 
+  @Get('summary')
+  @ApiOperation({
+    summary: '[ADMIN, CASHIER, SUPER_ADMIN] Get products and inventory summary metrics',
+    description:
+      'Returns aggregate counts: products count, units in branch, low stock SKUs count, and total inventory value.',
+  })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Optional business UUID (extracted from token for Admin/Cashier)',
+  })
+  @ApiQuery({
+    name: 'locationId',
+    required: false,
+    description: 'Optional branch location UUID to scope inventory to a specific branch',
+  })
+  @ApiResponse({ status: 200, description: 'Products summary loaded' })
+  @Roles(Role.ADMIN, Role.CASHIER, Role.SUPER_ADMIN)
+  @ResponseMessage('Products summary loaded')
+  getSummary(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query('businessId') businessId?: string,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.products.getSummary(actor, businessId, locationId);
+  }
+
+  @Get('metrics')
+  @ApiOperation({
+    summary: '[ADMIN, CASHIER, SUPER_ADMIN] Get products and inventory summary metrics (alias of /summary)',
+  })
+  @Roles(Role.ADMIN, Role.CASHIER, Role.SUPER_ADMIN)
+  @ResponseMessage('Products summary loaded')
+  getMetrics(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query('businessId') businessId?: string,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.products.getSummary(actor, businessId, locationId);
+  }
+
+  @Get('stats')
+  @ApiOperation({
+    summary: '[ADMIN, CASHIER, SUPER_ADMIN] Get products and inventory summary metrics (alias of /summary)',
+  })
+  @Roles(Role.ADMIN, Role.CASHIER, Role.SUPER_ADMIN)
+  @ResponseMessage('Products summary loaded')
+  getStats(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Query('businessId') businessId?: string,
+    @Query('locationId') locationId?: string,
+  ) {
+    return this.products.getSummary(actor, businessId, locationId);
+  }
+
   @Get(':id')
   @ApiOperation({
     summary: '[ADMIN, CASHIER] Get single product details with variants',

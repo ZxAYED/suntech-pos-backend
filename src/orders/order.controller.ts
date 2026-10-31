@@ -4,6 +4,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
   Post,
   Query,
   UseGuards,
@@ -11,6 +12,7 @@ import {
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiParam,
   ApiQuery,
   ApiResponse,
   ApiTags,
@@ -273,6 +275,32 @@ export class OrdersController {
     }
 
     return this.ordersService.getOrders(actor, query);
+  }
+
+  @Get(':id')
+  @Roles('ADMIN', 'CASHIER', 'SUPER_ADMIN')
+  @ResponseMessage('Order loaded')
+  @ApiOperation({
+    summary: '[ADMIN, CASHIER, SUPER_ADMIN] Get order details by ID',
+    description:
+      'Retrieve a single order by ID with full item details and authoritative per-line refunded and refundable quantities, scoped by tenant and location.',
+  })
+  @ApiParam({ name: 'id', description: 'Order UUID' })
+  @ApiResponse({ status: 200, description: 'Order retrieved successfully' })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid or missing JWT',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - not authorized to view this order',
+  })
+  @ApiResponse({ status: 404, description: 'Order not found' })
+  async getOrderById(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Param('id') id: string,
+  ) {
+    return this.ordersService.getOrderById(actor, id);
   }
 
   // Legacy route support

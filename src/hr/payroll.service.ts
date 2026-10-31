@@ -240,8 +240,17 @@ export class PayrollService {
       }
     }
 
+    const outstandingPayroll = employees
+      .filter((e) => e.status !== 'PAID')
+      .reduce((sum, e) => sum + e.netPay, 0);
+    const totalPaidPayroll = employees
+      .filter((e) => e.status === 'PAID')
+      .reduce((sum, e) => sum + e.netPay, 0);
+
     return {
       totalMonthlyPayroll: totalPayroll,
+      outstandingPayroll,
+      totalPaidPayroll,
       disbursementStatus,
       totalAllowancesAndOvertime: 0,
       totalStaff: employees.length,

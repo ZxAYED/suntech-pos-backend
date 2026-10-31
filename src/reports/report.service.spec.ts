@@ -64,6 +64,7 @@ describe('ReportService', () => {
     expect(dashboard).toEqual({
       myDailyRevenue: 1000,
       myDailyUnitsSold: 3,
+      myDailyOrdersCount: 10,
       myMonthlyRevenue: 1000,
     });
     expect(orderAggregate).toHaveBeenCalledWith({

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import { runDatabaseSeed } from '../src/admin/seed.service';
 

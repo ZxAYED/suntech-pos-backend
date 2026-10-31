@@ -9,10 +9,14 @@ describe('ProductService', () => {
   const productCreate = jest.fn();
   const productUpdate = jest.fn();
   const productUpdateMany = jest.fn();
+  const productCount = jest.fn();
   const categoryFindFirst = jest.fn();
+  const variantFindMany = jest.fn();
+  const variantUpdate = jest.fn();
 
   const prisma = {
     product: {
+      count: productCount,
       findFirst: productFindFirst,
       findMany: productFindMany,
       create: productCreate,
@@ -21,6 +25,10 @@ describe('ProductService', () => {
     },
     category: {
       findFirst: categoryFindFirst,
+    },
+    variant: {
+      findMany: variantFindMany,
+      update: variantUpdate,
     },
   } as unknown as PrismaService;
 
@@ -37,10 +45,16 @@ describe('ProductService', () => {
     productCreate.mockReset();
     productUpdate.mockReset();
     productUpdateMany.mockReset();
+    productCount.mockReset();
     categoryFindFirst.mockReset();
+    variantFindMany.mockReset();
+    variantUpdate.mockReset();
 
+    productCount.mockResolvedValue(2);
     productFindFirst.mockResolvedValue(null);
     categoryFindFirst.mockResolvedValue({ id: 'cat-1' });
+    variantFindMany.mockResolvedValue([]);
+    variantUpdate.mockResolvedValue({ id: 'var-1' });
     productCreate.mockImplementation(
       ({ data }: { data: Record<string, unknown> }) =>
         Promise.resolve({
@@ -308,4 +322,82 @@ describe('ProductService', () => {
     // Stock is resolved specifically for cashier branch location
     expect(res[0].variants[0].stock).toBe(15);
   });
+
+  it('removes product and soft-deletes its variants with suffixed SKU and barcode', async () => {
+    productFindFirst.mockResolvedValue({
+      id: 'prod-1',
+      name: 'Old Product',
+    });
+    variantFindMany.mockResolvedValue([
+      { id: 'var-1', sku: 'SKU-1', barcode: 'BAR-1' },
+      { id: 'var-2', sku: 'SKU-2', barcode: null },
+    ]);
+
+    const res = await service.remove(admin, 'prod-1');
+
+    expect(res.id).toBe('prod-1');
+    expect(productUpdate).toHaveBeenCalledTimes(1);
+    const prodUpdateCall = (
+      productUpdate.mock.calls as unknown as Array<
+        [{ where: { id: string }; data: { name: string; deletedAt: Date } }]
+      >
+    )[0][0];
+    expect(prodUpdateCall.where.id).toBe('prod-1');
+    expect(prodUpdateCall.data.name).toContain('Old Product__del_');
+
+    expect(variantUpdate).toHaveBeenCalledTimes(2);
+    const var1Update = (
+      variantUpdate.mock.calls as unknown as Array<
+        [{ where: { id: string }; data: { sku: string; barcode: string | null } }]
+      >
+    )[0][0];
+    expect(var1Update.where.id).toBe('var-1');
+    expect(var1Update.data.sku).toContain('SKU-1__del_');
+    expect(var1Update.data.barcode).toContain('BAR-1__del_');
+
+    const var2Update = (
+      variantUpdate.mock.calls as unknown as Array<
+        [{ where: { id: string }; data: { sku: string; barcode: string | null } }]
+      >
+    )[1][0];
+    expect(var2Update.where.id).toBe('var-2');
+    expect(var2Update.data.sku).toContain('SKU-2__del_');
+    expect(var2Update.data.barcode).toBeNull();
+  });
+
+  describe('getSummary', () => {
+    it('returns accurate summary counts for products, branch units, low stock SKUs, and inventory value', async () => {
+      productCount.mockResolvedValue(2);
+      variantFindMany.mockResolvedValue([
+        {
+          id: 'v-1',
+          stock: 50,
+          sellingPrice: 1200,
+          costPrice: 800,
+          locationStocks: [{ locationId: 'loc-1', stock: 50 }],
+        },
+        {
+          id: 'v-2',
+          stock: 48,
+          sellingPrice: 1200,
+          costPrice: 800,
+          locationStocks: [{ locationId: 'loc-1', stock: 48 }],
+        },
+      ]);
+
+      const res = await service.getSummary(admin, 'biz-1', 'loc-1');
+
+      expect(res).toEqual({
+        products: 2,
+        units: 98,
+        unitsInBranch: 98,
+        lowStock: 0,
+        lowStockSkus: 0,
+        inventoryValue: 78400,
+        value: 78400,
+        currency: 'BDT',
+      });
+    });
+  });
 });
+

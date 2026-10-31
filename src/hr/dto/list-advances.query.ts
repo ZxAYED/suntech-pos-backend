@@ -1,7 +1,15 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { AdvanceStatus } from '@prisma/client';
-import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import {
+  IsBoolean,
+  IsEnum,
+  IsIn,
+  IsInt,
+  IsOptional,
+  Max,
+  Min,
+} from 'class-validator';
 import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
 
 export class ListAdvancesQueryDto {
@@ -32,13 +40,22 @@ export class ListAdvancesQueryDto {
   year?: number;
 
   @ApiPropertyOptional({
-    enum: AdvanceStatus,
-    enumName: 'AdvanceStatus',
-    description: 'Filter by advance status (PENDING, DEDUCTED)',
+    enum: [...Object.values(AdvanceStatus), 'VOIDED'],
+    description: 'Filter by advance status (PENDING, DEDUCTED, VOIDED)',
   })
   @IsOptional()
-  @IsEnum(AdvanceStatus)
-  status?: AdvanceStatus;
+  @IsIn([...Object.values(AdvanceStatus), 'VOIDED'])
+  status?: AdvanceStatus | 'VOIDED';
+
+  @ApiPropertyOptional({
+    description:
+      'Whether to include soft-deleted / voided advances in history (Admin / authorized audit)',
+    example: true,
+  })
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  includeDeleted?: boolean;
 
   @ApiPropertyOptional({
     description: 'Optional business UUID for Admin; Cashier is locked to assigned business from token',

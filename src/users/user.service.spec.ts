@@ -64,6 +64,7 @@ describe('UserService', () => {
     userFindFirst.mockReset();
     userUpdate.mockReset();
     withUniquePublicId.mockReset();
+    shiftSessionFindFirst.mockReset();
   });
 
   describe('createCashier', () => {
@@ -363,6 +364,116 @@ describe('UserService', () => {
           { status: AccountStatus.SUSPENDED },
         ),
       ).rejects.toBeInstanceOf(ConflictException);
+    });
+  });
+
+  describe('Multi-business Admin Cashier Management', () => {
+    it('creates a cashier under a secondary business owned by the admin', async () => {
+      locationFindFirst.mockResolvedValue({
+        id: 'loc-biz2-1',
+        businessId: 'biz-2',
+        deletedAt: null,
+      });
+      withUniquePublicId.mockImplementation(async (callback) =>
+        callback('CSH-BIZ2-001'),
+      );
+      userCreate.mockResolvedValue({
+        id: 'user-csh-biz2',
+        fullName: 'Kamal Hasan',
+        email: 'kamal@biz2.com',
+        role: Role.CASHIER,
+        businessId: 'biz-2',
+        locationId: 'loc-biz2-1',
+      });
+
+      const admin = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+        businessIds: ['biz-1', 'biz-2'],
+      };
+
+      const result = await service.createCashier(admin, {
+        businessId: 'biz-2',
+        fullName: 'Kamal Hasan',
+        email: 'kamal@biz2.com',
+        password: 'password123',
+        locationId: 'loc-biz2-1',
+        monthlySalary: 25000,
+      });
+
+      expect(locationFindFirst).toHaveBeenCalledWith({
+        where: {
+          id: 'loc-biz2-1',
+          businessId: 'biz-2',
+          deletedAt: null,
+        },
+      });
+      expect(userCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            businessId: 'biz-2',
+            locationId: 'loc-biz2-1',
+          }),
+        }),
+      );
+      expect(result.id).toBe('user-csh-biz2');
+    });
+
+    it('rejects cashier creation when admin specifies a businessId they do not own', async () => {
+      const admin = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+        businessIds: ['biz-1'],
+      };
+
+      await expect(
+        service.createCashier(admin, {
+          businessId: 'biz-unowned',
+          fullName: 'Unauthorized Cashier',
+          password: 'password123',
+          locationId: 'loc-1',
+          monthlySalary: 20000,
+        }),
+      ).rejects.toThrow('You do not have access to this business');
+    });
+
+    it('updates cashier under a specified secondary business owned by admin', async () => {
+      userFindFirst.mockResolvedValue({
+        id: 'csh-biz2',
+        businessId: 'biz-2',
+        role: Role.CASHIER,
+      });
+      locationFindFirst.mockResolvedValue({
+        id: 'loc-biz2-new',
+        businessId: 'biz-2',
+        deletedAt: null,
+      });
+      userUpdate.mockResolvedValue({
+        id: 'csh-biz2',
+        fullName: 'Kamal Updated',
+        locationId: 'loc-biz2-new',
+        location: { id: 'loc-biz2-new', name: 'Biz2 New Branch' },
+      });
+
+      const admin = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+        businessIds: ['biz-1', 'biz-2'],
+      };
+
+      const result = await service.updateCashier(admin, 'csh-biz2', {
+        businessId: 'biz-2',
+        fullName: 'Kamal Updated',
+        locationId: 'loc-biz2-new',
+      });
+
+      expect(locationFindFirst).toHaveBeenCalledWith({
+        where: { id: 'loc-biz2-new', businessId: 'biz-2', deletedAt: null },
+      });
+      expect(result.fullName).toBe('Kamal Updated');
     });
   });
 });

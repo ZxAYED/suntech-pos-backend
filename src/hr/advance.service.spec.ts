@@ -173,6 +173,7 @@ describe('AdvanceService', () => {
       amount: 1000,
       reason: 'Medical',
       status: AdvanceStatus.PENDING,
+      deletedAt: null,
       takenAt: expect.any(Date),
       createdAt: expect.any(Date),
     });
@@ -180,6 +181,7 @@ describe('AdvanceService', () => {
       totalActiveAdvances: 1000,
       pendingCount: 1,
       deductedCount: 0,
+      voidedCount: 0,
     });
   });
 
@@ -243,6 +245,7 @@ describe('AdvanceService', () => {
       totalActiveAdvances: 1000,
       pendingCount: 1,
       deductedCount: 1,
+      voidedCount: 0,
     });
   });
 
@@ -335,6 +338,64 @@ describe('AdvanceService', () => {
           'non-existent',
         ),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('soft-deleted history and VOIDED status', () => {
+    it('exposes soft-deleted advances with VOIDED status and deletedAt when includeDeleted is true', async () => {
+      const deletedDate = new Date('2026-10-15T10:00:00Z');
+      advanceFindMany.mockResolvedValue([
+        {
+          id: 'adv-voided-1',
+          cashierId: 'cashier-1',
+          amount: 700,
+          reason: 'Voided advance',
+          status: AdvanceStatus.PENDING,
+          deletedAt: deletedDate,
+          takenAt: new Date('2026-10-01'),
+          createdAt: new Date('2026-10-01'),
+          cashier: {
+            fullName: 'Alex Rivera',
+            publicId: 'CSH-0001',
+            role: Role.CASHIER,
+            location: { name: 'Main Branch' },
+          },
+        },
+      ]);
+
+      const res = await service.list(
+        { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+        { includeDeleted: true },
+      );
+
+      expect(advanceFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { businessId: 'biz-1' },
+        }),
+      );
+      expect(res.items[0].status).toBe('VOIDED');
+      expect(res.items[0].deletedAt).toEqual(deletedDate);
+      expect(res.summary.voidedCount).toBe(1);
+      expect(res.summary.totalActiveAdvances).toBe(0);
+      expect(res.summary.pendingCount).toBe(0);
+    });
+
+    it('filters for status VOIDED and sets deletedAt where clause', async () => {
+      advanceFindMany.mockResolvedValue([]);
+
+      await service.list(
+        { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+        { status: 'VOIDED' },
+      );
+
+      expect(advanceFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            businessId: 'biz-1',
+            deletedAt: { not: null },
+          }),
+        }),
+      );
     });
   });
 });

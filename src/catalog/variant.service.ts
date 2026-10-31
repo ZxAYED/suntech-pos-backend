@@ -82,10 +82,15 @@ export function presentVariant(
       ? Math.round(((sellingPrice - costPrice) / sellingPrice) * 100)
       : null;
 
+  const locationStocks = (variant.locationStocks ?? []).map((ls: any) => ({
+    ...ls,
+    locationName: ls.location?.name ?? ls.locationName ?? null,
+  }));
+
   let stock = variant.stock;
   if (effectiveLocationId) {
-    if (variant.locationStocks && variant.locationStocks.length > 0) {
-      const match = variant.locationStocks.find(
+    if (locationStocks.length > 0) {
+      const match = locationStocks.find(
         (ls) => ls.locationId === effectiveLocationId,
       );
       stock = match ? match.stock : 0;
@@ -95,6 +100,7 @@ export function presentVariant(
   return {
     ...variant,
     stock,
+    locationStocks,
     productName: variant.product?.name ?? '',
     categoryId:
       variant.product?.category?.id ?? variant.product?.categoryId ?? null,

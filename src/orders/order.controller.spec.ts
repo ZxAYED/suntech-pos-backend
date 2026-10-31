@@ -15,6 +15,7 @@ describe('OrdersController', () => {
     createCatalogOrder: jest.fn(),
     createCustomOrder: jest.fn(),
     getOrders: jest.fn(),
+    getOrderById: jest.fn(),
     checkout: jest.fn(),
   };
 
@@ -85,6 +86,18 @@ describe('OrdersController', () => {
         page: 1,
         limit: 20,
       });
+    });
+  });
+
+  describe('getOrderById', () => {
+    it('delegates to ordersService.getOrderById with actor and id', async () => {
+      const actor = { sub: 'user-1', role: 'ADMIN' as const, businessId: 'biz-1' };
+      const expectedResult = { id: 'order-123', totalAmount: 1500, lines: [] };
+      mockOrdersService.getOrderById.mockResolvedValue(expectedResult);
+
+      const result = await controller.getOrderById(actor as any, 'order-123');
+
+      expect(service.getOrderById).toHaveBeenCalledWith(actor, 'order-123');
       expect(result).toBe(expectedResult);
     });
   });

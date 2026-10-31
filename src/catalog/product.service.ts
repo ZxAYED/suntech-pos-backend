@@ -29,6 +29,12 @@ const variantSelect = {
     select: {
       locationId: true,
       stock: true,
+      location: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
     },
   },
 } satisfies Prisma.VariantSelect;
@@ -53,8 +59,23 @@ const productSelect = {
 
 type ProductRow = Prisma.ProductGetPayload<{ select: typeof productSelect }>;
 
-export type PresentedProduct = Omit<ProductRow, 'category'> & {
+export type PresentedLocationStock = {
+  locationId: string;
+  locationName: string | null;
+  stock: number;
+  location?: { id: string; name: string } | null;
+};
+
+export type PresentedVariant = Omit<
+  ProductRow['variants'][number],
+  'locationStocks'
+> & {
+  locationStocks: PresentedLocationStock[];
+};
+
+export type PresentedProduct = Omit<ProductRow, 'category' | 'variants'> & {
   category: { id: string; name: string } | null;
+  variants: PresentedVariant[];
 };
 
 const NAME_TAKEN = 'A product with that name already exists';
@@ -169,6 +190,96 @@ export class ProductService {
     return products.map((p) => presentProduct(p, effectiveLocationId));
   }
 
+  async getSummary(
+    actor: AccessTokenPayload,
+    requestedBusinessId?: string,
+    requestedLocationId?: string,
+  ): Promise<{
+    products: number;
+    units: number;
+    unitsInBranch: number;
+    lowStock: number;
+    lowStockSkus: number;
+    inventoryValue: number;
+    value: number;
+    currency: string;
+  }> {
+    const businessId = await this.resolveBusinessId(actor, requestedBusinessId);
+    const effectiveLocationId =
+      actor.role === Role.CASHIER
+        ? actor.locationId
+        : requestedLocationId?.trim() || undefined;
+
+    const [productsCount, variants] = await Promise.all([
+      this.prisma.product.count({
+        where: {
+          businessId,
+          deletedAt: null,
+          ...(actor.role === Role.CASHIER ? { isActive: true } : {}),
+        },
+      }),
+      this.prisma.variant.findMany({
+        where: {
+          businessId,
+          deletedAt: null,
+          product: {
+            deletedAt: null,
+            ...(actor.role === Role.CASHIER ? { isActive: true } : {}),
+          },
+        },
+        select: {
+          id: true,
+          stock: true,
+          sellingPrice: true,
+          costPrice: true,
+          locationStocks: {
+            select: {
+              locationId: true,
+              stock: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    let totalUnits = 0;
+    let lowStockCount = 0;
+    let totalInventoryValue = 0;
+
+    const LOW_STOCK_THRESHOLD = 5;
+
+    for (const v of variants) {
+      let stock = v.stock;
+      if (effectiveLocationId) {
+        if (v.locationStocks && v.locationStocks.length > 0) {
+          const match = v.locationStocks.find(
+            (ls) => ls.locationId === effectiveLocationId,
+          );
+          stock = match ? match.stock : 0;
+        }
+      }
+
+      totalUnits += stock;
+      if (stock <= LOW_STOCK_THRESHOLD) {
+        lowStockCount += 1;
+      }
+
+      const unitCost = v.costPrice != null ? v.costPrice : v.sellingPrice;
+      totalInventoryValue += stock * unitCost;
+    }
+
+    return {
+      products: productsCount,
+      units: totalUnits,
+      unitsInBranch: totalUnits,
+      lowStock: lowStockCount,
+      lowStockSkus: lowStockCount,
+      inventoryValue: totalInventoryValue,
+      value: totalInventoryValue,
+      currency: 'BDT',
+    };
+  }
+
   async get(
     actor: AccessTokenPayload,
     productId: string,
@@ -272,6 +383,13 @@ export class ProductService {
     const deletedAt = new Date();
     const suffixedName = `${product.name}__del_${timestamp}`;
 
+    const activeVariants = this.prisma.variant?.findMany
+      ? await this.prisma.variant.findMany({
+          where: { productId: product.id, deletedAt: null },
+          select: { id: true, sku: true, barcode: true },
+        })
+      : [];
+
     await this.prisma.product.update({
       where: { id: product.id },
       data: {
@@ -279,6 +397,23 @@ export class ProductService {
         deletedAt,
       },
     });
+
+    if (this.prisma.variant?.update) {
+      for (const v of activeVariants) {
+        const suffixedSku = `${v.sku}__del_${timestamp}`;
+        const suffixedBarcode = v.barcode
+          ? `${v.barcode}__del_${timestamp}`
+          : null;
+        await this.prisma.variant.update({
+          where: { id: v.id },
+          data: {
+            sku: suffixedSku,
+            barcode: suffixedBarcode,
+            deletedAt,
+          },
+        });
+      }
+    }
 
     return { id: productId, deletedAt };
   }
@@ -340,21 +475,30 @@ export function presentProduct(
       ? { id: product.category.id, name: product.category.name }
       : null;
 
-  const variants = (product.variants ?? []).map((v) => {
+  const variants: PresentedVariant[] = (product.variants ?? []).map((v) => {
     let stock = v.stock;
-    if (
-      effectiveLocationId &&
-      (v as any).locationStocks &&
-      (v as any).locationStocks.length > 0
-    ) {
-      const match = (v as any).locationStocks.find(
-        (ls: any) => ls.locationId === effectiveLocationId,
+    const locationStocks: PresentedLocationStock[] = (
+      (v as any).locationStocks ?? []
+    ).map((ls: any) => ({
+      locationId: ls.locationId,
+      locationName: ls.location?.name ?? ls.locationName ?? null,
+      stock: ls.stock,
+      ...(ls.location
+        ? { location: { id: ls.location.id, name: ls.location.name } }
+        : {}),
+    }));
+
+    if (effectiveLocationId && locationStocks.length > 0) {
+      const match = locationStocks.find(
+        (ls) => ls.locationId === effectiveLocationId,
       );
       stock = match ? match.stock : 0;
     }
+
     return {
       ...v,
       stock,
+      locationStocks,
     };
   });
 

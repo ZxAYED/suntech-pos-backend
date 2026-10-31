@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsString,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { PaymentMethod } from '@prisma/client';
@@ -63,15 +64,15 @@ export class CreateCatalogOrderDto {
   @Min(0)
   tenderedAmount: number;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     enum: PaymentMethod,
     enumName: 'PaymentMethod',
-    default: PaymentMethod.COD,
-    description: 'Payment method / type (COD, BKASH, NAGAD, BANK)',
+    description: 'Explicit payment method: COD, BKASH, NAGAD, BANK',
+    example: PaymentMethod.COD,
   })
-  @IsOptional()
+  @ValidateIf((dto: CreateCatalogOrderDto) => !dto.paymentType)
   @IsEnum(PaymentMethod)
-  paymentMethod?: PaymentMethod;
+  paymentMethod: PaymentMethod;
 
   @ApiPropertyOptional({
     enum: PaymentMethod,

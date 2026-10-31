@@ -10,7 +10,17 @@ import {
   MinLength,
 } from 'class-validator';
 
+import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
+
 export class CreateCashierDto {
+  @ApiPropertyOptional({
+    description: 'Target business UUID for multi-business Admin',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsEntityId()
+  businessId?: string;
+
   @ApiProperty({
     description: 'Full name of cashier',
     example: 'Alex Rivera',
