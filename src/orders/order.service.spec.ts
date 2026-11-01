@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
@@ -31,6 +32,7 @@ describe('OrdersService', () => {
   const auditCreate = jest.fn();
   const locationStockFindUnique = jest.fn();
   const locationStockUpdate = jest.fn();
+  const locationStockUpdateMany = jest.fn();
   const locationStockUpsert = jest.fn();
   const locationStockCreate = jest.fn();
 
@@ -55,6 +57,7 @@ describe('OrdersService', () => {
     locationStock: {
       findUnique: locationStockFindUnique,
       update: locationStockUpdate,
+      updateMany: locationStockUpdateMany,
       upsert: locationStockUpsert,
       create: locationStockCreate,
     },
@@ -102,6 +105,22 @@ describe('OrdersService', () => {
     status: ShiftStatus.OPEN,
   };
 
+  const mockCatalogVariant = {
+    id: 'variant-1',
+    name: '128GB Black',
+    stock: 10,
+    sellingPrice: 1500,
+    isActive: true,
+    product: {
+      id: 'prod-1',
+      name: 'iPhone 15',
+      isActive: true,
+      deletedAt: null,
+      category: null,
+    },
+    locationStocks: [{ id: 'ls-1', stock: 10 }],
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
     userFindFirst.mockResolvedValue(cashierUser);
@@ -115,6 +134,8 @@ describe('OrdersService', () => {
     orderFindUnique.mockResolvedValue(null);
     locationStockFindUnique.mockResolvedValue(null);
     locationStockUpdate.mockResolvedValue({ stock: 8 });
+    locationStockUpdateMany.mockResolvedValue({ count: 1 });
+    variantFindMany.mockResolvedValue([mockCatalogVariant]);
     locationStockUpsert.mockImplementation(
       ({ create }: { create: { stock: number } }) =>
         Promise.resolve({ stock: create.stock }),
@@ -131,15 +152,7 @@ describe('OrdersService', () => {
 
   describe('createCatalogOrder (Flow 1)', () => {
     it('successfully processes a catalog order with stock decrement and shift increment', async () => {
-      variantFindMany.mockResolvedValue([
-        {
-          id: 'variant-1',
-          name: '128GB Black',
-          stock: 10,
-          sellingPrice: 1500,
-          product: { name: 'iPhone 15' },
-        },
-      ]);
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
 
       const result = await service.createCatalogOrder('user-cashier-1', {
         locationId: 'loc-1',
@@ -167,7 +180,10 @@ describe('OrdersService', () => {
         include: {
           product: {
             select: {
+              id: true,
               name: true,
+              isActive: true,
+              deletedAt: true,
               category: { select: { name: true } },
             },
           },
@@ -240,15 +256,7 @@ describe('OrdersService', () => {
     });
 
     it('supports non-COD payment methods like BKASH or BANK for catalog orders', async () => {
-      variantFindMany.mockResolvedValue([
-        {
-          id: 'variant-1',
-          name: '128GB Black',
-          stock: 10,
-          sellingPrice: 1500,
-          product: { name: 'iPhone 15' },
-        },
-      ]);
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
 
       await service.createCatalogOrder('user-cashier-1', {
         locationId: 'loc-1',
@@ -267,37 +275,102 @@ describe('OrdersService', () => {
       );
     });
 
-    it('allows stock to become negative and records a low-stock audit', async () => {
-      variantFindMany.mockResolvedValue([
+    it('rejects online catalog order when stock is insufficient and does not allow negative stock', async () => {
+      variantFindMany.mockResolvedValueOnce([
         {
           id: 'variant-1',
           name: '128GB Black',
           stock: 1, // Insufficient for quantity 2
           sellingPrice: 1500,
-          product: { name: 'iPhone 15' },
+          isActive: true,
+          product: {
+            id: 'prod-1',
+            name: 'iPhone 15',
+            isActive: true,
+            deletedAt: null,
+          },
           locationStocks: [{ id: 'ls-1', stock: 1 }],
         },
       ]);
-      locationStockUpdate.mockResolvedValueOnce({ stock: -1 });
 
-      await service.createCatalogOrder('user-cashier-1', {
-        locationId: 'loc-1',
-        tenderedAmount: 3000,
-        lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
-      });
-
-      expect(variantUpdate).toHaveBeenCalledWith({
-        where: { id: 'variant-1' },
-        data: { stock: { decrement: 2 } },
-      });
-      expect(auditCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            action: 'LOW_STOCK_AFTER_SALE',
-            metadata: expect.objectContaining({ resultingStock: -1 }),
-          }),
+      await expect(
+        service.createCatalogOrder('user-cashier-1', {
+          locationId: 'loc-1',
+          tenderedAmount: 3000,
+          lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
         }),
-      );
+      ).rejects.toThrow(BadRequestException);
+
+      expect(variantUpdate).not.toHaveBeenCalled();
+      expect(orderCreate).not.toHaveBeenCalled();
+    });
+
+    it('rejects online catalog order when concurrent checkout exhausts stock (atomic conflict)', async () => {
+      locationStockUpdateMany.mockResolvedValueOnce({ count: 0 });
+
+      await expect(
+        service.createCatalogOrder('user-cashier-1', {
+          locationId: 'loc-1',
+          tenderedAmount: 3000,
+          lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
+        }),
+      ).rejects.toThrow(ConflictException);
+
+      expect(orderCreate).not.toHaveBeenCalled();
+    });
+
+    it('rejects online catalog order when variant is inactive', async () => {
+      variantFindMany.mockResolvedValueOnce([
+        {
+          id: 'variant-1',
+          name: '128GB Black',
+          stock: 10,
+          sellingPrice: 1500,
+          isActive: false,
+          product: {
+            id: 'prod-1',
+            name: 'iPhone 15',
+            isActive: true,
+            deletedAt: null,
+          },
+          locationStocks: [{ id: 'ls-1', stock: 10 }],
+        },
+      ]);
+
+      await expect(
+        service.createCatalogOrder('user-cashier-1', {
+          locationId: 'loc-1',
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects online catalog order when product is inactive', async () => {
+      variantFindMany.mockResolvedValueOnce([
+        {
+          id: 'variant-1',
+          name: '128GB Black',
+          stock: 10,
+          sellingPrice: 1500,
+          isActive: true,
+          product: {
+            id: 'prod-1',
+            name: 'iPhone 15',
+            isActive: false,
+            deletedAt: null,
+          },
+          locationStocks: [{ id: 'ls-1', stock: 10 }],
+        },
+      ]);
+
+      await expect(
+        service.createCatalogOrder('user-cashier-1', {
+          locationId: 'loc-1',
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        }),
+      ).rejects.toThrow(BadRequestException);
     });
 
     it('rejects when variant is not found in the tenant', async () => {
@@ -313,15 +386,7 @@ describe('OrdersService', () => {
     });
 
     it('rejects when tenderedAmount is less than subtotal', async () => {
-      variantFindMany.mockResolvedValue([
-        {
-          id: 'variant-1',
-          name: '128GB Black',
-          stock: 10,
-          sellingPrice: 1500,
-          product: { name: 'iPhone 15' },
-        },
-      ]);
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
 
       await expect(
         service.createCatalogOrder('user-cashier-1', {
@@ -334,15 +399,7 @@ describe('OrdersService', () => {
 
     it('allows cashier checkout without an open shift', async () => {
       shiftFindFirst.mockResolvedValue(null);
-      variantFindMany.mockResolvedValue([
-        {
-          id: 'variant-1',
-          name: '128GB Black',
-          stock: 10,
-          sellingPrice: 1500,
-          product: { name: 'iPhone 15' },
-        },
-      ]);
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
 
       await service.createCatalogOrder('user-cashier-1', {
         locationId: 'loc-1',
@@ -360,15 +417,7 @@ describe('OrdersService', () => {
     it('allows Admin to sell without shiftId', async () => {
       userFindFirst.mockResolvedValue(adminUser);
       shiftFindFirst.mockResolvedValue(null);
-      variantFindMany.mockResolvedValue([
-        {
-          id: 'variant-1',
-          name: '128GB Black',
-          stock: 10,
-          sellingPrice: 1500,
-          product: { name: 'iPhone 15' },
-        },
-      ]);
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
 
       await service.createCatalogOrder('user-admin-1', {
         locationId: 'loc-1',
@@ -396,15 +445,7 @@ describe('OrdersService', () => {
         locationId: 'loc-1',
       };
 
-      variantFindMany.mockResolvedValue([
-        {
-          id: 'variant-1',
-          name: '128GB Black',
-          stock: 10,
-          sellingPrice: 1500,
-          product: { name: 'iPhone 15' },
-        },
-      ]);
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
 
       await service.createCatalogOrder(cashierActor, {
         locationId: 'loc-other',
@@ -423,15 +464,7 @@ describe('OrdersService', () => {
     });
 
     it('does not increment physical cash drawer when paymentMethod is digital (BKASH)', async () => {
-      variantFindMany.mockResolvedValue([
-        {
-          id: 'variant-1',
-          name: '128GB Black',
-          stock: 10,
-          sellingPrice: 1500,
-          product: { name: 'iPhone 15' },
-        },
-      ]);
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
 
       await service.createCatalogOrder('user-cashier-1', {
         locationId: 'loc-1',
@@ -742,6 +775,35 @@ describe('OrdersService', () => {
       expect(result.results[0].status).toBe('REJECTED');
       expect(orderCreate).not.toHaveBeenCalled();
     });
+
+    it('rejects duplicate clientOrderId replay when payload is modified (F21)', async () => {
+      orderFindUnique.mockResolvedValueOnce({
+        id: 'order-123',
+        invoiceNumber: 'INV-123',
+        totalAmount: 1000,
+        lines: [{ quantity: 1, unitPrice: 1000 }],
+      });
+
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '77777777-7777-4777-8777-777777777777',
+            occurredAt: '2026-10-24T13:30:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 2000,
+            lines: [
+              { productName: 'Different Item', quantity: 1, unitPrice: 2000 },
+            ],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('REJECTED');
+      expect(result.results[0].error).toContain(
+        'clientOrderId replay mismatch',
+      );
+    });
   });
 
   describe('getOrders', () => {
@@ -950,9 +1012,16 @@ describe('OrdersService', () => {
         stock: 10,
         sellingPrice: 500,
         costPrice: 300,
-        product: { name: 'Catalog item', category: { name: 'General' } },
+        isActive: true,
+        product: {
+          name: 'Catalog item',
+          isActive: true,
+          deletedAt: null,
+          category: { name: 'General' },
+        },
         locationStocks: [],
       });
+      locationStockFindUnique.mockResolvedValue({ id: 'ls-1', stock: 10 });
 
       await service.checkoutWithin(
         tx as unknown as Prisma.TransactionClient,
@@ -972,6 +1041,34 @@ describe('OrdersService', () => {
           data: expect.objectContaining({ shiftId: null }),
         }),
       );
+    });
+
+    it('rejects legacy checkout when branch stock is insufficient', async () => {
+      shiftFindFirst.mockResolvedValue(null);
+      variantFindFirst.mockResolvedValue({
+        id: 'variant-1',
+        name: 'Catalog item',
+        stock: 1,
+        sellingPrice: 500,
+        isActive: true,
+        product: { name: 'Catalog item', isActive: true, deletedAt: null },
+      });
+      locationStockFindUnique.mockResolvedValue({ id: 'ls-1', stock: 1 });
+
+      await expect(
+        service.checkoutWithin(
+          tx as unknown as Prisma.TransactionClient,
+          {
+            sub: 'cashier-1',
+            role: Role.CASHIER,
+            businessId: 'biz-1',
+            locationId: 'loc-1',
+          },
+          'biz-1',
+          { items: [{ variantId: 'variant-1', quantity: 2 }] },
+          'RCPT-TEST',
+        ),
+      ).rejects.toThrow(BadRequestException);
     });
   });
 

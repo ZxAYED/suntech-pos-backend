@@ -1,5 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { ExpenseCategory, Prisma } from '@prisma/client';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { ExpenseCategory, ExpenseSourceType, Prisma } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { payrollPeriod } from '../hr/payroll-period';
 import { getDhakaDateParts } from '../common/utils/timezone.util';
@@ -14,11 +18,16 @@ const expenseSelect = {
   businessId: true,
   locationId: true,
   userId: true,
+  sourceType: true,
+  beneficiaryCashierId: true,
   amount: true,
   title: true,
   category: true,
   note: true,
   spentAt: true,
+  paidAt: true,
+  advanceId: true,
+  payrollId: true,
   deletedAt: true,
   createdAt: true,
   updatedAt: true,
@@ -36,14 +45,30 @@ const expenseSelect = {
       role: true,
     },
   },
+  beneficiaryCashier: {
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+      role: true,
+    },
+  },
 } satisfies Prisma.ExpenseSelect;
 
 export type PresentedExpense = Prisma.ExpenseGetPayload<{
   select: typeof expenseSelect;
-}>;
+}> & {
+  type: ExpenseSourceType;
+};
 
 export interface CategoryExpenseBreakdown {
   category: ExpenseCategory;
+  total: number;
+  count: number;
+}
+
+export interface TypeExpenseBreakdown {
+  type: ExpenseSourceType;
   total: number;
   count: number;
 }
@@ -55,8 +80,18 @@ export interface MonthlyExpenseSummary {
     totalExpenses: number;
     expenseCount: number;
     byCategory: CategoryExpenseBreakdown[];
+    byType: TypeExpenseBreakdown[];
   };
   items: PresentedExpense[];
+}
+
+function formatExpense(
+  record: Prisma.ExpenseGetPayload<{ select: typeof expenseSelect }>,
+): PresentedExpense {
+  return {
+    ...record,
+    type: record.sourceType,
+  };
 }
 
 @Injectable()
@@ -80,7 +115,7 @@ export class ExpenseService {
 
     const spentAt = dto.spentAt ? new Date(dto.spentAt) : new Date();
 
-    return this.prisma.expense.create({
+    const created = await this.prisma.expense.create({
       data: {
         businessId,
         locationId: dto.locationId ?? null,
@@ -88,11 +123,14 @@ export class ExpenseService {
         amount: dto.amount,
         title: dto.title.trim(),
         category: dto.category ?? ExpenseCategory.OTHER,
+        sourceType: ExpenseSourceType.MANUAL,
         note: dto.note?.trim() || null,
         spentAt,
       },
       select: expenseSelect,
     });
+
+    return formatExpense(created);
   }
 
   async remove(
@@ -108,6 +146,16 @@ export class ExpenseService {
 
     if (!existing) {
       throw new NotFoundException('Expense not found');
+    }
+
+    if (
+      existing.sourceType !== ExpenseSourceType.MANUAL ||
+      existing.advanceId ||
+      existing.payrollId
+    ) {
+      throw new BadRequestException(
+        'Cannot manually delete a system-managed salary projection (SALARY_ADVANCE / PAYROLL_NET). Use the corresponding advance or payroll workflow.',
+      );
     }
 
     const deletedAt = new Date();
@@ -141,45 +189,88 @@ export class ExpenseService {
       where.locationId = query.locationId;
     }
 
+    if (query.type) {
+      where.sourceType = query.type;
+    }
+
     if (query.category) {
       where.category = query.category;
     }
 
-    const items = await this.prisma.expense.findMany({
-      where,
-      select: expenseSelect,
-      orderBy: { spentAt: 'desc' },
-    });
+    const [aggResult, rawItems] = await Promise.all([
+      this.prisma.expense.aggregate
+        ? this.prisma.expense.aggregate({
+            where,
+            _sum: { amount: true },
+            _count: { id: true },
+          })
+        : Promise.resolve(null),
+      this.prisma.expense.findMany({
+        where,
+        select: expenseSelect,
+        orderBy: { spentAt: 'desc' },
+      }),
+    ]);
 
-    const totalExpenses = items.reduce((sum, item) => sum + item.amount, 0);
+    const items = rawItems.map(formatExpense);
 
-    const breakdownMap = new Map<
+    const totalExpenses =
+      aggResult?._sum?.amount ??
+      items.reduce((sum, item) => sum + item.amount, 0);
+
+    const categoryMap = new Map<
       ExpenseCategory,
       { total: number; count: number }
     >();
+    const typeMap = new Map<
+      ExpenseSourceType,
+      { total: number; count: number }
+    >();
+
     for (const item of items) {
-      const current = breakdownMap.get(item.category) ?? { total: 0, count: 0 };
-      breakdownMap.set(item.category, {
-        total: current.total + item.amount,
-        count: current.count + 1,
+      const catCurrent = categoryMap.get(item.category) ?? {
+        total: 0,
+        count: 0,
+      };
+      categoryMap.set(item.category, {
+        total: catCurrent.total + item.amount,
+        count: catCurrent.count + 1,
+      });
+
+      const typeCurrent = typeMap.get(item.sourceType) ?? {
+        total: 0,
+        count: 0,
+      };
+      typeMap.set(item.sourceType, {
+        total: typeCurrent.total + item.amount,
+        count: typeCurrent.count + 1,
       });
     }
 
     const byCategory: CategoryExpenseBreakdown[] = Array.from(
-      breakdownMap.entries(),
+      categoryMap.entries(),
     ).map(([category, stats]) => ({
       category,
       total: stats.total,
       count: stats.count,
     }));
 
+    const byType: TypeExpenseBreakdown[] = Array.from(typeMap.entries()).map(
+      ([type, stats]) => ({
+        type,
+        total: stats.total,
+        count: stats.count,
+      }),
+    );
+
     return {
       month,
       year,
       summary: {
         totalExpenses,
-        expenseCount: items.length,
+        expenseCount: aggResult?._count?.id ?? items.length,
         byCategory,
+        byType,
       },
       items,
     };
@@ -204,6 +295,10 @@ export class ExpenseService {
       where.locationId = query.locationId;
     }
 
+    if (query.type) {
+      where.sourceType = query.type;
+    }
+
     if (query.category) {
       where.category = query.category;
     }
@@ -225,17 +320,30 @@ export class ExpenseService {
       ];
     }
 
-    const items = await this.prisma.expense.findMany({
-      where,
-      select: expenseSelect,
-      orderBy: { spentAt: 'desc' },
-    });
+    const [aggResult, rawItems] = await Promise.all([
+      this.prisma.expense.aggregate
+        ? this.prisma.expense.aggregate({
+            where,
+            _sum: { amount: true },
+            _count: { id: true },
+          })
+        : Promise.resolve(null),
+      this.prisma.expense.findMany({
+        where,
+        select: expenseSelect,
+        orderBy: { spentAt: 'desc' },
+      }),
+    ]);
 
-    const totalAmount = items.reduce((sum, item) => sum + item.amount, 0);
+    const items = rawItems.map(formatExpense);
+
+    const totalAmount =
+      aggResult?._sum?.amount ??
+      items.reduce((sum, item) => sum + item.amount, 0);
 
     return {
       items,
-      totalCount: items.length,
+      totalCount: aggResult?._count?.id ?? items.length,
       totalAmount,
     };
   }

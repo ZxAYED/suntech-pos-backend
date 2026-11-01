@@ -14,10 +14,12 @@ describe('ProductService', () => {
   const categoryFindFirst = jest.fn();
   const variantFindMany = jest.fn();
   const variantUpdate = jest.fn();
+  const variantUpdateMany = jest.fn();
   const variantCount = jest.fn();
   const orderLineCount = jest.fn();
 
   const prisma = {
+    $transaction: jest.fn((callback) => callback(prisma)),
     product: {
       count: productCount,
       findFirst: productFindFirst,
@@ -34,6 +36,7 @@ describe('ProductService', () => {
       count: variantCount,
       findMany: variantFindMany,
       update: variantUpdate,
+      updateMany: variantUpdateMany,
     },
     orderLine: {
       count: orderLineCount,
@@ -58,6 +61,7 @@ describe('ProductService', () => {
     categoryFindFirst.mockReset();
     variantFindMany.mockReset();
     variantUpdate.mockReset();
+    variantUpdateMany.mockReset();
     variantCount.mockReset();
     orderLineCount.mockReset();
 
@@ -249,82 +253,54 @@ describe('ProductService', () => {
     expect(res[0].name).toBe('iPhone 15 Pro');
   });
 
-  it('auto-restores soft-deleted product when re-creating with the same name', async () => {
-    productFindFirst.mockResolvedValueOnce(null); // assertNameAvailable returns null
+  it('rejects creating a product when an archived product with the same name exists', async () => {
     productFindFirst.mockResolvedValueOnce({
-      id: 'prod-old',
-      name: 'iPhone 15 Pro__del_9999',
-      deletedAt: new Date(),
-    });
-    productUpdate.mockResolvedValueOnce({
-      id: 'prod-old',
+      id: 'prod-archived-1',
       name: 'iPhone 15 Pro',
-      description: 'Restored phone',
-      categoryId: 'cat-1',
-      isActive: true,
-      customAttributes: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      category: { id: 'cat-1', name: 'Electronics', deletedAt: null },
-      variants: [],
+      deletedAt: new Date('2026-01-01T00:00:00Z'),
     });
 
-    const res = await service.create(admin, {
-      name: 'iPhone 15 Pro',
-      description: 'Restored phone',
-      categoryId: 'cat-1',
-    });
-
-    expect(productUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'prod-old' },
-        data: expect.objectContaining({
-          name: 'iPhone 15 Pro',
-          isActive: true,
-          deletedAt: null,
-        }),
+    await expect(
+      service.create(admin, {
+        name: 'iPhone 15 Pro',
+        description: 'New phone',
+        categoryId: 'cat-1',
       }),
-    );
-    expect(res.id).toBe('prod-old');
-    expect(res.name).toBe('iPhone 15 Pro');
+    ).rejects.toThrow(ConflictException);
+    expect(productCreate).not.toHaveBeenCalled();
+    expect(productUpdate).not.toHaveBeenCalled();
   });
 
-  it('blocks product deletion when active variants exist under it', async () => {
+  it('archives product and linked variants without renaming human-facing name', async () => {
     productFindFirst.mockResolvedValue({
       id: 'prod-1',
       name: 'iPhone 15 Pro',
     });
     variantCount.mockResolvedValue(2);
-
-    await expect(service.remove(admin, 'prod-1')).rejects.toThrow(
-      ConflictException,
-    );
-    expect(productUpdate).not.toHaveBeenCalled();
-    expect(productDelete).not.toHaveBeenCalled();
-  });
-
-  it('soft-deletes product with __del_ suffix when sales history exists', async () => {
-    productFindFirst.mockResolvedValue({
-      id: 'prod-1',
-      name: 'iPhone 15 Pro',
-    });
-    variantCount.mockResolvedValue(0);
     orderLineCount.mockResolvedValue(4);
 
     const res = await service.remove(admin, 'prod-1');
 
     expect(res.id).toBe('prod-1');
     expect(res.deletedAt).toBeInstanceOf(Date);
-    expect(productUpdate).toHaveBeenCalled();
-    const updateCall = productUpdate.mock.calls[0][0];
-    expect(updateCall.where.id).toBe('prod-1');
-    expect(updateCall.data.name).toMatch(/^iPhone 15 Pro__del_\d+$/);
-    expect(updateCall.data.isActive).toBe(false);
-    expect(updateCall.data.deletedAt).toBeInstanceOf(Date);
+    expect(variantUpdateMany).toHaveBeenCalledWith({
+      where: { productId: 'prod-1', deletedAt: null },
+      data: {
+        isActive: false,
+        deletedAt: expect.any(Date),
+      },
+    });
+    expect(productUpdate).toHaveBeenCalledWith({
+      where: { id: 'prod-1' },
+      data: {
+        isActive: false,
+        deletedAt: expect.any(Date),
+      },
+    });
     expect(productDelete).not.toHaveBeenCalled();
   });
 
-  it('hard-deletes product when no active variants and zero sales history exist', async () => {
+  it('archives product without physical delete even when zero sales history exists', async () => {
     productFindFirst.mockResolvedValue({
       id: 'prod-fresh',
       name: 'Typo Phone',
@@ -335,10 +311,14 @@ describe('ProductService', () => {
     const res = await service.remove(admin, 'prod-fresh');
 
     expect(res.id).toBe('prod-fresh');
-    expect(productDelete).toHaveBeenCalledWith({
+    expect(productDelete).not.toHaveBeenCalled();
+    expect(productUpdate).toHaveBeenCalledWith({
       where: { id: 'prod-fresh' },
+      data: {
+        isActive: false,
+        deletedAt: expect.any(Date),
+      },
     });
-    expect(productUpdate).not.toHaveBeenCalled();
   });
 
   it('throws NotFoundException when deleting non-existent product', async () => {

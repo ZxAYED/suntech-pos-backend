@@ -191,6 +191,127 @@ describe('AdminDashboardService', () => {
       expect(overview.drawer.cashPaidOut).toBe(1000);
       expect(overview.drawer.expectedCashInDrawer).toBe(19000); // 5000 + 15000 - 1000
     });
+
+    it('isolates expenses strictly by locationId, excluding other branches and unallocated records (cross-branch & unallocated isolation)', async () => {
+      orderCount.mockResolvedValue(0);
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: null } });
+      refundCount.mockResolvedValue(0);
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: null } });
+      shiftSessionFindFirst.mockResolvedValue(null);
+
+      // Branch 1 has 1,000 + 2,000 = 3,000 BDT in expenses
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 3000 } });
+
+      const overviewLoc1 = await service.getOverview(adminActor, {
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      });
+
+      expect(expenseAggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            businessId: 'biz-1',
+            locationId: 'loc-1', // Strictly branch 1
+            deletedAt: null,
+          }),
+          _sum: { amount: true },
+        }),
+      );
+      expect(overviewLoc1.kpis.todayExpenseTotal).toBe(3000);
+
+      // Now query Branch 2 - should query locationId: 'loc-2' and isolate
+      locationFindFirst.mockResolvedValue({
+        id: 'loc-2',
+        name: 'Dhanmondi Branch',
+      });
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 0 } });
+
+      const overviewLoc2 = await service.getOverview(adminActor, {
+        businessId: 'biz-1',
+        locationId: 'loc-2',
+      });
+
+      expect(expenseAggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            businessId: 'biz-1',
+            locationId: 'loc-2',
+            deletedAt: null,
+          }),
+        }),
+      );
+      expect(overviewLoc2.kpis.todayExpenseTotal).toBe(0);
+    });
+
+    it('excludes soft-deleted expense records (deletedAt: null check)', async () => {
+      orderCount.mockResolvedValue(0);
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: null } });
+      refundCount.mockResolvedValue(0);
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: null } });
+      shiftSessionFindFirst.mockResolvedValue(null);
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 3000 } });
+
+      await service.getOverview(adminActor, {
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      });
+
+      expect(expenseAggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            deletedAt: null,
+          }),
+        }),
+      );
+    });
+
+    it('handles zero vs missing data gracefully without NaN or crash', async () => {
+      orderCount.mockResolvedValue(0);
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: null } });
+      refundCount.mockResolvedValue(0);
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: null } });
+      shiftSessionFindFirst.mockResolvedValue(null);
+      // Missing data: _sum.amount is null
+      expenseAggregate.mockResolvedValue({ _sum: { amount: null } });
+
+      const overview = await service.getOverview(adminActor, {
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      });
+
+      expect(overview.kpis.todayExpenseTotal).toBe(0);
+      expect(overview.kpis.todayGrossSales).toBe(0);
+      expect(overview.kpis.todayNetSales).toBe(0);
+      expect(overview.kpis.netCashflowToday).toBe(0);
+    });
+
+    it('queries expenses strictly within Asia/Dhaka midnight boundaries', async () => {
+      orderCount.mockResolvedValue(0);
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: null } });
+      refundCount.mockResolvedValue(0);
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: null } });
+      shiftSessionFindFirst.mockResolvedValue(null);
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 3000 } });
+
+      await service.getOverview(adminActor, {
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      });
+
+      const callArgs = expenseAggregate.mock.calls[0][0];
+      const spentAtFilter = callArgs.where.spentAt;
+      expect(spentAtFilter).toBeDefined();
+      expect(spentAtFilter.gte).toBeInstanceOf(Date);
+      expect(spentAtFilter.lte).toBeInstanceOf(Date);
+      // gte must be before lte
+      expect(spentAtFilter.gte.getTime()).toBeLessThan(
+        spentAtFilter.lte.getTime(),
+      );
+      // Difference between start and end of day in ms should be 86399999 (23h 59m 59s 999ms)
+      expect(spentAtFilter.lte.getTime() - spentAtFilter.gte.getTime()).toBe(
+        24 * 60 * 60 * 1000 - 1,
+      );
+    });
   });
 
   describe('getInventoryAlerts', () => {
@@ -229,6 +350,19 @@ describe('AdminDashboardService', () => {
         locationId: 'loc-1',
       });
 
+      expect(variantFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            businessId: 'biz-1',
+            deletedAt: null,
+            isActive: true,
+            product: {
+              deletedAt: null,
+              isActive: true,
+            },
+          },
+        }),
+      );
       expect(alerts.lowStockThreshold).toBe(5);
       expect(alerts.outOfStockCount).toBe(1);
       expect(alerts.lowStockCount).toBe(1);

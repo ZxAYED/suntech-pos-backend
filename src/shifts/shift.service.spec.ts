@@ -1,4 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Role, ShiftStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isPreviousCalendarDay, ShiftService } from './shift.service';
@@ -23,13 +27,22 @@ describe('ShiftService', () => {
         findFirst: shiftFindFirst,
         create: shiftCreate,
         update: shiftUpdate,
+        updateMany: shiftUpdateMany,
+        findFirstOrThrow: shiftFindFirstOrThrow,
       },
       order: { aggregate: orderAggregate },
-      employeeAdvance: { aggregate: advanceAggregate },
+      employeeAdvance: {
+        aggregate: advanceAggregate,
+        findMany: advanceFindMany,
+      },
     }),
   );
   const prisma = {
     $transaction: transaction,
+    location: {
+      findFirst: locationFindFirst,
+      findUnique: locationFindFirst,
+    },
     shiftSession: {
       findFirst: shiftFindFirst,
       updateMany: shiftUpdateMany,
@@ -66,7 +79,7 @@ describe('ShiftService', () => {
     advanceAggregate.mockReset();
     advanceFindMany.mockReset();
 
-    locationFindFirst.mockResolvedValue({ id: 'loc-1' });
+    locationFindFirst.mockResolvedValue({ id: 'loc-1', businessId: 'biz-1' });
     shiftFindFirst.mockResolvedValue(null);
     shiftCreate.mockImplementation(({ data }: { data: object }) =>
       Promise.resolve({ id: 'shift-1', ...data }),
@@ -154,13 +167,13 @@ describe('ShiftService', () => {
       where: { id: 'shift-yesterday' },
       data: expect.objectContaining({
         status: ShiftStatus.CLOSED,
-        closingAmount: 9500, // 2000 + 8000 - 500
+        closingAmount: null,
         expectedAmount: 9500,
-        variance: 0,
+        variance: null,
         cashSales: 8000,
         advancesOut: 500,
         notes:
-          'Auto-closed: previous shift was left open before new shift start',
+          'Auto-closed: previous shift was left open before new shift start (COUNT_PENDING)',
       }),
     });
     expect(shiftCreate).toHaveBeenCalledWith({
@@ -302,6 +315,23 @@ describe('ShiftService', () => {
     await expect(service.getActive(cashier)).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  it('throws ForbiddenException when admin requests active shift for location not belonging to owned business', async () => {
+    locationFindFirst.mockResolvedValue({
+      id: 'loc-other',
+      businessId: 'biz-other',
+    });
+    const admin = {
+      sub: 'admin-1',
+      role: Role.ADMIN,
+      businessId: 'biz-1',
+      businessIds: ['biz-1'],
+    };
+
+    await expect(
+      service.getActive(admin as any, 'loc-other'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('closes active shift, calculates expected cash and variance', async () => {

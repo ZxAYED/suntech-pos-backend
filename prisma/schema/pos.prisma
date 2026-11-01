@@ -273,6 +273,12 @@ enum ExpenseCategory {
   OTHER
 }
 
+enum ExpenseSourceType {
+  MANUAL
+  SALARY_ADVANCE
+  PAYROLL_NET
+}
+
 model Expense {
   id         String    @id @default(uuid())
   businessId String
@@ -282,11 +288,21 @@ model Expense {
   userId     String
   user       User      @relation("UserExpenses", fields: [userId], references: [id], onDelete: Cascade)
 
+  sourceType           ExpenseSourceType @default(MANUAL)
+  beneficiaryCashierId String?
+  beneficiaryCashier   User?             @relation("BeneficiaryExpenses", fields: [beneficiaryCashierId], references: [id], onDelete: SetNull)
+
   amount   Int
   title    String
   category ExpenseCategory @default(OTHER)
   note     String?
   spentAt  DateTime        @default(now())
+  paidAt   DateTime?
+
+  advanceId String?          @unique
+  advance   EmployeeAdvance? @relation(fields: [advanceId], references: [id], onDelete: Restrict)
+  payrollId String?          @unique
+  payroll   PayrollRecord?   @relation(fields: [payrollId], references: [id], onDelete: Restrict)
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())
@@ -295,6 +311,9 @@ model Expense {
   @@index([businessId])
   @@index([locationId])
   @@index([userId])
+  @@index([beneficiaryCashierId])
   @@index([spentAt])
   @@index([deletedAt])
+  @@index([sourceType])
+  @@index([category])
 }

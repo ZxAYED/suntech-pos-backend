@@ -142,7 +142,7 @@ describe('RefundService', () => {
 
     expect(orderFindFirst).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'order-1', cashier: { businessId: 'biz-1' } },
+        where: { id: 'order-1', location: { businessId: 'biz-1' } },
       }),
     );
     expect(variantUpdateMany).toHaveBeenCalledWith({
@@ -193,7 +193,7 @@ describe('RefundService', () => {
       expect.objectContaining({
         where: {
           id: 'order-1',
-          cashier: { businessId: 'biz-1' },
+          location: { businessId: 'biz-1' },
           locationId: 'loc-1',
         },
       }),

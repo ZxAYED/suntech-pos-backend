@@ -133,8 +133,14 @@ export class ShiftService {
             const refundPromise = tx.refund?.aggregate
               ? tx.refund.aggregate({
                   where: {
+                    OR: [
+                      { payoutShiftId: openShift.id },
+                      {
+                        payoutShiftId: null,
+                        order: { shiftId: openShift.id },
+                      },
+                    ],
                     order: {
-                      shiftId: openShift.id,
                       paymentMethod: PaymentMethod.COD,
                     },
                   },
@@ -165,7 +171,7 @@ export class ShiftService {
 
             const rawCashSales = cashOrdersAgg?._sum?.totalAmount ?? 0;
             const codRefunds = codRefundsAgg?._sum?.totalRefund ?? 0;
-            const cashSales = Math.max(0, rawCashSales - codRefunds);
+            const cashSales = rawCashSales - codRefunds;
             const advancesOut = advancesAgg?._sum?.amount ?? 0;
             const expectedAmount =
               (openShift.startingAmount ?? 0) + cashSales - advancesOut;
@@ -174,13 +180,13 @@ export class ShiftService {
               where: { id: openShift.id },
               data: {
                 status: ShiftStatus.CLOSED,
-                closingAmount: expectedAmount,
+                closingAmount: null,
                 expectedAmount,
-                variance: 0,
+                variance: null,
                 cashSales,
                 advancesOut,
                 notes:
-                  'Auto-closed: previous shift was left open before new shift start',
+                  'Auto-closed: previous shift was left open before new shift start (COUNT_PENDING)',
                 closedAt: new Date(),
               },
             });
@@ -226,17 +232,38 @@ export class ShiftService {
       locationId?.trim() ||
       (actor.role === Role.CASHIER ? actor.locationId : undefined);
 
-    let businessId: string;
-    if (effectiveLocationId) {
-      const loc = this.prisma.location?.findUnique
-        ? await this.prisma.location.findUnique({
-            where: { id: effectiveLocationId },
+    let businessId = requireBusinessId(actor);
+    if (effectiveLocationId && this.prisma.location) {
+      const loc = this.prisma.location.findFirst
+        ? await this.prisma.location.findFirst({
+            where: { id: effectiveLocationId, deletedAt: null },
             select: { id: true, businessId: true },
           })
-        : null;
-      businessId = loc?.businessId ?? requireBusinessId(actor);
-    } else {
-      businessId = requireBusinessId(actor);
+        : await this.prisma.location.findUnique({
+            where: { id: effectiveLocationId },
+            select: { id: true, businessId: true },
+          });
+
+      if (!loc) {
+        throw new NotFoundException('Location not found');
+      }
+
+      if (actor.role === Role.ADMIN) {
+        const owned =
+          actor.businessIds && actor.businessIds.length > 0
+            ? actor.businessIds
+            : [businessId];
+        if (!owned.includes(loc.businessId)) {
+          throw new ForbiddenException(
+            'Location does not belong to your business',
+          );
+        }
+      } else if (loc.businessId !== businessId) {
+        throw new ForbiddenException(
+          'Location does not belong to your business',
+        );
+      }
+      businessId = loc.businessId;
     }
 
     const shift = await this.prisma.shiftSession.findFirst({
@@ -277,59 +304,67 @@ export class ShiftService {
   ): Promise<PresentedShift> {
     const businessId = requireBusinessId(cashier);
 
-    const shift = await this.prisma.shiftSession.findFirst({
-      where: {
-        ...(shiftId
-          ? { id: shiftId }
-          : { cashierId: cashier.sub, status: ShiftStatus.OPEN }),
+    const executeClose = async (tx: Prisma.TransactionClient) => {
+      const shift = await tx.shiftSession.findFirst({
+        where: {
+          ...(shiftId
+            ? { id: shiftId }
+            : { cashierId: cashier.sub, status: ShiftStatus.OPEN }),
+          businessId,
+          ...(cashier.role === Role.CASHIER ? { cashierId: cashier.sub } : {}),
+        },
+        select: { id: true, startingAmount: true, status: true },
+      });
+
+      if (!shift) {
+        throw new NotFoundException('Shift not found');
+      }
+
+      if (shift.status !== ShiftStatus.OPEN) {
+        throw new ConflictException('This shift is already closed');
+      }
+
+      const { cashSales, advancesOut } = await this.computeShiftMetrics(
+        shift.id,
         businessId,
-        ...(cashier.role === Role.CASHIER ? { cashierId: cashier.sub } : {}),
-      },
-      select: { id: true, startingAmount: true, status: true },
-    });
+        tx,
+      );
 
-    if (!shift) {
-      throw new NotFoundException('Shift not found');
+      const expectedAmount = shift.startingAmount + cashSales - advancesOut;
+      const variance = dto.closingAmount - expectedAmount;
+
+      const closed = await tx.shiftSession.updateMany({
+        where: {
+          id: shift.id,
+          businessId,
+          status: ShiftStatus.OPEN,
+        },
+        data: {
+          status: ShiftStatus.CLOSED,
+          closingAmount: dto.closingAmount,
+          expectedAmount,
+          variance,
+          cashSales,
+          advancesOut,
+          notes: dto.notes?.trim() || null,
+          closedAt: new Date(),
+        },
+      });
+
+      if (closed.count === 0) {
+        throw new ConflictException('This shift is already closed');
+      }
+
+      return tx.shiftSession.findFirstOrThrow({
+        where: { id: shift.id, businessId },
+        select: shiftSelect,
+      });
+    };
+
+    if (this.prisma.$transaction) {
+      return this.prisma.$transaction(executeClose);
     }
-
-    if (shift.status !== ShiftStatus.OPEN) {
-      throw new ConflictException('This shift is already closed');
-    }
-
-    const { cashSales, advancesOut } = await this.computeShiftMetrics(
-      shift.id,
-      businessId,
-    );
-
-    const expectedAmount = shift.startingAmount + cashSales - advancesOut;
-    const variance = dto.closingAmount - expectedAmount;
-
-    const closed = await this.prisma.shiftSession.updateMany({
-      where: {
-        id: shift.id,
-        businessId,
-        status: ShiftStatus.OPEN,
-      },
-      data: {
-        status: ShiftStatus.CLOSED,
-        closingAmount: dto.closingAmount,
-        expectedAmount,
-        variance,
-        cashSales,
-        advancesOut,
-        notes: dto.notes?.trim() || null,
-        closedAt: new Date(),
-      },
-    });
-
-    if (closed.count === 0) {
-      throw new ConflictException('This shift is already closed');
-    }
-
-    return this.prisma.shiftSession.findFirstOrThrow({
-      where: { id: shift.id, businessId },
-      select: shiftSelect,
-    });
+    return executeClose(this.prisma as unknown as Prisma.TransactionClient);
   }
 
   async list(user: AccessTokenPayload, query: ListShiftsQueryDto) {
@@ -371,19 +406,27 @@ export class ShiftService {
     };
   }
 
-  private async computeShiftMetrics(shiftId: string, businessId: string) {
-    const shift = this.prisma.shiftSession?.findFirst
-      ? await this.prisma.shiftSession.findFirst({
+  private async computeShiftMetrics(
+    shiftId: string,
+    businessId: string,
+    txClient?: Prisma.TransactionClient,
+  ) {
+    const client = (txClient ?? this.prisma) as any;
+    const shift = client.shiftSession?.findFirst
+      ? await client.shiftSession.findFirst({
           where: { id: shiftId, businessId },
           select: { openedAt: true, closedAt: true, status: true },
         })
       : null;
 
-    const refundPromise = this.prisma.refund?.aggregate
-      ? this.prisma.refund.aggregate({
+    const refundPromise = client.refund?.aggregate
+      ? client.refund.aggregate({
           where: {
+            OR: [
+              { payoutShiftId: shiftId },
+              { payoutShiftId: null, order: { shiftId } },
+            ],
             order: {
-              shiftId,
               paymentMethod: PaymentMethod.COD,
             },
             ...(shift?.closedAt ? { createdAt: { lte: shift.closedAt } } : {}),
@@ -394,7 +437,7 @@ export class ShiftService {
 
     const [cashOrdersAgg, advancesAgg, advanceLedger, codRefundsAgg] =
       await Promise.all([
-        this.prisma.order.aggregate({
+        client.order.aggregate({
           where: {
             shiftId,
             paymentMethod: PaymentMethod.COD,
@@ -402,7 +445,7 @@ export class ShiftService {
           },
           _sum: { totalAmount: true },
         }),
-        this.prisma.employeeAdvance.aggregate({
+        client.employeeAdvance.aggregate({
           where: {
             shiftId,
             businessId,
@@ -410,27 +453,29 @@ export class ShiftService {
           },
           _sum: { amount: true },
         }),
-        this.prisma.employeeAdvance.findMany({
-          where: {
-            shiftId,
-            businessId,
-            deletedAt: null,
-          },
-          select: {
-            id: true,
-            amount: true,
-            reason: true,
-            takenAt: true,
-            status: true,
-          },
-          orderBy: { takenAt: 'desc' },
-        }),
+        client.employeeAdvance?.findMany
+          ? client.employeeAdvance.findMany({
+              where: {
+                shiftId,
+                businessId,
+                deletedAt: null,
+              },
+              select: {
+                id: true,
+                amount: true,
+                reason: true,
+                takenAt: true,
+                status: true,
+              },
+              orderBy: { takenAt: 'desc' },
+            })
+          : Promise.resolve([]),
         refundPromise,
       ]);
 
     const rawCashSales = cashOrdersAgg?._sum?.totalAmount ?? 0;
     const codRefunds = codRefundsAgg?._sum?.totalRefund ?? 0;
-    const cashSales = Math.max(0, rawCashSales - codRefunds);
+    const cashSales = rawCashSales - codRefunds;
     const advancesOut = advancesAgg?._sum?.amount ?? 0;
 
     return { cashSales, advancesOut, advanceLedger };

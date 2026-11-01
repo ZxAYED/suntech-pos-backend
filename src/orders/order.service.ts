@@ -169,8 +169,7 @@ export function presentOrder(order: any): PresentedOrder {
     null;
   const businessName =
     order.location?.business?.name ?? order.businessName ?? null;
-  const cashierName =
-    order.cashier?.fullName ?? order.cashierName ?? null;
+  const cashierName = order.cashier?.fullName ?? order.cashierName ?? null;
   const cashierPublicId =
     order.cashier?.publicId ?? order.cashierPublicId ?? null;
   const sellerName = cashierName;
@@ -256,7 +255,7 @@ export class OrdersService {
         return await this.prisma.$transaction(
           async (tx) => {
             const invoiceNumber = createInvoiceNumber();
-            return this.executeCatalogOrder(
+            return await this.executeCatalogOrder(
               tx,
               actor,
               dto,
@@ -468,7 +467,10 @@ export class OrdersService {
       include: {
         product: {
           select: {
+            id: true,
             name: true,
+            isActive: true,
+            deletedAt: true,
             category: { select: { name: true } },
           },
         },
@@ -493,6 +495,20 @@ export class OrdersService {
         this.addWarning(options.warnings, 'VARIANT_UNAVAILABLE');
         continue;
       }
+
+      if (!options) {
+        if (!variant.isActive || variant.deletedAt) {
+          throw new BadRequestException(
+            `Variant "${variant.name}" is inactive or unavailable for online sale`,
+          );
+        }
+        if (!variant.product.isActive || variant.product.deletedAt) {
+          throw new BadRequestException(
+            `Product "${variant.product.name}" is inactive or archived`,
+          );
+        }
+      }
+
       const current = requiredStock.get(line.variantId) ?? 0;
       requiredStock.set(line.variantId, current + line.quantity);
     }
@@ -534,8 +550,9 @@ export class OrdersService {
     const totalAmount = subtotal;
     const changeDue = dto.tenderedAmount - totalAmount;
 
-    // 3. Database Transaction: stock decrement & transactions. Stock may go
-    // below zero because delayed offline sales must never disappear.
+    // 3. Database Transaction: stock decrement & transactions.
+    // Online checkout validates sufficient stock atomically; offline sync allows
+    // stock to go below zero because delayed offline sales must be reconciled.
     const stockResults: Array<{
       variantId: string;
       previousStock: number;
@@ -548,28 +565,56 @@ export class OrdersService {
       const previousStock = locStock?.stock ?? 0;
       let resultingStock = previousStock - totalQty;
 
-      if (locStock) {
-        const updated = await tx.locationStock.update({
-          where: { id: locStock.id },
-          data: { stock: { decrement: totalQty } },
-          select: { stock: true },
-        });
-        resultingStock = updated.stock;
-      } else {
-        const updated = await tx.locationStock.upsert({
+      if (!options) {
+        if (!locStock || previousStock < totalQty) {
+          throw new BadRequestException(
+            `Insufficient stock for variant "${variant.name}". Available: ${previousStock}, requested: ${totalQty}`,
+          );
+        }
+
+        const updated = await tx.locationStock.updateMany({
           where: {
-            locationId_variantId: { locationId, variantId: vId },
+            id: locStock.id,
+            stock: { gte: totalQty },
           },
-          update: { stock: { decrement: totalQty } },
-          create: {
-            businessId,
-            locationId,
-            variantId: vId,
-            stock: -totalQty,
-          },
+          data: { stock: { decrement: totalQty } },
+        });
+
+        if (updated.count === 0) {
+          throw new ConflictException(
+            `Insufficient stock for variant "${variant.name}". The item may have just been sold out.`,
+          );
+        }
+
+        const refreshed = await tx.locationStock.findUnique({
+          where: { id: locStock.id },
           select: { stock: true },
         });
-        resultingStock = updated.stock;
+        resultingStock = refreshed?.stock ?? previousStock - totalQty;
+      } else {
+        if (locStock) {
+          const updated = await tx.locationStock.update({
+            where: { id: locStock.id },
+            data: { stock: { decrement: totalQty } },
+            select: { stock: true },
+          });
+          resultingStock = updated.stock;
+        } else {
+          const updated = await tx.locationStock.upsert({
+            where: {
+              locationId_variantId: { locationId, variantId: vId },
+            },
+            update: { stock: { decrement: totalQty } },
+            create: {
+              businessId,
+              locationId,
+              variantId: vId,
+              stock: -totalQty,
+            },
+            select: { stock: true },
+          });
+          resultingStock = updated.stock;
+        }
       }
 
       await tx.variant.update({
@@ -942,13 +987,42 @@ export class OrdersService {
               locationId: syncActor.locationId,
               cashier: { businessId: syncActor.businessId },
             },
-            select: { id: true, invoiceNumber: true },
+            select: {
+              id: true,
+              invoiceNumber: true,
+              totalAmount: true,
+              lines: { select: { quantity: true, unitPrice: true } },
+            },
           })
         : await this.prisma.order.findUnique({
             where: { clientOrderId: item.clientOrderId },
-            select: { id: true, invoiceNumber: true },
+            select: {
+              id: true,
+              invoiceNumber: true,
+              totalAmount: true,
+              lines: { select: { quantity: true, unitPrice: true } },
+            },
           });
       if (duplicate) {
+        const payloadTotal = item.lines.reduce(
+          (sum, line) => sum + (line.unitPrice ?? 0) * line.quantity,
+          0,
+        );
+        const isPayloadConsistent =
+          (duplicate as any).totalAmount === undefined ||
+          (duplicate as any).totalAmount === payloadTotal;
+
+        if (!isPayloadConsistent) {
+          results.push({
+            clientOrderId: item.clientOrderId,
+            status: 'REJECTED',
+            warnings: [],
+            error:
+              'clientOrderId replay mismatch: payload does not match existing order',
+          });
+          continue;
+        }
+
         results.push({
           clientOrderId: item.clientOrderId,
           status: 'DUPLICATE',
@@ -1426,13 +1500,28 @@ export class OrdersService {
     if (!businessId) {
       throw new ForbiddenException('Create a business before continuing');
     }
-    const location = await this.prisma.location.findFirst({
-      where: { businessId, deletedAt: null },
-      select: { id: true },
-    });
+    const effectiveLocationId =
+      actor.role === Role.CASHIER
+        ? actor.locationId
+        : (dto as any).locationId || actor.locationId;
 
-    if (!location) {
-      throw new NotFoundException('No active location found for business');
+    let location;
+    if (effectiveLocationId) {
+      location = await this.prisma.location.findFirst({
+        where: { id: effectiveLocationId, businessId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!location) {
+        throw new NotFoundException('Location not found for business');
+      }
+    } else {
+      location = await this.prisma.location.findFirst({
+        where: { businessId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!location) {
+        throw new NotFoundException('No active location found for business');
+      }
     }
 
     for (let attempt = 1; attempt <= INVOICE_ATTEMPTS; attempt += 1) {
@@ -1611,37 +1700,61 @@ export class OrdersService {
     for (const [vId, totalQty] of variantStockMap.entries()) {
       const variant = await tx.variant.findFirst({
         where: { id: vId, businessId, deletedAt: null },
-        select: { stock: true },
+        include: {
+          product: {
+            select: {
+              id: true,
+              name: true,
+              isActive: true,
+              deletedAt: true,
+            },
+          },
+        },
       });
       if (!variant) {
         throw new NotFoundException('Variant not found');
       }
+      if (
+        !variant.isActive ||
+        (variant.product &&
+          (!variant.product.isActive || variant.product.deletedAt !== null))
+      ) {
+        throw new BadRequestException(
+          `Variant "${variant.name}" is no longer available for sale`,
+        );
+      }
       let previousStock = 0;
-      let resultingStock = -totalQty;
+      let resultingStock = 0;
       if ((tx as any).locationStock && locationId) {
         const locStock = await (tx as any).locationStock.findUnique({
           where: { locationId_variantId: { locationId, variantId: vId } },
         });
-        if (locStock) {
-          previousStock = locStock.stock;
-          const updated = await (tx as any).locationStock.update({
-            where: { id: locStock.id },
-            data: { stock: { decrement: totalQty } },
-            select: { stock: true },
-          });
-          resultingStock = updated.stock;
-        } else {
-          const created = await (tx as any).locationStock.create({
-            data: {
-              businessId,
-              locationId,
-              variantId: vId,
-              stock: -totalQty,
-            },
-            select: { stock: true },
-          });
-          resultingStock = created.stock;
+        previousStock = locStock?.stock ?? 0;
+        if (!locStock || previousStock < totalQty) {
+          throw new BadRequestException(
+            `Insufficient stock for variant "${variant.name}". Available: ${previousStock}, requested: ${totalQty}`,
+          );
         }
+
+        const updated = await (tx as any).locationStock.updateMany({
+          where: {
+            id: locStock.id,
+            stock: { gte: totalQty },
+          },
+          data: { stock: { decrement: totalQty } },
+        });
+
+        if (updated.count === 0) {
+          throw new ConflictException(
+            `Insufficient stock for variant "${variant.name}". The item may have just been sold out.`,
+          );
+        }
+
+        const refreshed = await (tx as any).locationStock.findUnique({
+          where: { id: locStock.id },
+          select: { stock: true },
+        });
+        resultingStock = refreshed?.stock ?? previousStock - totalQty;
       }
 
       const decremented = await tx.variant.updateMany({

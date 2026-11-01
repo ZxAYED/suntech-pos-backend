@@ -27,6 +27,8 @@ model EmployeeAdvance {
   reason  String?
   status  AdvanceStatus @default(PENDING)
 
+  expense Expense?
+
   deletedAt DateTime?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -50,6 +52,8 @@ model PayrollRecord {
   totalAdvancesDeducted Int
   netPaid               Int
   status                PayrollStatus @default(PAID)
+
+  expense Expense?
 
   createdAt DateTime @default(now())
 

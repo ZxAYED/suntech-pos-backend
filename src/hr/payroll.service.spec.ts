@@ -3,7 +3,14 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
-import { AdvanceStatus, PayrollStatus, Prisma, Role } from '@prisma/client';
+import {
+  AdvanceStatus,
+  ExpenseCategory,
+  ExpenseSourceType,
+  PayrollStatus,
+  Prisma,
+  Role,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PayrollService } from './payroll.service';
 
@@ -16,6 +23,7 @@ describe('PayrollService', () => {
   const updateMany = jest.fn();
   const payrollCreate = jest.fn();
   const employeeAdvanceFindMany = jest.fn();
+  const expenseCreate = jest.fn();
 
   const tx = {
     user: { findFirst: userFindFirst, findMany: userFindMany },
@@ -28,6 +36,9 @@ describe('PayrollService', () => {
       aggregate,
       updateMany,
       findMany: employeeAdvanceFindMany,
+    },
+    expense: {
+      create: expenseCreate,
     },
   };
   const transaction = jest.fn((callback: (client: typeof tx) => unknown) =>
@@ -46,6 +57,9 @@ describe('PayrollService', () => {
       updateMany,
       findMany: employeeAdvanceFindMany,
     },
+    expense: {
+      create: expenseCreate,
+    },
   } as unknown as PrismaService;
   const service = new PayrollService(prisma);
   const dto = { cashierId: 'cashier-1', month: 10, year: 2026 };
@@ -59,8 +73,14 @@ describe('PayrollService', () => {
     updateMany.mockReset();
     payrollCreate.mockReset();
     employeeAdvanceFindMany.mockReset();
+    expenseCreate.mockReset();
 
-    userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 15000 });
+    userFindFirst.mockResolvedValue({
+      id: 'cashier-1',
+      fullName: 'Alex Rivera',
+      locationId: 'loc-1',
+      monthlySalary: 15000,
+    });
     userFindMany.mockResolvedValue([
       {
         id: 'cashier-1',
@@ -118,6 +138,18 @@ describe('PayrollService', () => {
     expect(paid).toEqual(
       expect.objectContaining({ netPaid: 14500, totalAdvancesDeducted: 500 }),
     );
+    expect(expenseCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+        userId: 'cashier-1',
+        beneficiaryCashierId: 'cashier-1',
+        amount: 14500,
+        category: ExpenseCategory.SALARIES,
+        sourceType: ExpenseSourceType.PAYROLL_NET,
+        payrollId: 'payroll-1',
+      }),
+    });
   });
 
   it('pays the full salary when the cashier took no advances', async () => {
@@ -186,7 +218,12 @@ describe('PayrollService', () => {
         role: Role.CASHIER,
         deletedAt: null,
       },
-      select: { id: true, monthlySalary: true },
+      select: {
+        id: true,
+        fullName: true,
+        locationId: true,
+        monthlySalary: true,
+      },
     });
     expect(payrollCreate).not.toHaveBeenCalled();
   });
@@ -224,8 +261,18 @@ describe('PayrollService', () => {
 
   it('bulk disburses payroll for all pending employees', async () => {
     userFindMany.mockResolvedValue([
-      { id: 'cashier-1', monthlySalary: 35000 },
-      { id: 'cashier-2', monthlySalary: 24000 },
+      {
+        id: 'cashier-1',
+        fullName: 'Alex Rivera',
+        locationId: 'loc-1',
+        monthlySalary: 35000,
+      },
+      {
+        id: 'cashier-2',
+        fullName: 'Tariqul Islam',
+        locationId: 'loc-2',
+        monthlySalary: 24000,
+      },
     ]);
     payrollRecordFindMany.mockResolvedValue([{ cashierId: 'cashier-2' }]);
     aggregate.mockResolvedValue({ _sum: { amount: 1000 } });
@@ -239,6 +286,16 @@ describe('PayrollService', () => {
     expect(res.disbursedCount).toBe(1); // only cashier-1 was pending
     expect(res.alreadyPaidCount).toBe(1);
     expect(payrollCreate).toHaveBeenCalledTimes(1);
+    expect(expenseCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+        userId: 'cashier-1',
+        amount: 34000,
+        category: ExpenseCategory.SALARIES,
+        payrollId: 'payroll-1',
+      }),
+    });
   });
 
   it('throws BadRequestException in disburse if advances exceed base salary', async () => {

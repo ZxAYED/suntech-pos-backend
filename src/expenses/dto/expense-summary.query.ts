@@ -1,9 +1,17 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { ExpenseCategory } from '@prisma/client';
+import { ExpenseCategory, ExpenseSourceType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class ExpenseSummaryQueryDto {
+  @ApiPropertyOptional({
+    enum: ExpenseSourceType,
+    description: 'Filter expense summary by type (MANUAL, SALARY_ADVANCE, PAYROLL_NET)',
+  })
+  @IsOptional()
+  @IsEnum(ExpenseSourceType)
+  type?: ExpenseSourceType;
+
   @ApiPropertyOptional({
     example: 10,
     description: 'Calendar month (1-12). Defaults to current month.',

@@ -196,63 +196,57 @@ describe('VariantService', () => {
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
-    it('auto-restores soft-deleted variant when re-creating with identical SKU', async () => {
-      variantFindFirst
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({
-          id: 'var-old',
-          sku: 'IPH-RESTORE__del_123',
-        });
-      variantUpdate.mockResolvedValueOnce({
-        id: 'var-old',
-        productId: 'product-1',
-        name: 'Restored iPhone',
+    it('rejects creating a variant when an archived variant with the same sku exists', async () => {
+      variantFindFirst.mockResolvedValueOnce({
+        id: 'var-archived-1',
         sku: 'IPH-RESTORE',
         barcode: null,
-        sellingPrice: 999,
-        costPrice: 500,
-        stock: 5,
-        isActive: true,
-        deletedAt: null,
-        product: {
-          id: 'product-1',
-          name: 'Product',
-          categoryId: null,
-          category: null,
-        },
+        deletedAt: new Date('2026-01-01T00:00:00Z'),
       });
 
-      const res = await service.create(admin, {
-        productId: 'product-1',
-        name: 'Restored iPhone',
-        sku: 'IPH-RESTORE',
-        sellingPrice: 999,
-        costPrice: 500,
-        stock: 5,
+      await expect(
+        service.create(admin, {
+          productId: 'product-1',
+          name: 'Restored iPhone',
+          sku: 'IPH-RESTORE',
+          sellingPrice: 999,
+          costPrice: 500,
+          stock: 5,
+          locationId: 'loc-1',
+        }),
+      ).rejects.toThrow(ConflictException);
+      expect(variantCreate).not.toHaveBeenCalled();
+      expect(variantUpdate).not.toHaveBeenCalled();
+    });
+
+    it('rejects initial stock when locationId is omitted and creates zero variants (F31)', async () => {
+      await expect(
+        service.create(admin, {
+          productId: 'product-1',
+          name: 'Green 128GB',
+          sellingPrice: 1500,
+          stock: 10,
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(variantCreate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('update', () => {
+    it('rejects variant update with stock when locationId is omitted without mutating variant (F32)', async () => {
+      variantFindFirst.mockResolvedValueOnce({
+        id: 'var-1',
+        name: 'Existing Variant',
+        sku: 'EXT-1',
+        barcode: null,
       });
 
-      expect(variantFindFirst).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            businessId: 'biz-1',
-            deletedAt: { not: null },
-          }),
+      await expect(
+        service.update(admin, 'var-1', {
+          stock: 25,
         }),
-      );
-      expect(variantUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { id: 'var-old' },
-          data: expect.objectContaining({
-            sku: 'IPH-RESTORE',
-            isActive: true,
-            deletedAt: null,
-          }),
-        }),
-      );
-      expect(res.id).toBe('var-old');
-      expect(res.sku).toBe('IPH-RESTORE');
-      expect(res.isActive).toBe(true);
-      expect(res.status).toBe('ACTIVE');
+      ).rejects.toThrow(BadRequestException);
+      expect(variantUpdateMany).not.toHaveBeenCalled();
     });
   });
 
@@ -317,7 +311,7 @@ describe('VariantService', () => {
   });
 
   describe('remove', () => {
-    it('soft-deletes variant with __del_ suffix on sku and barcode when sales exist', async () => {
+    it('archives variant without renaming SKU or barcode', async () => {
       variantFindFirst.mockResolvedValue({
         id: 'var-1',
         sku: 'SKU-100',
@@ -329,49 +323,19 @@ describe('VariantService', () => {
 
       expect(res.id).toBe('var-1');
       expect(res.deletedAt).toBeInstanceOf(Date);
-      const updateCall = (
-        variantUpdate.mock.calls as unknown as Array<
-          [
-            {
-              where: { id: string };
-              data: { sku: string; barcode: string | null; deletedAt: Date };
-            },
-          ]
-        >
-      )[0][0];
-      expect(updateCall.where.id).toBe('var-1');
-      expect(updateCall.data.sku).toMatch(/^SKU-100__del_\d+$/);
-      expect(updateCall.data.barcode).toMatch(/^BAR-100__del_\d+$/);
-      expect(updateCall.data.deletedAt).toBeInstanceOf(Date);
-    });
-
-    it('soft-deletes variant with null barcode cleanly without suffixing barcode', async () => {
-      variantFindFirst.mockResolvedValue({
-        id: 'var-2',
-        sku: 'SKU-200',
-        barcode: null,
+      expect(variantUpdate).toHaveBeenCalledWith({
+        where: { id: 'var-1' },
+        data: {
+          isActive: false,
+          deletedAt: expect.any(Date),
+        },
       });
-      orderLineCount.mockResolvedValue(1);
-
-      await service.remove(admin, 'var-2');
-
-      const updateCall = (
-        variantUpdate.mock.calls as unknown as Array<
-          [
-            {
-              where: { id: string };
-              data: { sku: string; barcode: string | null; deletedAt: Date };
-            },
-          ]
-        >
-      )[0][0];
-      expect(updateCall.where.id).toBe('var-2');
-      expect(updateCall.data.sku).toMatch(/^SKU-200__del_\d+$/);
-      expect(updateCall.data.barcode).toBeNull();
-      expect(updateCall.data.deletedAt).toBeInstanceOf(Date);
+      expect(variantDelete).not.toHaveBeenCalled();
+      expect(locationStockDeleteMany).not.toHaveBeenCalled();
+      expect(stockTransactionDeleteMany).not.toHaveBeenCalled();
     });
 
-    it('hard-deletes variant permanently when zero sales history exists', async () => {
+    it('archives variant without physical delete even when zero sales history exists', async () => {
       variantFindFirst.mockResolvedValue({
         id: 'var-fresh',
         sku: 'FRESH-1',
@@ -382,9 +346,16 @@ describe('VariantService', () => {
       const res = await service.remove(admin, 'var-fresh');
 
       expect(res.id).toBe('var-fresh');
-      expect(variantDelete).toHaveBeenCalledWith({
+      expect(variantDelete).not.toHaveBeenCalled();
+      expect(variantUpdate).toHaveBeenCalledWith({
         where: { id: 'var-fresh' },
+        data: {
+          isActive: false,
+          deletedAt: expect.any(Date),
+        },
       });
+      expect(locationStockDeleteMany).not.toHaveBeenCalled();
+      expect(stockTransactionDeleteMany).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException when removing a non-existent variant', async () => {
@@ -536,6 +507,44 @@ describe('VariantService', () => {
       );
 
       expect(res.id).toBe('var-1');
+    });
+
+    it('deducts stock for manual shrinkage and logs MANUAL_ADJUSTMENT (F24)', async () => {
+      variantFindFirst
+        .mockResolvedValueOnce({
+          id: 'var-1',
+          name: 'Test Variant',
+          stock: 10,
+          locationStocks: [{ stock: 10 }],
+        })
+        .mockResolvedValueOnce({
+          ...mockReturnedVariant,
+          stock: 7,
+          locationStocks: [{ locationId: 'loc-1', stock: 7 }],
+        });
+
+      locationStockAggregate.mockResolvedValueOnce({
+        _sum: { stock: 7 },
+      });
+
+      await service.updateStock(admin, 'var-1', {
+        operation: StockOperation.DEDUCT,
+        quantity: 3,
+        locationId: 'loc-1',
+        notes: 'Damaged during shelf reorganization',
+      });
+
+      expect(stockTransactionCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            variantId: 'var-1',
+            locationId: 'loc-1',
+            type: StockTransactionType.MANUAL_ADJUSTMENT,
+            quantity: 3,
+            notes: 'Damaged during shelf reorganization',
+          }),
+        }),
+      );
     });
 
     it('adds stock for restock and logs RESTOCK stock transaction', async () => {
@@ -713,12 +722,21 @@ describe('VariantService', () => {
       );
     });
 
+    it('throws BadRequestException when locationId is omitted for stock adjustment', async () => {
+      await expect(
+        service.updateStock(admin, 'var-1', {
+          quantity: 1,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
     it('throws NotFoundException when variant does not exist', async () => {
       variantFindFirst.mockResolvedValueOnce(null);
 
       await expect(
         service.updateStock(admin, 'var-nonexistent', {
           quantity: 1,
+          locationId: 'loc-1',
         }),
       ).rejects.toThrow(NotFoundException);
     });

@@ -22,6 +22,7 @@ import {
 } from '@nestjs/swagger';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Idempotent } from '../common/decorators/idempotent.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import type { AccessTokenPayload } from '../common/types/access-token-payload';
@@ -109,6 +110,18 @@ export class VariantController {
       'Optional business UUID for Admin; Cashier is locked to assigned business from token',
     example: '123e4567-e89b-12d3-a456-426614174000',
   })
+  @ApiQuery({
+    name: 'page',
+    required: false,
+    description: 'Page number for pagination (starts at 1)',
+    example: 1,
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    description: 'Items per page (e.g. 30)',
+    example: 30,
+  })
   @ApiResponse({ status: 200, description: 'Variants loaded' })
   @ApiResponse({
     status: 401,
@@ -183,6 +196,7 @@ export class VariantController {
   })
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @Roles(Role.ADMIN)
+  @Idempotent()
   @ResponseMessage('Variant stock updated')
   updateStockBatch(
     @CurrentUser() actor: AccessTokenPayload,
@@ -227,6 +241,7 @@ export class VariantController {
   })
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @Roles(Role.ADMIN)
+  @Idempotent()
   @ResponseMessage('Variant stock updated')
   updateStock(
     @CurrentUser() actor: AccessTokenPayload,
@@ -267,6 +282,7 @@ export class VariantController {
   })
   @ApiResponse({ status: 404, description: 'Variant not found' })
   @Roles(Role.ADMIN)
+  @Idempotent()
   @ResponseMessage('Variant stock updated')
   updateStockPost(
     @CurrentUser() actor: AccessTokenPayload,

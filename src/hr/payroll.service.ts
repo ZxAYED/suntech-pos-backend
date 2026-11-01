@@ -4,7 +4,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { AdvanceStatus, PayrollStatus, Prisma, Role } from '@prisma/client';
+import {
+  AdvanceStatus,
+  ExpenseCategory,
+  ExpenseSourceType,
+  PayrollStatus,
+  Prisma,
+  Role,
+} from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { getDhakaDateParts } from '../common/utils/timezone.util';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
@@ -77,7 +84,12 @@ export class PayrollService {
         role: Role.CASHIER,
         deletedAt: null,
       },
-      select: { id: true, monthlySalary: true },
+      select: {
+        id: true,
+        fullName: true,
+        locationId: true,
+        monthlySalary: true,
+      },
     });
 
     if (!cashier) {
@@ -122,7 +134,8 @@ export class PayrollService {
       data: { status: AdvanceStatus.DEDUCTED },
     });
 
-    return tx.payrollRecord.create({
+    const netPaid = baseSalary - totalAdvancesDeducted;
+    const record = await tx.payrollRecord.create({
       data: {
         businessId,
         cashierId: cashier.id,
@@ -130,11 +143,32 @@ export class PayrollService {
         year: dto.year,
         baseSalary,
         totalAdvancesDeducted,
-        netPaid: baseSalary - totalAdvancesDeducted,
+        netPaid,
         status: PayrollStatus.PAID,
       },
       select: payrollSelect,
     });
+
+    if (netPaid > 0 && tx.expense?.create) {
+      await tx.expense.create({
+        data: {
+          businessId,
+          locationId: cashier.locationId ?? null,
+          userId: cashier.id,
+          beneficiaryCashierId: cashier.id,
+          amount: netPaid,
+          title: `Payroll Disbursement - ${cashier.fullName} (${dto.month}/${dto.year})`,
+          category: ExpenseCategory.SALARIES,
+          sourceType: ExpenseSourceType.PAYROLL_NET,
+          note: `Monthly salary payout after deducting ${totalAdvancesDeducted} BDT in advances (Base: ${baseSalary} BDT).`,
+          spentAt: record.createdAt,
+          paidAt: record.createdAt,
+          payrollId: record.id,
+        },
+      });
+    }
+
+    return record;
   }
 
   async summary(admin: AccessTokenPayload, query: PayrollHistoryQueryDto) {
@@ -272,7 +306,12 @@ export class PayrollService {
           monthlySalary: { not: null, gt: 0 },
           ...(dto.locationId ? { locationId: dto.locationId } : {}),
         },
-        select: { id: true, monthlySalary: true },
+        select: {
+          id: true,
+          fullName: true,
+          locationId: true,
+          monthlySalary: true,
+        },
       });
 
       const existingRecords = await tx.payrollRecord.findMany({
@@ -335,6 +374,25 @@ export class PayrollService {
           },
           select: payrollSelect,
         });
+
+        if (netPaid > 0 && tx.expense?.create) {
+          await tx.expense.create({
+            data: {
+              businessId,
+              locationId: staff.locationId ?? null,
+              userId: staff.id,
+              beneficiaryCashierId: staff.id,
+              amount: netPaid,
+              title: `Payroll Disbursement - ${staff.fullName} (${dto.month}/${dto.year})`,
+              category: ExpenseCategory.SALARIES,
+              sourceType: ExpenseSourceType.PAYROLL_NET,
+              note: `Monthly salary payout after deducting ${totalAdvancesDeducted} BDT in advances (Base: ${baseSalary} BDT).`,
+              spentAt: record.createdAt,
+              paidAt: record.createdAt,
+              payrollId: record.id,
+            },
+          });
+        }
 
         createdRecords.push(record);
       }

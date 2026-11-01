@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { OrderStatus, Role } from '@prisma/client';
+import { OrderStatus, Prisma, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { requireBusinessId } from '../hr/require-business-id';
@@ -22,6 +22,8 @@ export interface CategoryWithAnalytics {
   activeSkus: number;
   totalUnits: number;
   inventoryValue: number;
+  retailStockValue?: number;
+  inventoryCostValue?: number;
   salesCount: number;
   salesRevenue: number;
   createdAt: Date;
@@ -52,8 +54,6 @@ export class CategoryService {
   ): Promise<PresentedCategory> {
     const businessId = await this.resolveBusinessId(admin, dto.businessId);
     const name = dto.name.trim();
-    await this.assertNameAvailable(businessId, name);
-
     const slug =
       dto.slug?.trim() ||
       name
@@ -61,60 +61,7 @@ export class CategoryService {
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-|-$/g, '');
 
-    // Check if category was previously soft-deleted (clean name or suffixed with __del_)
-    const softDeleted = await this.prisma.category.findFirst({
-      where: {
-        businessId,
-        deletedAt: { not: null },
-        OR: [
-          { name: { equals: name, mode: 'insensitive' } },
-          { name: { startsWith: `${name}__del_`, mode: 'insensitive' } },
-        ],
-      },
-      orderBy: { deletedAt: 'desc' },
-    });
-
-    if (softDeleted) {
-      const restored = await this.prisma.category.update({
-        where: { id: softDeleted.id },
-        data: {
-          name,
-          slug,
-          description: dto.description?.trim() || null,
-          isActive: true,
-          deletedAt: null,
-        },
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          description: true,
-          isActive: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      });
-
-      return {
-        id: restored.id,
-        name: restored.name,
-        slug: restored.slug || slug,
-        description: restored.description,
-        isActive: true,
-        status: 'ACTIVE',
-        productsCount: 0,
-        activeSkus: 0,
-        totalUnits: 0,
-        inventoryValue: 0,
-        salesCount: 0,
-        salesRevenue: 0,
-        createdAt: restored.createdAt,
-        updatedAt: restored.updatedAt,
-        _count: {
-          products: 0,
-        },
-      };
-    }
+    await this.assertNameAvailable(businessId, name, slug);
 
     const isActive =
       dto.isActive !== undefined
@@ -228,6 +175,7 @@ export class CategoryService {
                 id: true,
                 stock: true,
                 sellingPrice: true,
+                costPrice: true,
                 locationStocks: {
                   select: {
                     locationId: true,
@@ -306,12 +254,8 @@ export class CategoryService {
     return categories.map((cat) => {
       const variants = cat.products.flatMap((p) => p.variants);
       const getVariantStock = (v: any) => {
-        if (
-          effectiveLocationId &&
-          v.locationStocks &&
-          v.locationStocks.length > 0
-        ) {
-          const match = v.locationStocks.find(
+        if (effectiveLocationId) {
+          const match = (v.locationStocks ?? []).find(
             (ls: any) => ls.locationId === effectiveLocationId,
           );
           return match ? match.stock : 0;
@@ -324,6 +268,15 @@ export class CategoryService {
       );
       const inventoryValue = variants.reduce(
         (sum, v) => sum + getVariantStock(v) * v.sellingPrice,
+        0,
+      );
+      const retailStockValue = inventoryValue;
+      const inventoryCostValue = variants.reduce(
+        (sum, v) =>
+          sum +
+          (v.costPrice !== null && v.costPrice !== undefined
+            ? getVariantStock(v) * v.costPrice
+            : 0),
         0,
       );
       const salesCount = variants.reduce(
@@ -351,6 +304,8 @@ export class CategoryService {
         activeSkus: variants.length,
         totalUnits,
         inventoryValue,
+        retailStockValue,
+        inventoryCostValue,
         salesCount,
         salesRevenue,
         createdAt: cat.createdAt,
@@ -389,6 +344,7 @@ export class CategoryService {
                 id: true,
                 stock: true,
                 sellingPrice: true,
+                costPrice: true,
               },
             },
           },
@@ -444,6 +400,15 @@ export class CategoryService {
       (sum, v) => sum + v.stock * v.sellingPrice,
       0,
     );
+    const retailStockValue = inventoryValue;
+    const inventoryCostValue = variants.reduce(
+      (sum, v) =>
+        sum +
+        (v.costPrice !== null && v.costPrice !== undefined
+          ? v.stock * v.costPrice
+          : 0),
+      0,
+    );
 
     const defaultSlug = cat.name
       .toLowerCase()
@@ -461,6 +426,8 @@ export class CategoryService {
       activeSkus: variants.length,
       totalUnits,
       inventoryValue,
+      retailStockValue,
+      inventoryCostValue,
       salesCount,
       salesRevenue,
       createdAt: cat.createdAt,
@@ -483,11 +450,6 @@ export class CategoryService {
     );
     await this.findCategory(businessId, categoryId);
     const name = dto.name?.trim();
-
-    if (name) {
-      await this.assertNameAvailable(businessId, name, categoryId);
-    }
-
     const slug =
       dto.slug?.trim() ||
       (name
@@ -496,6 +458,10 @@ export class CategoryService {
             .replace(/[^a-z0-9]+/g, '-')
             .replace(/^-|-$/g, '')
         : undefined);
+
+    if (name || slug) {
+      await this.assertNameAvailable(businessId, name ?? '', slug, categoryId);
+    }
 
     const isActive =
       dto.isActive !== undefined
@@ -559,46 +525,18 @@ export class CategoryService {
       );
     }
 
-    // 2. Sales history check: OrderLines containing this category or its variants
-    const salesCount = this.prisma.orderLine?.count
-      ? await this.prisma.orderLine.count({
-          where: {
-            OR: [
-              { variant: { product: { categoryId: category.id } } },
-              { categoryName: { equals: category.name, mode: 'insensitive' } },
-            ],
-          },
-        })
-      : 0;
+    // Archive category without renaming original human-facing name or slug.
+    // Preserves historical FK integrity and analytics.
+    const deletedAt = new Date();
+    await this.prisma.category.update({
+      where: { id: category.id },
+      data: {
+        isActive: false,
+        deletedAt,
+      },
+    });
 
-    if (salesCount > 0) {
-      // Soft-delete: retain historical analytics & sales records
-      const timestamp = Date.now();
-      const deletedAt = new Date();
-      const suffixedName = `${category.name}__del_${timestamp}`;
-      const suffixedSlug = category.slug
-        ? `${category.slug}__del_${timestamp}`
-        : null;
-
-      await this.prisma.category.update({
-        where: { id: category.id },
-        data: {
-          name: suffixedName,
-          slug: suffixedSlug,
-          isActive: false,
-          deletedAt,
-        },
-      });
-
-      return { id: categoryId, deletedAt };
-    } else {
-      // Hard-delete: clean permanent delete for items with zero sales history (e.g. typos, mistakes)
-      await this.prisma.category.delete({
-        where: { id: category.id },
-      });
-
-      return { id: categoryId, deletedAt: new Date() };
-    }
+    return { id: categoryId, deletedAt };
   }
 
   private async findCategory(businessId: string, categoryId: string) {
@@ -617,19 +555,35 @@ export class CategoryService {
   private async assertNameAvailable(
     businessId: string,
     name: string,
+    slug?: string | null,
     ignoreId?: string,
   ): Promise<void> {
+    const orConditions: Prisma.CategoryWhereInput[] = [];
+    if (name) {
+      orConditions.push({ name: { equals: name, mode: 'insensitive' } });
+    }
+    if (slug) {
+      orConditions.push({ slug: { equals: slug, mode: 'insensitive' } });
+    }
+    if (orConditions.length === 0) {
+      return;
+    }
+
     const existing = await this.prisma.category.findFirst({
       where: {
         businessId,
-        name: { equals: name, mode: 'insensitive' },
-        deletedAt: null,
         ...(ignoreId ? { id: { not: ignoreId } } : {}),
+        OR: orConditions,
       },
-      select: { id: true },
+      select: { id: true, deletedAt: true },
     });
 
     if (existing) {
+      if (existing.deletedAt) {
+        throw new ConflictException(
+          `Category "${name}" already exists in archives. Archived categories cannot be reused without restoring the original record.`,
+        );
+      }
       throw new ConflictException(NAME_TAKEN);
     }
   }

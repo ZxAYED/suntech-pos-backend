@@ -256,7 +256,7 @@ export class AdminDashboardService {
     const todayGrossSales = grossOrdersAgg?._sum?.totalAmount ?? 0;
     const todayRefundCount = refundCount ?? 0;
     const todayRefundedAmount = refundsAgg?._sum?.totalRefund ?? 0;
-    const todayNetSales = Math.max(0, todayGrossSales - todayRefundedAmount);
+    const todayNetSales = todayGrossSales - todayRefundedAmount;
     const averageTicketValue =
       todayOrderCount > 0 ? Math.round(todayNetSales / todayOrderCount) : 0;
     const todayExpenseTotal = expensesAgg?._sum?.amount ?? 0;
@@ -288,8 +288,14 @@ export class AdminDashboardService {
         }),
         this.prisma.refund.aggregate({
           where: {
+            OR: [
+              { payoutShiftId: activeShift.id },
+              {
+                payoutShiftId: null,
+                order: { shiftId: activeShift.id },
+              },
+            ],
             order: {
-              shiftId: activeShift.id,
               paymentMethod: PaymentMethod.COD,
             },
           },
@@ -307,7 +313,7 @@ export class AdminDashboardService {
 
       const rawCashSales = cashOrdersAgg?._sum?.totalAmount ?? 0;
       const codRefunds = codRefundsAgg?._sum?.totalRefund ?? 0;
-      const cashCollected = Math.max(0, rawCashSales - codRefunds);
+      const cashCollected = rawCashSales - codRefunds;
       const cashPaidOut = advancesAgg?._sum?.amount ?? 0;
       const openingFloat = activeShift.startingAmount ?? 0;
       const expectedCashInDrawer = openingFloat + cashCollected - cashPaidOut;
@@ -364,6 +370,10 @@ export class AdminDashboardService {
         businessId,
         deletedAt: null,
         isActive: true,
+        product: {
+          deletedAt: null,
+          isActive: true,
+        },
       },
       select: {
         id: true,

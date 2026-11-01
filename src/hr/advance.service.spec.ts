@@ -3,7 +3,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { AdvanceStatus, Role } from '@prisma/client';
+import { AdvanceStatus, ExpenseSourceType, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdvanceService } from './advance.service';
 
@@ -13,6 +13,8 @@ describe('AdvanceService', () => {
   const advanceFindMany = jest.fn();
   const advanceFindFirst = jest.fn();
   const advanceUpdateMany = jest.fn();
+  const expenseCreate = jest.fn();
+  const expenseUpdateMany = jest.fn();
   const prisma = {
     user: { findFirst: userFindFirst },
     employeeAdvance: {
@@ -20,6 +22,10 @@ describe('AdvanceService', () => {
       findMany: advanceFindMany,
       findFirst: advanceFindFirst,
       updateMany: advanceUpdateMany,
+    },
+    expense: {
+      create: expenseCreate,
+      updateMany: expenseUpdateMany,
     },
   } as unknown as PrismaService;
   const service = new AdvanceService(prisma);
@@ -30,11 +36,18 @@ describe('AdvanceService', () => {
     advanceFindMany.mockReset();
     advanceFindFirst.mockReset();
     advanceUpdateMany.mockReset();
-    userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 15000 });
-    advanceCreate.mockResolvedValue({ id: 'advance-1' });
+    expenseCreate.mockReset();
+    expenseUpdateMany.mockReset();
+    userFindFirst.mockResolvedValue({
+      id: 'cashier-1',
+      fullName: 'Alex Rivera',
+      locationId: 'loc-1',
+      monthlySalary: 15000,
+    });
+    advanceCreate.mockResolvedValue({ id: 'advance-1', takenAt: new Date() });
   });
 
-  it('records a cashier advance against their own user id', async () => {
+  it('records a cashier advance against their own user id and creates a SALARIES expense', async () => {
     await service.create(
       {
         sub: 'cashier-1',
@@ -61,6 +74,19 @@ describe('AdvanceService', () => {
         takenAt: true,
         createdAt: true,
       },
+    });
+
+    expect(expenseCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+        userId: 'cashier-1',
+        beneficiaryCashierId: 'cashier-1',
+        sourceType: ExpenseSourceType.SALARY_ADVANCE,
+        amount: 500,
+        title: 'Salary Advance - Alex Rivera',
+        advanceId: 'advance-1',
+      }),
     });
   });
 
@@ -322,6 +348,14 @@ describe('AdvanceService', () => {
           id: 'adv-1',
           businessId: 'biz-1',
           status: AdvanceStatus.PENDING,
+          deletedAt: null,
+        },
+        data: { deletedAt: expect.any(Date) },
+      });
+      expect(expenseUpdateMany).toHaveBeenCalledWith({
+        where: {
+          advanceId: 'adv-1',
+          businessId: 'biz-1',
           deletedAt: null,
         },
         data: { deletedAt: expect.any(Date) },

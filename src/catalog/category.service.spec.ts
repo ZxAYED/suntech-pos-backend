@@ -98,44 +98,22 @@ describe('CategoryService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
-  it('auto-restores soft-deleted category when re-creating with the same name', async () => {
-    // 1st findFirst: assertNameAvailable returns null (no active category)
-    categoryFindFirst.mockResolvedValueOnce(null);
-    // 2nd findFirst: finds previous soft-deleted category
+  it('rejects creating a category when an archived category with the same name exists', async () => {
     categoryFindFirst.mockResolvedValueOnce({
-      id: 'cat-old-1',
-      name: 'Smartphones__del_12345',
-      deletedAt: new Date(),
-    });
-    categoryUpdate.mockResolvedValueOnce({
-      id: 'cat-old-1',
+      id: 'cat-archived-1',
       name: 'Smartphones',
       slug: 'smartphones',
-      description: 'Restored phones',
-      isActive: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      deletedAt: new Date('2026-01-01T00:00:00Z'),
     });
 
-    const res = await service.create(admin, {
-      name: 'Smartphones',
-      description: 'Restored phones',
-    });
-
-    expect(categoryUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'cat-old-1' },
-        data: expect.objectContaining({
-          name: 'Smartphones',
-          slug: 'smartphones',
-          isActive: true,
-          deletedAt: null,
-        }),
+    await expect(
+      service.create(admin, {
+        name: 'Smartphones',
+        description: 'New smartphones',
       }),
-    );
-    expect(res.id).toBe('cat-old-1');
-    expect(res.name).toBe('Smartphones');
-    expect(res.status).toBe('ACTIVE');
+    ).rejects.toThrow(ConflictException);
+    expect(categoryCreate).not.toHaveBeenCalled();
+    expect(categoryUpdate).not.toHaveBeenCalled();
   });
 
   it('lists categories enriched with activeSkus, totalUnits, inventoryValue and sales metrics', async () => {
@@ -244,45 +222,47 @@ describe('CategoryService', () => {
     expect(categoryDelete).not.toHaveBeenCalled();
   });
 
-  it('soft-deletes category with __del_ suffix when sales history exists', async () => {
+  it('archives category without renaming human-facing name or slug', async () => {
     categoryFindFirst.mockResolvedValue({
       id: 'cat-1',
       name: 'Smartphones',
       slug: 'smartphones',
     });
     productCount.mockResolvedValue(0);
-    orderLineCount.mockResolvedValue(5);
 
     const res = await service.remove(admin, 'cat-1');
 
     expect(res.id).toBe('cat-1');
     expect(res.deletedAt).toBeInstanceOf(Date);
-    expect(categoryUpdate).toHaveBeenCalled();
-    const updateCall = categoryUpdate.mock.calls[0][0];
-    expect(updateCall.where.id).toBe('cat-1');
-    expect(updateCall.data.name).toMatch(/^Smartphones__del_\d+$/);
-    expect(updateCall.data.slug).toMatch(/^smartphones__del_\d+$/);
-    expect(updateCall.data.isActive).toBe(false);
-    expect(updateCall.data.deletedAt).toBeInstanceOf(Date);
+    expect(categoryUpdate).toHaveBeenCalledWith({
+      where: { id: 'cat-1' },
+      data: {
+        isActive: false,
+        deletedAt: expect.any(Date),
+      },
+    });
     expect(categoryDelete).not.toHaveBeenCalled();
   });
 
-  it('hard-deletes category when no active products and no sales history exist', async () => {
+  it('archives category without physical delete even when zero sales history exists', async () => {
     categoryFindFirst.mockResolvedValue({
       id: 'cat-mistake',
       name: 'Typo Category',
       slug: 'typo-category',
     });
     productCount.mockResolvedValue(0);
-    orderLineCount.mockResolvedValue(0);
 
     const res = await service.remove(admin, 'cat-mistake');
 
     expect(res.id).toBe('cat-mistake');
-    expect(categoryDelete).toHaveBeenCalledWith({
+    expect(categoryDelete).not.toHaveBeenCalled();
+    expect(categoryUpdate).toHaveBeenCalledWith({
       where: { id: 'cat-mistake' },
+      data: {
+        isActive: false,
+        deletedAt: expect.any(Date),
+      },
     });
-    expect(categoryUpdate).not.toHaveBeenCalled();
   });
 
   it('throws NotFoundException when deleting non-existent category', async () => {

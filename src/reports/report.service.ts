@@ -808,19 +808,14 @@ export class ReportService {
   }
 
   private async unitsSold(where: Prisma.OrderWhereInput): Promise<number> {
-    const lineDelegate =
-      (this.prisma as any).orderLine ?? (this.prisma as any).orderItem;
     const [sold, returned] = await Promise.all([
-      lineDelegate.aggregate({
+      this.prisma.orderLine.aggregate({
         where: { order: where },
         _sum: { quantity: true },
       }),
       this.prisma.refundItem.aggregate({
         where: {
-          OR: [
-            { orderLine: { order: where } },
-            { orderItem: { order: where } } as any,
-          ],
+          orderLine: { order: where },
         },
         _sum: { quantity: true },
       }),

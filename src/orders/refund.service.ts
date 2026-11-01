@@ -113,7 +113,7 @@ export class RefundService {
     const order = await tx.order.findFirst({
       where: {
         id: orderId,
-        cashier: { businessId },
+        location: { businessId },
         ...(cashierLocationId ? { locationId: cashierLocationId } : {}),
       },
       select: {
@@ -304,11 +304,10 @@ export class RefundService {
       });
     }
 
-    const effectiveShiftId = payoutShiftId ?? order.shiftId;
-    if (effectiveShiftId && order.paymentMethod === PaymentMethod.COD) {
+    if (payoutShiftId && order.paymentMethod === PaymentMethod.COD) {
       if (tx.shiftSession?.updateMany) {
         await tx.shiftSession.updateMany({
-          where: { id: effectiveShiftId, status: ShiftStatus.OPEN },
+          where: { id: payoutShiftId, status: ShiftStatus.OPEN },
           data: { cashCollected: { decrement: refund.totalRefund } },
         });
       }

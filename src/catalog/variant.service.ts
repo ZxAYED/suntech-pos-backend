@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -92,12 +91,10 @@ export function presentVariant(
 
   let stock = variant.stock;
   if (effectiveLocationId) {
-    if (locationStocks.length > 0) {
-      const match = locationStocks.find(
-        (ls) => ls.locationId === effectiveLocationId,
-      );
-      stock = match ? match.stock : 0;
-    }
+    const match = locationStocks.find(
+      (ls) => ls.locationId === effectiveLocationId,
+    );
+    stock = match ? match.stock : 0;
   }
 
   return {
@@ -145,90 +142,14 @@ export class VariantService {
       });
     }
 
-    if (requestedSku) {
-      const softDeleted = await this.prisma.variant.findFirst({
-        where: {
-          businessId,
-          deletedAt: { not: null },
-          OR: [
-            { sku: { equals: requestedSku, mode: 'insensitive' } },
-            {
-              sku: {
-                startsWith: `${requestedSku}__del_`,
-                mode: 'insensitive',
-              },
-            },
-          ],
-        },
-        orderBy: { deletedAt: 'desc' },
-      });
-
-      if (softDeleted) {
-        const restored = await this.prisma.variant.update({
-          where: { id: softDeleted.id },
-          data: {
-            productId: dto.productId,
-            name: dto.name.trim(),
-            sku: requestedSku,
-            barcode,
-            sellingPrice: dto.sellingPrice,
-            costPrice: dto.costPrice ?? null,
-            stock: dto.stock ?? 0,
-            isActive: true,
-            deletedAt: null,
-          },
-          select: variantSelect,
-        });
-
-        if (dto.stock !== undefined && dto.stock !== null) {
-          let targetLocationId = dto.locationId?.trim();
-          if (!targetLocationId && this.prisma.location?.findFirst) {
-            const loc = await this.prisma.location.findFirst({
-              where: { businessId, deletedAt: null },
-              select: { id: true },
-              orderBy: { createdAt: 'asc' },
-            });
-            if (loc) {
-              targetLocationId = loc.id;
-            }
-          }
-
-          if (targetLocationId && this.prisma.locationStock?.upsert) {
-            await this.prisma.locationStock.upsert({
-              where: {
-                locationId_variantId: {
-                  locationId: targetLocationId,
-                  variantId: restored.id,
-                },
-              },
-              create: {
-                businessId,
-                locationId: targetLocationId,
-                variantId: restored.id,
-                stock: dto.stock,
-              },
-              update: {
-                stock: dto.stock,
-              },
-            });
-
-            if (this.prisma.locationStock.aggregate) {
-              const agg = await this.prisma.locationStock.aggregate({
-                where: { variantId: restored.id },
-                _sum: { stock: true },
-              });
-              const totalStock = agg._sum.stock ?? dto.stock;
-              await this.prisma.variant.update({
-                where: { id: restored.id },
-                data: { stock: totalStock },
-              });
-              restored.stock = totalStock;
-            }
-          }
-        }
-
-        return presentVariant(restored, dto.locationId);
+    const targetLocationId = dto.locationId?.trim();
+    if (dto.stock !== undefined && dto.stock !== null && dto.stock > 0) {
+      if (!targetLocationId) {
+        throw new BadRequestException(
+          'Branch locationId is required to set initial variant stock',
+        );
       }
+      await this.assertLocation(businessId, targetLocationId);
     }
 
     const attempts = requestedSku ? 1 : SKU_ATTEMPTS;
@@ -237,41 +158,35 @@ export class VariantService {
       const sku = requestedSku ?? createSku();
 
       try {
-        const created = await this.prisma.variant.create({
-          data: {
-            businessId,
-            productId: dto.productId,
-            name: dto.name.trim(),
-            sku,
-            barcode,
-            sellingPrice: dto.sellingPrice,
-            costPrice: dto.costPrice ?? null,
-            stock: dto.stock ?? 0,
-            isActive:
-              dto.isActive !== undefined
-                ? dto.isActive
-                : dto.status !== undefined
-                  ? dto.status === 'ACTIVE'
-                  : true,
-          },
-          select: variantSelect,
-        });
+        const executeCreate = async (tx: any) => {
+          const created = await tx.variant.create({
+            data: {
+              businessId,
+              productId: dto.productId,
+              name: dto.name.trim(),
+              sku,
+              barcode,
+              sellingPrice: dto.sellingPrice,
+              costPrice: dto.costPrice ?? null,
+              stock: dto.stock ?? 0,
+              isActive:
+                dto.isActive !== undefined
+                  ? dto.isActive
+                  : dto.status !== undefined
+                    ? dto.status === 'ACTIVE'
+                    : true,
+            },
+            select: variantSelect,
+          });
 
-        if (dto.stock !== undefined && dto.stock !== null) {
-          let targetLocationId = dto.locationId?.trim();
-          if (!targetLocationId && this.prisma.location?.findFirst) {
-            const loc = await this.prisma.location.findFirst({
-              where: { businessId, deletedAt: null },
-              select: { id: true },
-              orderBy: { createdAt: 'asc' },
-            });
-            if (loc) {
-              targetLocationId = loc.id;
-            }
-          }
-
-          if (targetLocationId && this.prisma.locationStock?.upsert) {
-            await this.prisma.locationStock.upsert({
+          if (
+            dto.stock !== undefined &&
+            dto.stock !== null &&
+            dto.stock > 0 &&
+            targetLocationId &&
+            tx.locationStock?.upsert
+          ) {
+            await tx.locationStock.upsert({
               where: {
                 locationId_variantId: {
                   locationId: targetLocationId,
@@ -289,20 +204,38 @@ export class VariantService {
               },
             });
 
-            if (this.prisma.locationStock.aggregate) {
-              const agg = await this.prisma.locationStock.aggregate({
+            if (tx.locationStock.aggregate) {
+              const agg = await tx.locationStock.aggregate({
                 where: { variantId: created.id },
                 _sum: { stock: true },
               });
               const totalStock = agg._sum.stock ?? dto.stock;
-              await this.prisma.variant.update({
+              await tx.variant.update({
                 where: { id: created.id },
                 data: { stock: totalStock },
               });
               created.stock = totalStock;
             }
+
+            if (tx.stockTransaction?.create) {
+              await tx.stockTransaction.create({
+                data: {
+                  variantId: created.id,
+                  locationId: targetLocationId,
+                  type: StockTransactionType.RESTOCK,
+                  quantity: dto.stock,
+                  notes: 'Initial variant stock setup',
+                },
+              });
+            }
           }
-        }
+
+          return created;
+        };
+
+        const created = this.prisma.$transaction
+          ? await this.prisma.$transaction(executeCreate)
+          : await executeCreate(this.prisma);
 
         return presentVariant(created, dto.locationId);
       } catch (error) {
@@ -352,6 +285,40 @@ export class VariantService {
           : {}
       : {};
 
+    const effectiveLocationId =
+      actor.role === Role.CASHIER
+        ? actor.locationId
+        : query?.locationId?.trim() || undefined;
+
+    const lowStockFilter = isLowStock
+      ? effectiveLocationId
+        ? {
+            OR: [
+              {
+                locationStocks: {
+                  some: {
+                    locationId: effectiveLocationId,
+                    stock: { lte: LOW_STOCK_THRESHOLD },
+                  },
+                },
+              },
+              {
+                locationStocks: {
+                  none: {
+                    locationId: effectiveLocationId,
+                  },
+                },
+              },
+            ],
+          }
+        : { stock: { lte: LOW_STOCK_THRESHOLD } }
+      : {};
+
+    const page = query?.page ? Math.max(1, Number(query.page)) : undefined;
+    const limit = query?.limit ? Math.max(1, Number(query.limit)) : undefined;
+    const skip = page && limit ? (page - 1) * limit : undefined;
+    const take = limit;
+
     const variants = await this.prisma.variant.findMany({
       where: {
         businessId,
@@ -364,17 +331,14 @@ export class VariantService {
           ...(query?.categoryId ? { categoryId: query.categoryId } : {}),
         },
         ...(query?.productId ? { productId: query.productId } : {}),
-        ...(isLowStock ? { stock: { lte: LOW_STOCK_THRESHOLD } } : {}),
+        ...lowStockFilter,
         ...searchFilter,
       },
       select: variantSelect,
       orderBy: { name: 'asc' },
+      ...(skip !== undefined ? { skip } : {}),
+      ...(take !== undefined ? { take } : {}),
     });
-
-    const effectiveLocationId =
-      actor.role === Role.CASHIER
-        ? actor.locationId
-        : query?.locationId?.trim() || undefined;
 
     return variants.map((v) => presentVariant(v, effectiveLocationId));
   }
@@ -432,42 +396,46 @@ export class VariantService {
           ? dto.status === 'ACTIVE'
           : undefined;
 
-    try {
-      const updated = await this.prisma.variant.updateMany({
-        where: { id: current.id, businessId, deletedAt: null },
-        data: {
-          ...(dto.productId ? { productId: dto.productId } : {}),
-          ...(dto.name ? { name: dto.name.trim() } : {}),
-          ...(sku ? { sku } : {}),
-          ...(barcode !== undefined ? { barcode } : {}),
-          ...(dto.sellingPrice !== undefined
-            ? { sellingPrice: dto.sellingPrice }
-            : {}),
-          ...(dto.costPrice !== undefined ? { costPrice: dto.costPrice } : {}),
-          ...(dto.stock !== undefined ? { stock: dto.stock } : {}),
-          ...(isActive !== undefined ? { isActive } : {}),
-        },
-      });
-
-      if (updated.count === 0) {
-        throw new NotFoundException('Variant not found');
+    const targetLocationId = dto.locationId?.trim();
+    if (dto.stock !== undefined && dto.stock !== null) {
+      if (!targetLocationId) {
+        throw new BadRequestException(
+          'Branch locationId is required to set variant stock',
+        );
       }
+      await this.assertLocation(businessId, targetLocationId);
+    }
 
-      if (dto.stock !== undefined && dto.stock !== null) {
-        let targetLocationId = dto.locationId?.trim();
-        if (!targetLocationId && this.prisma.location?.findFirst) {
-          const loc = await this.prisma.location.findFirst({
-            where: { businessId, deletedAt: null },
-            select: { id: true },
-            orderBy: { createdAt: 'asc' },
-          });
-          if (loc) {
-            targetLocationId = loc.id;
-          }
+    try {
+      const executeUpdate = async (tx: any) => {
+        const updated = await tx.variant.updateMany({
+          where: { id: current.id, businessId, deletedAt: null },
+          data: {
+            ...(dto.productId ? { productId: dto.productId } : {}),
+            ...(dto.name ? { name: dto.name.trim() } : {}),
+            ...(sku ? { sku } : {}),
+            ...(barcode !== undefined ? { barcode } : {}),
+            ...(dto.sellingPrice !== undefined
+              ? { sellingPrice: dto.sellingPrice }
+              : {}),
+            ...(dto.costPrice !== undefined
+              ? { costPrice: dto.costPrice }
+              : {}),
+            ...(isActive !== undefined ? { isActive } : {}),
+          },
+        });
+
+        if (updated.count === 0) {
+          throw new NotFoundException('Variant not found');
         }
 
-        if (targetLocationId && this.prisma.locationStock?.upsert) {
-          await this.prisma.locationStock.upsert({
+        if (
+          dto.stock !== undefined &&
+          dto.stock !== null &&
+          targetLocationId &&
+          tx.locationStock?.upsert
+        ) {
+          await tx.locationStock.upsert({
             where: {
               locationId_variantId: {
                 locationId: targetLocationId,
@@ -485,18 +453,36 @@ export class VariantService {
             },
           });
 
-          if (this.prisma.locationStock.aggregate) {
-            const agg = await this.prisma.locationStock.aggregate({
+          if (tx.locationStock.aggregate) {
+            const agg = await tx.locationStock.aggregate({
               where: { variantId: current.id },
               _sum: { stock: true },
             });
             const totalStock = agg._sum.stock ?? dto.stock;
-            await this.prisma.variant.update({
+            await tx.variant.update({
               where: { id: current.id },
               data: { stock: totalStock },
             });
           }
+
+          if (tx.stockTransaction?.create) {
+            await tx.stockTransaction.create({
+              data: {
+                variantId: current.id,
+                locationId: targetLocationId,
+                type: StockTransactionType.MANUAL_ADJUSTMENT,
+                quantity: Math.abs(dto.stock - (current.stock ?? 0)),
+                notes: 'Variant metadata stock update',
+              },
+            });
+          }
         }
+      };
+
+      if (this.prisma.$transaction) {
+        await this.prisma.$transaction(executeUpdate);
+      } else {
+        await executeUpdate(this.prisma);
       }
     } catch (error) {
       if (isUniqueConstraintError(error)) {
@@ -520,29 +506,18 @@ export class VariantService {
       requestedBusinessId || dto.businessId,
     );
 
-    let targetLocationId =
-      actor.role === Role.CASHIER ? actor.locationId : dto.locationId;
+    const targetLocationId =
+      actor.role === Role.CASHIER ? actor.locationId : dto.locationId?.trim();
 
-    if (actor.role === Role.CASHIER && !targetLocationId) {
-      throw new ForbiddenException(
-        'Cashier account must be assigned to an active business and branch location',
+    if (!targetLocationId) {
+      throw new BadRequestException(
+        actor.role === Role.CASHIER
+          ? 'Cashier account must be assigned to an active business and branch location'
+          : 'Branch locationId is required for stock adjustment',
       );
     }
 
-    if (!targetLocationId && this.prisma.location?.findFirst) {
-      const loc = await this.prisma.location.findFirst({
-        where: { businessId, deletedAt: null },
-        select: { id: true },
-        orderBy: { createdAt: 'asc' },
-      });
-      if (loc) {
-        targetLocationId = loc.id;
-      }
-    }
-
-    if (targetLocationId) {
-      await this.assertLocation(businessId, targetLocationId);
-    }
+    await this.assertLocation(businessId, targetLocationId);
 
     const current = await this.prisma.variant.findFirst({
       where: { id: variantId, ...this.visibleWhere(businessId) },
@@ -603,7 +578,9 @@ export class VariantService {
     let txQty: number;
 
     if (operation === StockOperation.DEDUCT) {
-      txType = StockTransactionType.SALE;
+      txType = dto.notes?.toLowerCase().includes('sale')
+        ? StockTransactionType.SALE
+        : StockTransactionType.MANUAL_ADJUSTMENT;
       txQty = changeQty;
 
       if (!dto.allowNegative && currentBaseline < changeQty) {
@@ -633,54 +610,64 @@ export class VariantService {
       newGlobalStock = Math.max(0, changeQty);
     }
 
-    // 1. Update location stock if targetLocationId is available
-    if (targetLocationId && this.prisma.locationStock?.upsert) {
-      await this.prisma.locationStock.upsert({
-        where: {
-          locationId_variantId: {
+    const executeStockMutation = async (tx: any) => {
+      // 1. Update location stock if targetLocationId is available
+      if (targetLocationId && tx.locationStock?.upsert) {
+        await tx.locationStock.upsert({
+          where: {
+            locationId_variantId: {
+              locationId: targetLocationId,
+              variantId: current.id,
+            },
+          },
+          create: {
+            businessId,
             locationId: targetLocationId,
             variantId: current.id,
+            stock: newLocationStock,
           },
-        },
-        create: {
-          businessId,
-          locationId: targetLocationId,
-          variantId: current.id,
-          stock: newLocationStock,
-        },
-        update: {
-          stock: newLocationStock,
-        },
-      });
-
-      if (this.prisma.locationStock.aggregate) {
-        const agg = await this.prisma.locationStock.aggregate({
-          where: { variantId: current.id },
-          _sum: { stock: true },
+          update: {
+            stock: newLocationStock,
+          },
         });
-        newGlobalStock = agg?._sum?.stock ?? newLocationStock;
+
+        if (tx.locationStock.aggregate) {
+          const agg = await tx.locationStock.aggregate({
+            where: { variantId: current.id },
+            _sum: { stock: true },
+          });
+          newGlobalStock = agg?._sum?.stock ?? newLocationStock;
+        }
       }
-    }
 
-    // 2. Update variant global aggregate stock
-    await this.prisma.variant.update({
-      where: { id: current.id },
-      data: { stock: newGlobalStock },
-    });
+      // 2. Update variant global aggregate stock
+      if (tx.variant?.update) {
+        await tx.variant.update({
+          where: { id: current.id },
+          data: { stock: newGlobalStock },
+        });
+      }
 
-    // 3. Create stock transaction record
-    if (this.prisma.stockTransaction?.create && txQty > 0) {
-      await this.prisma.stockTransaction.create({
-        data: {
-          variantId: current.id,
-          locationId: targetLocationId ?? null,
-          type: txType,
-          quantity: txQty,
-          notes:
-            dto.notes?.trim() ||
-            `Inventory stock adjustment (${operation} ${txQty})`,
-        },
-      });
+      // 3. Create stock transaction record
+      if (tx.stockTransaction?.create && txQty > 0) {
+        await tx.stockTransaction.create({
+          data: {
+            variantId: current.id,
+            locationId: targetLocationId ?? null,
+            type: txType,
+            quantity: txQty,
+            notes:
+              dto.notes?.trim() ||
+              `Inventory stock adjustment (${operation} ${txQty})`,
+          },
+        });
+      }
+    };
+
+    if (this.prisma.$transaction) {
+      await this.prisma.$transaction(executeStockMutation);
+    } else {
+      await executeStockMutation(this.prisma);
     }
 
     return this.findVariant(businessId, current.id, targetLocationId);
@@ -701,56 +688,18 @@ export class VariantService {
       throw new NotFoundException('Variant not found');
     }
 
-    // Sales history check in orderLine
-    const salesCount = this.prisma.orderLine?.count
-      ? await this.prisma.orderLine.count({
-          where: { variantId: variant.id },
-        })
-      : 0;
+    // Archive variant without renaming SKU/barcode.
+    // Retain LocationStock, VariantImage, and StockTransaction history.
+    const deletedAt = new Date();
+    await this.prisma.variant.update({
+      where: { id: variant.id },
+      data: {
+        isActive: false,
+        deletedAt,
+      },
+    });
 
-    if (salesCount > 0) {
-      // Soft-delete: retain historical analytics & sales records
-      const timestamp = Date.now();
-      const deletedAt = new Date();
-      const suffixedSku = `${variant.sku}__del_${timestamp}`;
-      const suffixedBarcode = variant.barcode
-        ? `${variant.barcode}__del_${timestamp}`
-        : null;
-
-      await this.prisma.variant.update({
-        where: { id: variant.id },
-        data: {
-          sku: suffixedSku,
-          barcode: suffixedBarcode,
-          isActive: false,
-          deletedAt,
-        },
-      });
-
-      return { id: variantId, deletedAt };
-    } else {
-      // Hard-delete: clean permanent removal for variants with zero sales history
-      if (this.prisma.locationStock?.deleteMany) {
-        await this.prisma.locationStock.deleteMany({
-          where: { variantId: variant.id },
-        });
-      }
-      if (this.prisma.variantImage?.deleteMany) {
-        await this.prisma.variantImage.deleteMany({
-          where: { variantId: variant.id },
-        });
-      }
-      if (this.prisma.stockTransaction?.deleteMany) {
-        await this.prisma.stockTransaction.deleteMany({
-          where: { variantId: variant.id },
-        });
-      }
-      await this.prisma.variant.delete({
-        where: { id: variant.id },
-      });
-
-      return { id: variantId, deletedAt: new Date() };
-    }
+    return { id: variantId, deletedAt };
   }
 
   private visibleWhere(businessId: string): Prisma.VariantWhereInput {
@@ -827,14 +776,18 @@ export class VariantService {
     const existing = await this.prisma.variant.findFirst({
       where: {
         businessId,
-        deletedAt: null,
         ...(ignoreId ? { id: { not: ignoreId } } : {}),
         OR: matches,
       },
-      select: { id: true },
+      select: { id: true, deletedAt: true },
     });
 
     if (existing) {
+      if (existing.deletedAt) {
+        throw new ConflictException(
+          'SKU or barcode is already associated with an archived variant. Archived codes cannot be reused without restoring the original record.',
+        );
+      }
       throw new ConflictException(CODE_TAKEN);
     }
   }

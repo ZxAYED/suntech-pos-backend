@@ -4,7 +4,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { AdvanceStatus, Prisma, Role } from '@prisma/client';
+import {
+  AdvanceStatus,
+  ExpenseCategory,
+  ExpenseSourceType,
+  Prisma,
+  Role,
+} from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { getDhakaDateParts } from '../common/utils/timezone.util';
 import { PrismaService } from '../prisma/prisma.service';
@@ -125,6 +131,7 @@ export class AdvanceService {
       }
 
       let shiftId: string | undefined = undefined;
+      let shiftLocationId: string | undefined = undefined;
       if (actor.role === Role.CASHIER && tx.shiftSession?.findFirst) {
         const activeShift = await tx.shiftSession.findFirst({
           where: {
@@ -132,13 +139,15 @@ export class AdvanceService {
             businessId,
             status: 'OPEN',
           },
+          select: { id: true, locationId: true },
         });
         if (activeShift) {
           shiftId = activeShift.id;
+          shiftLocationId = activeShift.locationId;
         }
       }
 
-      return tx.employeeAdvance.create({
+      const advance = await tx.employeeAdvance.create({
         data: {
           businessId,
           cashierId,
@@ -149,6 +158,27 @@ export class AdvanceService {
         },
         select: advanceSelect,
       });
+
+      if (tx.expense?.create) {
+        await tx.expense.create({
+          data: {
+            businessId,
+            locationId: shiftLocationId ?? cashier.locationId ?? null,
+            userId: cashier.id,
+            beneficiaryCashierId: cashier.id,
+            sourceType: ExpenseSourceType.SALARY_ADVANCE,
+            amount: dto.amount,
+            title: `Salary Advance - ${cashier.fullName}`,
+            category: ExpenseCategory.SALARIES,
+            note: `Salary advance for ${cashier.fullName}. Reason: ${dto.reason?.trim() || 'N/A'}`,
+            spentAt: advance.takenAt,
+            paidAt: advance.takenAt,
+            advanceId: advance.id,
+          },
+        });
+      }
+
+      return advance;
     };
 
     if (this.prisma.$transaction) {
@@ -167,37 +197,55 @@ export class AdvanceService {
     const businessId = requireBusinessId(actor, requestedBusinessId);
     const deletedAt = new Date();
 
-    if (this.prisma.employeeAdvance?.findFirst) {
-      const existing = await this.prisma.employeeAdvance.findFirst({
-        where: { id: advanceId, businessId, deletedAt: null },
+    const executeRemove = async (tx: any) => {
+      if (tx.employeeAdvance?.findFirst) {
+        const existing = await tx.employeeAdvance.findFirst({
+          where: { id: advanceId, businessId, deletedAt: null },
+        });
+
+        if (!existing) {
+          throw new NotFoundException('Advance not found');
+        }
+
+        if (existing.status === AdvanceStatus.DEDUCTED) {
+          throw new BadRequestException(
+            'Cannot delete an advance that has already been deducted in payroll',
+          );
+        }
+      }
+
+      const removed = await tx.employeeAdvance.updateMany({
+        where: {
+          id: advanceId,
+          businessId,
+          status: AdvanceStatus.PENDING,
+          deletedAt: null,
+        },
+        data: { deletedAt },
       });
 
-      if (!existing) {
+      if (removed.count === 0) {
         throw new NotFoundException('Advance not found');
       }
 
-      if (existing.status === AdvanceStatus.DEDUCTED) {
-        throw new BadRequestException(
-          'Cannot delete an advance that has already been deducted in payroll',
-        );
+      if (tx.expense?.updateMany) {
+        await tx.expense.updateMany({
+          where: {
+            advanceId,
+            businessId,
+            deletedAt: null,
+          },
+          data: { deletedAt },
+        });
       }
+
+      return { id: advanceId, deletedAt };
+    };
+
+    if (this.prisma.$transaction) {
+      return this.prisma.$transaction(executeRemove);
     }
-
-    const removed = await this.prisma.employeeAdvance.updateMany({
-      where: {
-        id: advanceId,
-        businessId,
-        status: AdvanceStatus.PENDING,
-        deletedAt: null,
-      },
-      data: { deletedAt },
-    });
-
-    if (removed.count === 0) {
-      throw new NotFoundException('Advance not found');
-    }
-
-    return { id: advanceId, deletedAt };
+    return executeRemove(this.prisma);
   }
 
   async list(actor: AccessTokenPayload, query: ListAdvancesQueryDto) {
@@ -379,7 +427,12 @@ export class AdvanceService {
         role: Role.CASHIER,
         deletedAt: null,
       },
-      select: { id: true, monthlySalary: true },
+      select: {
+        id: true,
+        fullName: true,
+        locationId: true,
+        monthlySalary: true,
+      },
     });
 
     if (!cashier) {

@@ -44,8 +44,9 @@ model User {
   shifts           ShiftSession[]
   payrolls         PayrollRecord[]
   orders           Order[]           @relation("CashierOrders")
-  refundsProcessed Refund[]          @relation("RefundAuditor")
-  expenses         Expense[]         @relation("UserExpenses")
+  refundsProcessed    Refund[]          @relation("RefundAuditor")
+  expenses            Expense[]         @relation("UserExpenses")
+  beneficiaryExpenses Expense[]         @relation("BeneficiaryExpenses")
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())

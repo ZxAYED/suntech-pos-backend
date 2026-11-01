@@ -115,6 +115,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
     const canonical = JSON.stringify({
       method: request.method.toUpperCase(),
       path: request.path,
+      query: this.sortValue(request.query ?? null),
       body: this.sortValue(request.body ?? null),
       businessId: request.user?.businessId ?? null,
       locationId: request.user?.locationId ?? null,

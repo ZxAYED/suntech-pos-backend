@@ -185,38 +185,6 @@ export class ProductService {
       dto.attachments;
     const customAttributes = normalizeCustomAttributes(rawAttrs);
 
-    // Check if product was previously soft-deleted
-    const softDeleted = await this.prisma.product.findFirst({
-      where: {
-        businessId,
-        deletedAt: { not: null },
-        OR: [
-          { name: { equals: name, mode: 'insensitive' } },
-          { name: { startsWith: `${name}__del_`, mode: 'insensitive' } },
-        ],
-      },
-      orderBy: { deletedAt: 'desc' },
-    });
-
-    if (softDeleted) {
-      const restored = await this.prisma.product.update({
-        where: { id: softDeleted.id },
-        data: {
-          name,
-          description: dto.description?.trim() || null,
-          categoryId: dto.categoryId ?? null,
-          customAttributes:
-            (customAttributes as unknown as Prisma.InputJsonValue) ??
-            Prisma.DbNull,
-          isActive: true,
-          deletedAt: null,
-        },
-        select: productSelect,
-      });
-
-      return presentProduct(restored);
-    }
-
     const isActive =
       dto.isActive !== undefined
         ? dto.isActive
@@ -506,84 +474,31 @@ export class ProductService {
       throw new NotFoundException('Product not found');
     }
 
-    // 1. Safeguard: Product CANNOT be deleted if it contains active variants
-    const activeVariantsCount = this.prisma.variant?.count
-      ? await this.prisma.variant.count({
-          where: { productId: product.id, deletedAt: null },
-        })
-      : 0;
+    const deletedAt = new Date();
 
-    if (activeVariantsCount > 0) {
-      throw new ConflictException(
-        `Cannot delete product "${product.name}" because it still contains ${activeVariantsCount} active variant(s). Please delete all variants under this product first.`,
-      );
-    }
-
-    // 2. Sales history check: OrderLines containing this product or its variants
-    const salesCount = this.prisma.orderLine?.count
-      ? await this.prisma.orderLine.count({
-          where: {
-            OR: [
-              { variant: { productId: product.id } },
-              { productName: { equals: product.name, mode: 'insensitive' } },
-            ],
-          },
-        })
-      : 0;
-
-    if (salesCount > 0) {
-      // Soft-delete: retain historical analytics & sales records
-      const timestamp = Date.now();
-      const deletedAt = new Date();
-      const suffixedName = `${product.name}__del_${timestamp}`;
-
-      await this.prisma.product.update({
-        where: { id: product.id },
+    // Archive product and its linked variants atomically.
+    // Stock history, location stocks, and transaction ledgers remain intact.
+    await this.prisma.$transaction(async (tx) => {
+      // Inactivate and archive linked variants to make them unsellable
+      await tx.variant.updateMany({
+        where: { productId: product.id, deletedAt: null },
         data: {
-          name: suffixedName,
           isActive: false,
           deletedAt,
         },
       });
 
-      return { id: productId, deletedAt };
-    } else {
-      // Hard-delete: clean permanent removal for products with zero sales history
-      if (this.prisma.variant?.findMany) {
-        const remainingVariants = await this.prisma.variant.findMany({
-          where: { productId: product.id },
-          select: { id: true },
-        });
-        for (const v of remainingVariants) {
-          if (this.prisma.locationStock?.deleteMany) {
-            await this.prisma.locationStock.deleteMany({
-              where: { variantId: v.id },
-            });
-          }
-          if (this.prisma.variantImage?.deleteMany) {
-            await this.prisma.variantImage.deleteMany({
-              where: { variantId: v.id },
-            });
-          }
-          if (this.prisma.stockTransaction?.deleteMany) {
-            await this.prisma.stockTransaction.deleteMany({
-              where: { variantId: v.id },
-            });
-          }
-        }
-        if (this.prisma.variant?.deleteMany) {
-          await this.prisma.variant.deleteMany({
-            where: { productId: product.id },
-          });
-        }
-      }
-
-      await this.prisma.product.delete({
+      // Archive product without renaming original human-facing name
+      await tx.product.update({
         where: { id: product.id },
+        data: {
+          isActive: false,
+          deletedAt,
+        },
       });
+    });
 
-      return { id: productId, deletedAt: new Date() };
-    }
+    return { id: productId, deletedAt };
   }
 
   private async findProduct(businessId: string, productId: string) {
@@ -622,13 +537,17 @@ export class ProductService {
       where: {
         businessId,
         name: { equals: name, mode: 'insensitive' },
-        deletedAt: null,
         ...(ignoreId ? { id: { not: ignoreId } } : {}),
       },
-      select: { id: true },
+      select: { id: true, deletedAt: true },
     });
 
     if (existing) {
+      if (existing.deletedAt) {
+        throw new ConflictException(
+          `Product "${name}" already exists in archives. Archived names cannot be reused without restoring the original record.`,
+        );
+      }
       throw new ConflictException(NAME_TAKEN);
     }
   }
@@ -656,7 +575,7 @@ export function presentProduct(
         : {}),
     }));
 
-    if (effectiveLocationId && locationStocks.length > 0) {
+    if (effectiveLocationId) {
       const match = locationStocks.find(
         (ls) => ls.locationId === effectiveLocationId,
       );
