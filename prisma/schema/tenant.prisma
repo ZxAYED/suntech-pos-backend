@@ -38,6 +38,7 @@ model Location {
   orders         Order[]
   locationStocks LocationStock[]
   expenses       Expense[]
+  advances       EmployeeAdvance[]
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())

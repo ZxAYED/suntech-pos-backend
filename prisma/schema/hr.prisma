@@ -22,12 +22,17 @@ model EmployeeAdvance {
   shiftId    String?
   shift      ShiftSession? @relation(fields: [shiftId], references: [id], onDelete: SetNull)
 
-  amount  Int
-  takenAt DateTime      @default(now())
-  reason  String?
-  status  AdvanceStatus @default(PENDING)
+  locationId String?
+  location   Location?     @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
-  expense Expense?
+  amount         Int
+  deductedAmount Int           @default(0)
+  takenAt        DateTime      @default(now())
+  reason         String?
+  status         AdvanceStatus @default(PENDING)
+
+  expense           Expense?
+  payrollDeductions PayrollAdvanceDeduction[]
 
   deletedAt DateTime?
   createdAt DateTime  @default(now())
@@ -36,6 +41,7 @@ model EmployeeAdvance {
   @@index([businessId])
   @@index([cashierId])
   @@index([shiftId])
+  @@index([locationId])
 }
 
 model PayrollRecord {
@@ -53,12 +59,26 @@ model PayrollRecord {
   netPaid               Int
   status                PayrollStatus @default(PAID)
 
-  expense Expense?
+  advanceDeductions PayrollAdvanceDeduction[]
+  expense           Expense?
 
   createdAt DateTime @default(now())
 
   @@unique([cashierId, month, year])
   @@index([businessId])
+}
+
+model PayrollAdvanceDeduction {
+  id        String          @id @default(uuid())
+  payrollId String
+  payroll   PayrollRecord   @relation(fields: [payrollId], references: [id], onDelete: Cascade)
+  advanceId String
+  advance   EmployeeAdvance @relation(fields: [advanceId], references: [id], onDelete: Cascade)
+  amount    Int
+  createdAt DateTime        @default(now())
+
+  @@index([payrollId])
+  @@index([advanceId])
 }
 
 model ShiftSession {

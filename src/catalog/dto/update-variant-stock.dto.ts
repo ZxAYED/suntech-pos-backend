@@ -58,14 +58,12 @@ export class UpdateVariantStockDto {
 
   @ApiPropertyOptional({
     description:
-      'Absolute stock value to set directly (alternative to quantity with operation "set")',
+      'Absolute stock value to set directly (alternative to quantity with operation "set", negative allowed per MVP policy)',
     example: 20,
-    minimum: 0,
   })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(0)
   stock?: number;
 
   @ApiPropertyOptional({
@@ -96,11 +94,11 @@ export class UpdateVariantStockDto {
 
   @ApiPropertyOptional({
     description:
-      'Whether to allow stock to go below zero (default false, rejects with 400 if stock is insufficient)',
-    default: false,
-    example: false,
+      'Whether to allow stock to go below zero (default true per MVP negative stock policy)',
+    default: true,
+    example: true,
   })
   @IsOptional()
   @IsBoolean()
-  allowNegative?: boolean = false;
+  allowNegative?: boolean = true;
 }

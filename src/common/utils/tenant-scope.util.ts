@@ -49,18 +49,9 @@ export async function resolveTenantContext(
   if (!businessId && actor.role === Role.ADMIN) {
     const adminUser = await prisma.user.findFirst({
       where: { id: actor.sub, deletedAt: null },
-      select: {
-        businessId: true,
-        ownedBusinesses: {
-          where: { deletedAt: null },
-          select: { id: true },
-          take: 1,
-        },
-      },
+      select: { businessId: true },
     });
-
-    businessId =
-      adminUser?.businessId || adminUser?.ownedBusinesses?.[0]?.id || undefined;
+    businessId = adminUser?.businessId || undefined;
   }
 
   if (!businessId) {

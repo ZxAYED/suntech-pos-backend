@@ -120,6 +120,7 @@ export type PresentedOrder = Omit<
   'lines'
 > & {
   lines: PresentedOrderLine[];
+  refundStatus?: RefundStatus | null;
   totalRefundedAmount?: number;
   type?: OrderType;
   businessId?: string | null;
@@ -159,6 +160,12 @@ export function presentOrder(order: any): PresentedOrder {
     (sum: number, line: PresentedOrderLine) => sum + (line.refundedAmount ?? 0),
     0,
   );
+  const computedRefundStatus = refundStatus(
+    lines.map((l: PresentedOrderLine) => ({
+      quantity: l.quantity,
+      refunded: l.refundedQuantity,
+    })),
+  );
 
   const locationName = order.location?.name ?? order.locationName ?? null;
   const branchName = locationName;
@@ -187,6 +194,7 @@ export function presentOrder(order: any): PresentedOrder {
     sellerName,
     sellerRole,
     lines,
+    refundStatus: computedRefundStatus,
     totalRefundedAmount,
   };
 }
@@ -332,17 +340,18 @@ export class OrdersService {
     if (!user.ownedBusinesses && actorBusinessId) {
       ownedBusinessIds.add(actorBusinessId);
     }
-    const effectiveBusinessId =
-      effectiveRole === Role.CASHIER
-        ? (actorBusinessId ?? user.businessId)
-        : (requestedBusinessId ?? actorBusinessId ?? user.businessId);
-    const effectiveLocationId = actorLocationId ?? user.locationId;
-
-    if (!effectiveBusinessId) {
-      throw new BadRequestException(
-        'businessId is required for Admin checkout',
-      );
+    let effectiveBusinessId: string;
+    if (effectiveRole === Role.ADMIN) {
+      if (!requestedBusinessId?.trim()) {
+        throw new BadRequestException(
+          'businessId is required for Admin checkout',
+        );
+      }
+      effectiveBusinessId = requestedBusinessId.trim();
+    } else {
+      effectiveBusinessId = (actorBusinessId ?? user.businessId) as string;
     }
+    const effectiveLocationId = actorLocationId ?? user.locationId;
     if (
       effectiveRole === Role.ADMIN &&
       !ownedBusinessIds.has(effectiveBusinessId)
@@ -381,14 +390,23 @@ export class OrdersService {
     });
 
     if (!location) {
+      const anyLocation = await tx.location.findFirst({
+        where: { id: locationId, deletedAt: null },
+        select: { id: true, businessId: true },
+      });
+      if (
+        anyLocation &&
+        anyLocation.businessId &&
+        anyLocation.businessId !== effectiveBusinessId
+      ) {
+        throw new BadRequestException(
+          'Location does not belong to the specified business',
+        );
+      }
       throw new NotFoundException('Location not found');
     }
 
-    if (effectiveBusinessId && location.businessId !== effectiveBusinessId) {
-      throw new ForbiddenException('Location does not belong to your business');
-    }
-
-    const businessId = location.businessId;
+    const businessId = effectiveBusinessId;
 
     let shiftId: string | null = null;
     if (dto.shiftId) {
@@ -513,6 +531,26 @@ export class OrdersService {
       requiredStock.set(line.variantId, current + line.quantity);
     }
 
+    if (!options) {
+      for (const line of dto.lines) {
+        const variant = variantMap.get(line.variantId);
+        if (
+          variant &&
+          line.unitPrice !== undefined &&
+          line.unitPrice !== null &&
+          line.unitPrice !== variant.sellingPrice
+        ) {
+          throw new ConflictException({
+            code: 'PRICE_CHANGED',
+            message: `Price for variant "${variant.name || variant.id}" has changed from ${line.unitPrice} to ${variant.sellingPrice}`,
+            variantId: variant.id,
+            submittedPrice: line.unitPrice,
+            currentPrice: variant.sellingPrice,
+          });
+        }
+      }
+    }
+
     // 2. Compute Totals
     const preparedLines = dto.lines.map((line) => {
       const variant = variantMap.get(line.variantId);
@@ -565,56 +603,29 @@ export class OrdersService {
       const previousStock = locStock?.stock ?? 0;
       let resultingStock = previousStock - totalQty;
 
-      if (!options) {
-        if (!locStock || previousStock < totalQty) {
-          throw new BadRequestException(
-            `Insufficient stock for variant "${variant.name}". Available: ${previousStock}, requested: ${totalQty}`,
-          );
-        }
-
-        const updated = await tx.locationStock.updateMany({
-          where: {
-            id: locStock.id,
-            stock: { gte: totalQty },
-          },
-          data: { stock: { decrement: totalQty } },
-        });
-
-        if (updated.count === 0) {
-          throw new ConflictException(
-            `Insufficient stock for variant "${variant.name}". The item may have just been sold out.`,
-          );
-        }
-
-        const refreshed = await tx.locationStock.findUnique({
+      // MVP POLICY: negative branch stock is intentionally allowed for online sales/adjustments; do not add availability rejection until owner enables strict stock mode.
+      if (locStock) {
+        const updated = await tx.locationStock.update({
           where: { id: locStock.id },
+          data: { stock: { decrement: totalQty } },
           select: { stock: true },
         });
-        resultingStock = refreshed?.stock ?? previousStock - totalQty;
+        resultingStock = updated.stock;
       } else {
-        if (locStock) {
-          const updated = await tx.locationStock.update({
-            where: { id: locStock.id },
-            data: { stock: { decrement: totalQty } },
-            select: { stock: true },
-          });
-          resultingStock = updated.stock;
-        } else {
-          const updated = await tx.locationStock.upsert({
-            where: {
-              locationId_variantId: { locationId, variantId: vId },
-            },
-            update: { stock: { decrement: totalQty } },
-            create: {
-              businessId,
-              locationId,
-              variantId: vId,
-              stock: -totalQty,
-            },
-            select: { stock: true },
-          });
-          resultingStock = updated.stock;
-        }
+        const updated = await tx.locationStock.upsert({
+          where: {
+            locationId_variantId: { locationId, variantId: vId },
+          },
+          update: { stock: { decrement: totalQty } },
+          create: {
+            businessId,
+            locationId,
+            variantId: vId,
+            stock: -totalQty,
+          },
+          select: { stock: true },
+        });
+        resultingStock = updated.stock;
       }
 
       await tx.variant.update({
@@ -640,9 +651,17 @@ export class OrdersService {
       });
     }
 
-    const paymentMethod =
-      dto.paymentMethod ?? dto.paymentType ?? PaymentMethod.COD;
-    if (!Object.values(PaymentMethod).includes(paymentMethod)) {
+    if (
+      dto.paymentMethod &&
+      dto.paymentType &&
+      dto.paymentMethod !== dto.paymentType
+    ) {
+      throw new BadRequestException(
+        'paymentMethod and paymentType must match if both are provided',
+      );
+    }
+    const paymentMethod = dto.paymentMethod ?? dto.paymentType;
+    if (!paymentMethod || !Object.values(PaymentMethod).includes(paymentMethod)) {
       throw new BadRequestException(
         'Explicit payment method is required: COD, BKASH, NAGAD, BANK',
       );
@@ -650,12 +669,26 @@ export class OrdersService {
 
     // Only COD orders increment physical drawer cash
     if (shiftId && paymentMethod === PaymentMethod.COD) {
-      await tx.shiftSession.update({
-        where: { id: shiftId },
-        data: {
-          cashCollected: { increment: totalAmount },
-        },
-      });
+      if (tx.shiftSession?.updateMany) {
+        const res = await tx.shiftSession.updateMany({
+          where: { id: shiftId, status: ShiftStatus.OPEN },
+          data: {
+            cashCollected: { increment: totalAmount },
+          },
+        });
+        if (res.count === 0 && !options) {
+          throw new ConflictException(
+            'Register shift is closed or inactive. Cash sale requires an open shift.',
+          );
+        }
+      } else if (tx.shiftSession?.update) {
+        await tx.shiftSession.update({
+          where: { id: shiftId },
+          data: {
+            cashCollected: { increment: totalAmount },
+          },
+        });
+      }
     }
 
     const order = await tx.order.create({
@@ -873,9 +906,17 @@ export class OrdersService {
     }
     const totalAmount = subtotal;
     const changeDue = dto.tenderedAmount - totalAmount;
-    const paymentMethod =
-      dto.paymentMethod ?? dto.paymentType ?? PaymentMethod.COD;
-    if (!Object.values(PaymentMethod).includes(paymentMethod)) {
+    if (
+      dto.paymentMethod &&
+      dto.paymentType &&
+      dto.paymentMethod !== dto.paymentType
+    ) {
+      throw new BadRequestException(
+        'paymentMethod and paymentType must match if both are provided',
+      );
+    }
+    const paymentMethod = dto.paymentMethod ?? dto.paymentType;
+    if (!paymentMethod || !Object.values(PaymentMethod).includes(paymentMethod)) {
       throw new BadRequestException(
         'Explicit payment method is required: COD, BKASH, NAGAD, BANK',
       );
@@ -884,12 +925,26 @@ export class OrdersService {
     // 3. Database Transaction
     // Only COD orders increment physical drawer cash
     if (shiftId && paymentMethod === PaymentMethod.COD) {
-      await tx.shiftSession.update({
-        where: { id: shiftId },
-        data: {
-          cashCollected: { increment: totalAmount },
-        },
-      });
+      if (tx.shiftSession?.updateMany) {
+        const res = await tx.shiftSession.updateMany({
+          where: { id: shiftId, status: ShiftStatus.OPEN },
+          data: {
+            cashCollected: { increment: totalAmount },
+          },
+        });
+        if (res.count === 0 && !options) {
+          throw new ConflictException(
+            'Register shift is closed or inactive. Cash sale requires an open shift.',
+          );
+        }
+      } else if (tx.shiftSession?.update) {
+        await tx.shiftSession.update({
+          where: { id: shiftId },
+          data: {
+            cashCollected: { increment: totalAmount },
+          },
+        });
+      }
     }
 
     const order = await tx.order.create({
@@ -1243,25 +1298,7 @@ export class OrdersService {
         where.cashierId = actor.sub;
       }
     } else if (actor && actor.role === Role.ADMIN) {
-      let resolvedBiz = query.businessId?.trim() || actor.businessId;
-      if (!resolvedBiz) {
-        if (actor.businessIds && actor.businessIds.length === 1) {
-          resolvedBiz = actor.businessIds[0];
-        } else if (this.prisma.user?.findFirst) {
-          const user = await this.prisma.user.findFirst({
-            where: { id: actor.sub, deletedAt: null },
-            select: {
-              businessId: true,
-              ownedBusinesses: {
-                where: { deletedAt: null },
-                select: { id: true },
-                take: 1,
-              },
-            },
-          });
-          resolvedBiz = user?.businessId || user?.ownedBusinesses?.[0]?.id;
-        }
-      }
+      const resolvedBiz = query.businessId?.trim() || actor.businessId;
       if (!resolvedBiz) {
         throw new ForbiddenException('Create a business before continuing');
       }
@@ -1482,46 +1519,64 @@ export class OrdersService {
     actor: AccessTokenPayload,
     dto: CreateOrderDto,
   ): Promise<PresentedOrder> {
-    let businessId = actor.businessId;
-    if (!businessId && actor.role === Role.ADMIN) {
-      const user = await this.prisma.user.findFirst({
-        where: { id: actor.sub, deletedAt: null },
-        select: {
-          businessId: true,
-          ownedBusinesses: {
-            where: { deletedAt: null },
-            select: { id: true },
-            take: 1,
-          },
-        },
-      });
-      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
-    }
-    if (!businessId) {
-      throw new ForbiddenException('Create a business before continuing');
-    }
-    const effectiveLocationId =
-      actor.role === Role.CASHIER
-        ? actor.locationId
-        : (dto as any).locationId || actor.locationId;
-
-    let location;
-    if (effectiveLocationId) {
-      location = await this.prisma.location.findFirst({
-        where: { id: effectiveLocationId, businessId, deletedAt: null },
-        select: { id: true },
-      });
-      if (!location) {
-        throw new NotFoundException('Location not found for business');
+    let businessId: string;
+    if (actor.role === Role.ADMIN) {
+      const explicitBusinessId = dto.businessId?.trim();
+      if (!explicitBusinessId) {
+        throw new BadRequestException(
+          'businessId is required for Admin checkout',
+        );
+      }
+      businessId = explicitBusinessId;
+      const ownedBusinessIds = new Set(actor.businessIds ?? []);
+      if (actor.businessId) {
+        ownedBusinessIds.add(actor.businessId);
+      }
+      if (!ownedBusinessIds.has(businessId)) {
+        throw new ForbiddenException('You do not have access to this business');
       }
     } else {
-      location = await this.prisma.location.findFirst({
-        where: { businessId, deletedAt: null },
-        select: { id: true },
-      });
-      if (!location) {
-        throw new NotFoundException('No active location found for business');
+      if (!actor.businessId) {
+        throw new ForbiddenException('Cashier must be assigned to a business');
       }
+      businessId = actor.businessId;
+    }
+
+    let locationId: string;
+    if (actor.role === Role.ADMIN) {
+      const explicitLocationId = dto.locationId?.trim();
+      if (!explicitLocationId) {
+        throw new BadRequestException(
+          'locationId is required for Admin checkout',
+        );
+      }
+      locationId = explicitLocationId;
+    } else {
+      if (!actor.locationId) {
+        throw new ForbiddenException('Cashier must be assigned to a location');
+      }
+      locationId = actor.locationId;
+    }
+
+    const location = await this.prisma.location.findFirst({
+      where: { id: locationId, businessId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!location) {
+      const anyLocation = await this.prisma.location.findFirst({
+        where: { id: locationId, deletedAt: null },
+        select: { id: true, businessId: true },
+      });
+      if (
+        anyLocation &&
+        anyLocation.businessId &&
+        anyLocation.businessId !== businessId
+      ) {
+        throw new BadRequestException(
+          'Location does not belong to the specified business',
+        );
+      }
+      throw new NotFoundException('Location not found for business');
     }
 
     for (let attempt = 1; attempt <= INVOICE_ATTEMPTS; attempt += 1) {
@@ -1730,31 +1785,29 @@ export class OrdersService {
           where: { locationId_variantId: { locationId, variantId: vId } },
         });
         previousStock = locStock?.stock ?? 0;
-        if (!locStock || previousStock < totalQty) {
-          throw new BadRequestException(
-            `Insufficient stock for variant "${variant.name}". Available: ${previousStock}, requested: ${totalQty}`,
-          );
+
+        // MVP POLICY: negative branch stock is intentionally allowed for online sales/adjustments; do not add availability rejection until owner enables strict stock mode.
+        if (locStock) {
+          const updated = await (tx as any).locationStock.update({
+            where: { id: locStock.id },
+            data: { stock: { decrement: totalQty } },
+            select: { stock: true },
+          });
+          resultingStock = updated.stock;
+        } else {
+          const updated = await (tx as any).locationStock.upsert({
+            where: { locationId_variantId: { locationId, variantId: vId } },
+            update: { stock: { decrement: totalQty } },
+            create: {
+              businessId,
+              locationId,
+              variantId: vId,
+              stock: -totalQty,
+            },
+            select: { stock: true },
+          });
+          resultingStock = updated.stock;
         }
-
-        const updated = await (tx as any).locationStock.updateMany({
-          where: {
-            id: locStock.id,
-            stock: { gte: totalQty },
-          },
-          data: { stock: { decrement: totalQty } },
-        });
-
-        if (updated.count === 0) {
-          throw new ConflictException(
-            `Insufficient stock for variant "${variant.name}". The item may have just been sold out.`,
-          );
-        }
-
-        const refreshed = await (tx as any).locationStock.findUnique({
-          where: { id: locStock.id },
-          select: { stock: true },
-        });
-        resultingStock = refreshed?.stock ?? previousStock - totalQty;
       }
 
       const decremented = await tx.variant.updateMany({
@@ -1785,13 +1838,27 @@ export class OrdersService {
 
     const totalAmount = sumMoney(lines.map((line) => line.subtotal));
 
-    if (shiftId && tx.shiftSession?.update) {
-      await tx.shiftSession.update({
-        where: { id: shiftId },
-        data: {
-          cashCollected: { increment: totalAmount },
-        },
-      });
+    if (shiftId) {
+      if (tx.shiftSession?.updateMany) {
+        const res = await tx.shiftSession.updateMany({
+          where: { id: shiftId, status: ShiftStatus.OPEN },
+          data: {
+            cashCollected: { increment: totalAmount },
+          },
+        });
+        if (res.count === 0) {
+          throw new ConflictException(
+            'Register shift is closed or inactive. Cash sale requires an open shift.',
+          );
+        }
+      } else if (tx.shiftSession?.update) {
+        await tx.shiftSession.update({
+          where: { id: shiftId },
+          data: {
+            cashCollected: { increment: totalAmount },
+          },
+        });
+      }
     }
 
     const order = await tx.order.create({
@@ -1865,10 +1932,17 @@ export class OrdersService {
     limit: number;
     total: number;
   }> {
-    const businessId = requireBusinessId(actor);
+    const businessId = requireBusinessId(actor, query.businessId);
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
-    const where = { cashier: { businessId } };
+    const where: any = {
+      cashier: { businessId },
+      ...(actor.role === Role.CASHIER
+        ? { locationId: actor.locationId }
+        : query.locationId
+          ? { locationId: query.locationId }
+          : {}),
+    };
     const [total, orders] = await Promise.all([
       this.prisma.order.count({ where }),
       this.prisma.order.findMany({

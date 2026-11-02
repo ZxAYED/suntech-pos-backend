@@ -21,6 +21,7 @@ describe('PayrollService', () => {
   const payrollRecordFindMany = jest.fn();
   const aggregate = jest.fn();
   const updateMany = jest.fn();
+  const advanceUpdate = jest.fn();
   const payrollCreate = jest.fn();
   const employeeAdvanceFindMany = jest.fn();
   const expenseCreate = jest.fn();
@@ -35,6 +36,7 @@ describe('PayrollService', () => {
     employeeAdvance: {
       aggregate,
       updateMany,
+      update: advanceUpdate,
       findMany: employeeAdvanceFindMany,
     },
     expense: {
@@ -55,6 +57,7 @@ describe('PayrollService', () => {
     employeeAdvance: {
       aggregate,
       updateMany,
+      update: advanceUpdate,
       findMany: employeeAdvanceFindMany,
     },
     expense: {
@@ -71,6 +74,7 @@ describe('PayrollService', () => {
     payrollRecordFindMany.mockReset();
     aggregate.mockReset();
     updateMany.mockReset();
+    advanceUpdate.mockReset();
     payrollCreate.mockReset();
     employeeAdvanceFindMany.mockReset();
     expenseCreate.mockReset();
@@ -100,51 +104,46 @@ describe('PayrollService', () => {
     payrollFindFirst.mockResolvedValue(null);
     payrollRecordFindMany.mockResolvedValue([]);
     employeeAdvanceFindMany.mockResolvedValue([]);
-    aggregate.mockResolvedValue({ _sum: { amount: 500 } });
+    aggregate.mockResolvedValue({ _sum: { amount: 0 } });
     updateMany.mockResolvedValue({ count: 1 });
+    advanceUpdate.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+      Promise.resolve({ id: 'adv-1', ...data }),
+    );
     payrollCreate.mockImplementation(
       ({ data }: { data: Record<string, unknown> }) =>
         Promise.resolve({ id: 'payroll-1', ...data }),
     );
   });
 
-  it('deducts pending advances and records net pay inside one transaction', async () => {
+  it('pays full salary when cashier took no advances and creates single PAYROLL_NET expense', async () => {
     const paid = await service.process(
       { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
       dto,
     );
 
     expect(transaction).toHaveBeenCalledTimes(1);
-    expect(updateMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        businessId: 'biz-1',
-        cashierId: 'cashier-1',
-        status: AdvanceStatus.PENDING,
-        deletedAt: null,
-      }) as Prisma.EmployeeAdvanceWhereInput,
-      data: { status: AdvanceStatus.DEDUCTED },
-    });
+    expect(advanceUpdate).not.toHaveBeenCalled();
     expect(payrollCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           businessId: 'biz-1',
           baseSalary: 15000,
-          totalAdvancesDeducted: 500,
-          netPaid: 14500,
+          totalAdvancesDeducted: 0,
+          netPaid: 15000,
           status: PayrollStatus.PAID,
         }) as Prisma.PayrollRecordCreateInput,
       }),
     );
     expect(paid).toEqual(
-      expect.objectContaining({ netPaid: 14500, totalAdvancesDeducted: 500 }),
+      expect.objectContaining({ netPaid: 15000, totalAdvancesDeducted: 0 }),
     );
     expect(expenseCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         businessId: 'biz-1',
         locationId: 'loc-1',
-        userId: 'cashier-1',
+        userId: 'admin-1',
         beneficiaryCashierId: 'cashier-1',
-        amount: 14500,
+        amount: 15000,
         category: ExpenseCategory.SALARIES,
         sourceType: ExpenseSourceType.PAYROLL_NET,
         payrollId: 'payroll-1',
@@ -152,39 +151,74 @@ describe('PayrollService', () => {
     });
   });
 
-  it('pays the full salary when the cashier took no advances', async () => {
-    aggregate.mockResolvedValue({ _sum: { amount: null } });
-    updateMany.mockResolvedValue({ count: 0 });
+  it('Scenario 1: Salary 20k, advances 2k + 3k -> net 15k, deducted 5k, one 15k Expense', async () => {
+    userFindFirst.mockResolvedValue({
+      id: 'cashier-1',
+      fullName: 'Alex Rivera',
+      locationId: 'loc-1',
+      monthlySalary: 20000,
+    });
+    employeeAdvanceFindMany.mockResolvedValue([
+      { id: 'adv-1', amount: 2000, deductedAmount: 0, takenAt: new Date('2026-10-05') },
+      { id: 'adv-2', amount: 3000, deductedAmount: 0, takenAt: new Date('2026-10-12') },
+    ]);
 
-    await service.processWithin(
+    const record = await service.processWithin(
       tx as unknown as Prisma.TransactionClient,
       'biz-1',
       dto,
+      'admin-1',
     );
 
-    expect(updateMany).toHaveBeenCalled();
-    expect(payrollCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          totalAdvancesDeducted: 0,
-          netPaid: 15000,
-        }) as Prisma.PayrollRecordCreateInput,
+    expect(record.baseSalary).toBe(20000);
+    expect(record.totalAdvancesDeducted).toBe(5000);
+    expect(record.netPaid).toBe(15000);
+    expect(advanceUpdate).toHaveBeenCalledTimes(2);
+    expect(advanceUpdate).toHaveBeenCalledWith({
+      where: { id: 'adv-1' },
+      data: { deductedAmount: 2000, status: AdvanceStatus.DEDUCTED },
+    });
+    expect(advanceUpdate).toHaveBeenCalledWith({
+      where: { id: 'adv-2' },
+      data: { deductedAmount: 3000, status: AdvanceStatus.DEDUCTED },
+    });
+    expect(expenseCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        amount: 15000,
+        category: ExpenseCategory.SALARIES,
+        sourceType: ExpenseSourceType.PAYROLL_NET,
       }),
-    );
+    });
   });
 
-  it('rejects payroll processing if advances exceed base salary', async () => {
-    userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 1000 });
-    aggregate.mockResolvedValue({ _sum: { amount: 1500 } });
+  it('Scenario 2: Salary 20k, advance 25k -> apply 20k, net 0, remaining 5k carried forward, NO Expense created', async () => {
+    userFindFirst.mockResolvedValue({
+      id: 'cashier-1',
+      fullName: 'Alex Rivera',
+      locationId: 'loc-1',
+      monthlySalary: 20000,
+    });
+    employeeAdvanceFindMany.mockResolvedValue([
+      { id: 'adv-1', amount: 25000, deductedAmount: 0, takenAt: new Date('2026-10-05') },
+    ]);
 
-    await expect(
-      service.processWithin(
-        tx as unknown as Prisma.TransactionClient,
-        'biz-1',
-        dto,
-      ),
-    ).rejects.toBeInstanceOf(BadRequestException);
-    expect(payrollCreate).not.toHaveBeenCalled();
+    const record = await service.processWithin(
+      tx as unknown as Prisma.TransactionClient,
+      'biz-1',
+      dto,
+      'admin-1',
+    );
+
+    expect(record.baseSalary).toBe(20000);
+    expect(record.totalAdvancesDeducted).toBe(20000);
+    expect(record.netPaid).toBe(0);
+    // Partially deducted: deductedAmount is 20000, status stays PENDING
+    expect(advanceUpdate).toHaveBeenCalledWith({
+      where: { id: 'adv-1' },
+      data: { deductedAmount: 20000, status: AdvanceStatus.PENDING },
+    });
+    // No zero-amount Expense created
+    expect(expenseCreate).not.toHaveBeenCalled();
   });
 
   it('rejects a second payroll for the same period before changing advances', async () => {
@@ -197,7 +231,7 @@ describe('PayrollService', () => {
         dto,
       ),
     ).rejects.toBeInstanceOf(ConflictException);
-    expect(updateMany).not.toHaveBeenCalled();
+    expect(advanceUpdate).not.toHaveBeenCalled();
     expect(payrollCreate).not.toHaveBeenCalled();
   });
 
@@ -228,9 +262,27 @@ describe('PayrollService', () => {
     expect(payrollCreate).not.toHaveBeenCalled();
   });
 
+  it('rejects processing payroll for cashier with zero or missing base salary', async () => {
+    userFindFirst.mockResolvedValueOnce({
+      id: 'cashier-1',
+      fullName: 'No Salary Cashier',
+      locationId: 'loc-1',
+      monthlySalary: 0,
+    });
+
+    await expect(
+      service.processWithin(
+        tx as unknown as Prisma.TransactionClient,
+        'biz-1',
+        dto,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(payrollCreate).not.toHaveBeenCalled();
+  });
+
   it('generates payroll summary with metrics and employee status breakdown', async () => {
     employeeAdvanceFindMany.mockResolvedValue([
-      { cashierId: 'cashier-1', amount: 1000 },
+      { cashierId: 'cashier-1', amount: 1000, deductedAmount: 0, takenAt: new Date('2026-10-10') },
     ]);
     payrollRecordFindMany.mockResolvedValue([
       {
@@ -251,7 +303,7 @@ describe('PayrollService', () => {
     expect(res.disbursementStatus).toBe('PARTIAL');
     expect(res.employees).toHaveLength(2);
     expect(res.employees[0].status).toBe('DUE');
-    expect(res.employees[0].netPay).toBe(34000); // 35000 - 1000
+    expect(res.employees[0].netPay).toBe(34000); // 35000 - 1000 advance
     expect(res.employees[1].status).toBe('PAID');
     expect(res.employees[1].netPay).toBe(24000);
     expect(res.totalMonthlyPayroll).toBe(58000);
@@ -259,7 +311,7 @@ describe('PayrollService', () => {
     expect(res.totalPaidPayroll).toBe(24000);
   });
 
-  it('bulk disburses payroll for all pending employees', async () => {
+  it('bulk disburses payroll for pending employees deducting advances', async () => {
     userFindMany.mockResolvedValue([
       {
         id: 'cashier-1',
@@ -275,7 +327,10 @@ describe('PayrollService', () => {
       },
     ]);
     payrollRecordFindMany.mockResolvedValue([{ cashierId: 'cashier-2' }]);
-    aggregate.mockResolvedValue({ _sum: { amount: 1000 } });
+    employeeAdvanceFindMany.mockResolvedValue([
+      { id: 'adv-1', amount: 1000, deductedAmount: 0, takenAt: new Date('2026-10-05') },
+    ]);
+    updateMany.mockResolvedValue({ count: 1 });
 
     const res = await service.disburse(
       { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
@@ -285,34 +340,53 @@ describe('PayrollService', () => {
     expect(res.success).toBe(true);
     expect(res.disbursedCount).toBe(1); // only cashier-1 was pending
     expect(res.alreadyPaidCount).toBe(1);
+    expect(advanceUpdate).toHaveBeenCalledWith({
+      where: { id: 'adv-1' },
+      data: { deductedAmount: 1000, status: AdvanceStatus.DEDUCTED },
+    });
     expect(payrollCreate).toHaveBeenCalledTimes(1);
     expect(expenseCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         businessId: 'biz-1',
         locationId: 'loc-1',
-        userId: 'cashier-1',
-        amount: 34000,
+        userId: 'admin-1',
+        amount: 34000, // 35000 - 1000
         category: ExpenseCategory.SALARIES,
         payrollId: 'payroll-1',
       }),
     });
   });
 
-  it('throws BadRequestException in disburse if advances exceed base salary', async () => {
-    userFindMany.mockResolvedValue([{ id: 'cashier-1', monthlySalary: 35000 }]);
+  it('bulk disburses deducting eligible advances up to base salary without creating zero expense', async () => {
+    userFindMany.mockResolvedValue([
+      { id: 'cashier-1', fullName: 'Alex Rivera', monthlySalary: 35000, locationId: 'loc-1' },
+    ]);
     payrollRecordFindMany.mockResolvedValue([]);
-    aggregate.mockResolvedValue({ _sum: { amount: 40000 } });
+    employeeAdvanceFindMany.mockResolvedValue([
+      { id: 'adv-1', amount: 40000, deductedAmount: 0, takenAt: new Date('2026-10-05') },
+    ]);
 
-    await expect(
-      service.disburse(
-        { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
-        { month: 10, year: 2026 },
-      ),
-    ).rejects.toThrow(
-      new BadRequestException(
-        'Total advances (40000) cannot exceed base salary (35000)',
-      ),
+    const res = await service.disburse(
+      { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+      { month: 10, year: 2026 },
     );
+
+    expect(res.success).toBe(true);
+    expect(res.disbursedCount).toBe(1);
+    expect(payrollCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          baseSalary: 35000,
+          totalAdvancesDeducted: 35000,
+          netPaid: 0,
+        }),
+      }),
+    );
+    expect(advanceUpdate).toHaveBeenCalledWith({
+      where: { id: 'adv-1' },
+      data: { deductedAmount: 35000, status: AdvanceStatus.PENDING },
+    });
+    expect(expenseCreate).not.toHaveBeenCalled();
   });
 
   it('filters summary and disburse by locationId', async () => {

@@ -1,7 +1,13 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { OrderStatus, PaymentMethod, Prisma, Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { resolveLocationScope } from '../common/utils/location-scope';
+import { requireBusinessId } from '../hr/require-business-id';
 import {
   getDhakaDateParts,
   getDhakaMonthBounds,
@@ -112,6 +118,12 @@ const transactionLineSelect = {
   unitPrice: true,
   quantity: true,
   subtotal: true,
+  refundItems: {
+    select: {
+      quantity: true,
+      refundAmount: true,
+    },
+  },
 } satisfies Prisma.OrderLineSelect;
 
 @Injectable()
@@ -122,31 +134,28 @@ export class ReportService {
     actor: AccessTokenPayload,
     requestedBusinessId?: string,
   ): Promise<string> {
-    if (actor.role === Role.CASHIER) {
-      if (!actor.businessId) {
-        throw new ForbiddenException('Business context is required');
-      }
-      return actor.businessId;
+    return requireBusinessId(actor, requestedBusinessId);
+  }
+
+  private async assertReportLocation(
+    businessId: string,
+    locationId: string,
+  ): Promise<void> {
+    if (!this.prisma.location?.findFirst) {
+      return;
     }
-    let businessId = requestedBusinessId?.trim() || actor.businessId;
-    if (!businessId && actor.role === Role.ADMIN) {
-      const user = await this.prisma.user.findFirst({
-        where: { id: actor.sub, deletedAt: null },
-        select: {
-          businessId: true,
-          ownedBusinesses: {
-            where: { deletedAt: null },
-            select: { id: true },
-            take: 1,
-          },
-        },
-      });
-      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
+    const loc = await this.prisma.location.findFirst({
+      where: { id: locationId, deletedAt: null },
+      select: { id: true, businessId: true },
+    });
+    if (!loc) {
+      throw new NotFoundException('Branch location not found');
     }
-    if (!businessId) {
-      throw new ForbiddenException('Business context is required');
+    if (loc.businessId && loc.businessId !== businessId) {
+      throw new BadRequestException(
+        'Location does not belong to the specified business',
+      );
     }
-    return businessId;
   }
 
   async dashboard(
@@ -158,6 +167,10 @@ export class ReportService {
       query?.businessId,
     );
     const scope = resolveLocationScope(actor, query?.locationId, businessId);
+
+    if (scope.locationId) {
+      await this.assertReportLocation(scope.businessId, scope.locationId);
+    }
 
     if (actor.role === Role.CASHIER) {
       return this.cashierDashboard(
@@ -185,6 +198,11 @@ export class ReportService {
       query?.businessId,
     );
     const scope = resolveLocationScope(admin, query?.locationId, businessId);
+
+    if (scope.locationId) {
+      await this.assertReportLocation(scope.businessId, scope.locationId);
+    }
+
     const metrics = await this.computePeriodMetrics(
       scope.businessId,
       scope.locationId,
@@ -209,6 +227,11 @@ export class ReportService {
       query?.businessId,
     );
     const scope = resolveLocationScope(actor, query?.locationId, businessId);
+
+    if (scope.locationId) {
+      await this.assertReportLocation(scope.businessId, scope.locationId);
+    }
+
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const where: Prisma.OrderWhereInput = {
@@ -325,16 +348,24 @@ export class ReportService {
         occurredAt: order.occurredAt,
         createdAt: order.createdAt,
         lines: order.lines,
-        items: (order.lines || []).map((line) => ({
-          id: line.id,
-          variantId: line.variantId,
-          customItemName: line.variantId
-            ? null
-            : (line.variantName ?? line.productName),
-          price: line.unitPrice,
-          quantity: line.quantity,
-          subtotal: line.subtotal,
-        })),
+        items: (order.lines || []).map((line: any) => {
+          const refundedQuantity = (line.refundItems ?? []).reduce(
+            (sum: number, r: any) => sum + (r.quantity ?? 0),
+            0,
+          );
+          return {
+            id: line.id,
+            variantId: line.variantId,
+            customItemName: line.variantId
+              ? null
+              : (line.variantName ?? line.productName),
+            price: line.unitPrice,
+            quantity: line.quantity,
+            refundedQuantity,
+            refundableQuantity: Math.max(0, line.quantity - refundedQuantity),
+            subtotal: line.subtotal,
+          };
+        }),
       };
     });
 
@@ -530,7 +561,13 @@ export class ReportService {
           : Promise.resolve([]),
         this.prisma.refund.findMany
           ? this.prisma.refund.findMany({
-              where: { order: periodOrderWhere },
+              where: {
+                order: {
+                  location: { businessId },
+                  ...(locationId ? { locationId } : {}),
+                },
+                createdAt: occurredAt,
+              },
               select: {
                 totalRefund: true,
                 order: { select: { paymentMethod: true } },
@@ -796,10 +833,17 @@ export class ReportService {
   }
 
   private async netRevenue(where: Prisma.OrderWhereInput): Promise<number> {
+    const refundWhere: Prisma.RefundWhereInput = {
+      order: {
+        location: where.location,
+        ...(where.locationId ? { locationId: where.locationId } : {}),
+      },
+      ...(where.occurredAt ? { createdAt: where.occurredAt as any } : {}),
+    };
     const [orders, refunds] = await Promise.all([
       this.prisma.order.aggregate({ where, _sum: { totalAmount: true } }),
       this.prisma.refund.aggregate({
-        where: { order: where },
+        where: refundWhere,
         _sum: { totalRefund: true },
       }),
     ]);

@@ -30,6 +30,21 @@ export class RefundLineDto {
 
 export class CreateRefundDto {
   @ApiPropertyOptional({
+    description: 'Target business UUID for Admin users',
+  })
+  @IsOptional()
+  @IsString()
+  businessId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Active shift UUID for physical cash drawer payout',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsString()
+  payoutShiftId?: string;
+
+  @ApiPropertyOptional({
     description: 'Reason for processing refund',
     example: 'Customer returned damaged item',
   })

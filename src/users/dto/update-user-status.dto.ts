@@ -2,6 +2,8 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { AccountStatus } from '@prisma/client';
 import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 
+import { IsEntityId } from '../../common/decorators/is-entity-id.decorator';
+
 const lifecycleStatuses = [
   AccountStatus.ACTIVE,
   AccountStatus.SUSPENDED,
@@ -9,6 +11,14 @@ const lifecycleStatuses = [
 ] as const;
 
 export class UpdateUserStatusDto {
+  @ApiPropertyOptional({
+    description: 'Target business UUID for multi-business Admin',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsEntityId()
+  businessId?: string;
+
   @ApiProperty({
     enum: lifecycleStatuses,
     enumName: 'AccountLifecycleStatus',

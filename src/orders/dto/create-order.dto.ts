@@ -59,6 +59,23 @@ export class OrderLineDto {
 
 export class CreateOrderDto {
   @ApiPropertyOptional({
+    description: 'Tenant business ID (required for Admin checkout)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsString()
+  businessId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Branch location ID where the order is placed (required for Admin checkout)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsString()
+  locationId?: string;
+
+  @ApiPropertyOptional({
     description: 'Customer contact phone number',
     example: '01711111111',
   })

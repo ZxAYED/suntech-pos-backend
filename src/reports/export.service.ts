@@ -1,4 +1,9 @@
-import { Injectable, StreamableFile } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  StreamableFile,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { requireBusinessId } from '../hr/require-business-id';
@@ -41,6 +46,21 @@ export class ExportService {
     query: ExportReportQueryDto,
   ): Promise<StreamableFile> {
     const businessId = requireBusinessId(admin, query.businessId);
+
+    if (query.locationId && this.prisma.location?.findFirst) {
+      const loc = await this.prisma.location.findFirst({
+        where: { id: query.locationId, deletedAt: null },
+        select: { id: true, businessId: true },
+      });
+      if (!loc) {
+        throw new NotFoundException('Branch location not found');
+      }
+      if (loc.businessId && loc.businessId !== businessId) {
+        throw new BadRequestException(
+          'Location does not belong to the specified business',
+        );
+      }
+    }
     const business = await this.prisma.business.findFirst({
       where: { id: businessId, deletedAt: null },
       select: { name: true },

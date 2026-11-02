@@ -14,6 +14,7 @@ import {
   StockTransactionType,
 } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
+import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateRefundDto } from './dto/create-refund.dto';
 import { lineTotal, sumMoney } from './money';
@@ -53,24 +54,7 @@ export class RefundService {
     orderId: string,
     dto: CreateRefundDto,
   ): Promise<PresentedRefund> {
-    let businessId = actor.businessId;
-    if (!businessId) {
-      const user = await this.prisma.user.findFirst({
-        where: { id: actor.sub, deletedAt: null },
-        select: {
-          businessId: true,
-          ownedBusinesses: {
-            where: { deletedAt: null },
-            select: { id: true },
-            take: 1,
-          },
-        },
-      });
-      businessId = user?.businessId || user?.ownedBusinesses?.[0]?.id;
-    }
-    if (!businessId) {
-      throw new ForbiddenException('Business context is required');
-    }
+    const businessId = requireBusinessId(actor, dto.businessId);
     if (actor.role === Role.CASHIER && !actor.locationId) {
       throw new ForbiddenException(
         'Cashier account must be assigned to an active business and branch location',
@@ -87,6 +71,7 @@ export class RefundService {
             orderId,
             dto,
             actor.role === Role.CASHIER ? actor.locationId : undefined,
+            actor.role,
           ),
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
@@ -109,7 +94,49 @@ export class RefundService {
     orderId: string,
     dto: CreateRefundDto,
     cashierLocationId?: string | null,
+    actorRole?: Role,
   ): Promise<PresentedRefund> {
+    const existingOrder = tx.order?.findUnique
+      ? await tx.order.findUnique({
+          where: { id: orderId },
+          select: {
+            id: true,
+            locationId: true,
+            location: { select: { businessId: true } },
+          },
+        })
+      : await tx.order.findFirst({
+          where: { id: orderId },
+          select: {
+            id: true,
+            locationId: true,
+            location: { select: { businessId: true } },
+          },
+        });
+
+    if (!existingOrder) {
+      throw new NotFoundException('Order not found');
+    }
+
+    if (
+      existingOrder.location?.businessId &&
+      existingOrder.location.businessId !== businessId
+    ) {
+      throw new BadRequestException(
+        'Order does not belong to the specified business',
+      );
+    }
+
+    if (
+      cashierLocationId &&
+      existingOrder.locationId &&
+      existingOrder.locationId !== cashierLocationId
+    ) {
+      throw new ForbiddenException(
+        'Order does not belong to your assigned branch location',
+      );
+    }
+
     const order = await tx.order.findFirst({
       where: {
         id: orderId,
@@ -240,17 +267,31 @@ export class RefundService {
     }
 
     let payoutShiftId: string | null = null;
-    if (order.shiftId && tx.shiftSession?.findFirst) {
-      const orderShift = await tx.shiftSession.findFirst({
-        where: { id: order.shiftId },
-        select: { id: true, status: true },
-      });
-      if (orderShift?.status === ShiftStatus.OPEN) {
-        payoutShiftId = orderShift.id;
+    if (dto.payoutShiftId) {
+      if (tx.shiftSession?.findFirst) {
+        const isCashier = Boolean(cashierLocationId) || actorRole === Role.CASHIER;
+        const specifiedShift = await tx.shiftSession.findFirst({
+          where: {
+            id: dto.payoutShiftId,
+            businessId,
+            ...(order.locationId ? { locationId: order.locationId } : {}),
+            status: ShiftStatus.OPEN,
+          },
+          select: { id: true, cashierId: true },
+        });
+        if (!specifiedShift) {
+          throw new BadRequestException(
+            'Specified payout shift is not open or not in the same business and branch',
+          );
+        }
+        if (isCashier && specifiedShift.cashierId !== actorId) {
+          throw new ForbiddenException(
+            'Cashiers can only payout refunds from their own shift',
+          );
+        }
+        payoutShiftId = specifiedShift.id;
       }
-    }
-
-    if (!payoutShiftId && order.locationId && tx.shiftSession?.findFirst) {
+    } else if (order.locationId && tx.shiftSession?.findFirst) {
       const activeShift = await tx.shiftSession.findFirst({
         where: {
           locationId: order.locationId,
@@ -306,10 +347,15 @@ export class RefundService {
 
     if (payoutShiftId && order.paymentMethod === PaymentMethod.COD) {
       if (tx.shiftSession?.updateMany) {
-        await tx.shiftSession.updateMany({
+        const updateResult = await tx.shiftSession.updateMany({
           where: { id: payoutShiftId, status: ShiftStatus.OPEN },
           data: { cashCollected: { decrement: refund.totalRefund } },
         });
+        if (updateResult && updateResult.count === 0) {
+          throw new ConflictException(
+            'Register shift closed during refund processing. Please retry with an open shift.',
+          );
+        }
       }
     }
 

@@ -85,7 +85,7 @@ export class CreateCustomOrderDto {
   })
   @ValidateIf((dto: CreateCustomOrderDto) => !dto.paymentType)
   @IsEnum(PaymentMethod)
-  paymentMethod: PaymentMethod;
+  paymentMethod?: PaymentMethod;
 
   @ApiPropertyOptional({
     enum: PaymentMethod,

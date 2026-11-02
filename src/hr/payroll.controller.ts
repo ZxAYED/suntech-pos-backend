@@ -40,7 +40,7 @@ export class PayrollController {
   @ApiOperation({
     summary: '[ADMIN] Get monthly payroll disbursement summary',
     description:
-      'Pre-flight calculation of total base salary, deducted advances, and net payable for eligible active cashiers. Requires ADMIN role.',
+      'Pre-flight calculation of total base salary and net payable for eligible active cashiers. Per owner policy, advances are tracked separately in the advance ledger. Requires ADMIN role.',
   })
   @ApiQuery({
     name: 'month',
@@ -83,7 +83,7 @@ export class PayrollController {
   @ApiOperation({
     summary: '[ADMIN] Batch disburse monthly payroll',
     description:
-      'Processes payroll for all active cashiers (or filtered by locationId). Deducts pending advances and generates paid payroll ledger entries. Requires ADMIN role.',
+      'Processes payroll for all active cashiers (or filtered by locationId). Generates paid payroll ledger entries and linked PAYROLL_NET expenses. Per owner policy, advances are tracked separately in the advance ledger. Requires ADMIN role.',
   })
   @ApiResponse({ status: 200, description: 'Payroll disbursed' })
   @ApiResponse({
@@ -106,7 +106,7 @@ export class PayrollController {
   @ApiOperation({
     summary: '[ADMIN] Process single cashier payroll',
     description:
-      'Processes and settles payroll and advances for an individual cashier for the specified month. Requires ADMIN role.',
+      'Processes payroll for an individual cashier for the specified month, generating a paid payroll ledger entry and linked PAYROLL_NET expense. Per owner policy, advances are tracked separately in the advance ledger. Requires ADMIN role.',
   })
   @ApiResponse({ status: 201, description: 'Payroll processed' })
   @ApiResponse({
@@ -116,7 +116,7 @@ export class PayrollController {
   @ApiResponse({ status: 403, description: 'Forbidden - requires ADMIN role' })
   @ApiResponse({
     status: 400,
-    description: 'Advances exceed salary or already processed',
+    description: 'Payroll already processed or validation error',
   })
   @ApiResponse({ status: 404, description: 'Cashier not found' })
   @Idempotent()

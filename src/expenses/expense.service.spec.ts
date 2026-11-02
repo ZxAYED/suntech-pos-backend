@@ -265,14 +265,28 @@ describe('ExpenseService', () => {
       );
     });
 
-    it('filters summary independently by type', async () => {
+    it('rejects summary with BadRequestException when type is SALARY_ADVANCE per owner MVP policy', async () => {
+      await expect(
+        service.summary(
+          { sub: 'admin-1', role: Role.ADMIN, businessIds: ['biz-1'] },
+          {
+            month: 10,
+            year: 2026,
+            businessId: 'biz-1',
+            type: ExpenseSourceType.SALARY_ADVANCE,
+          },
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('filters summary independently by type for PAYROLL_NET', async () => {
       expenseFindMany.mockResolvedValue([
         {
-          id: 'exp-2',
-          amount: 3000,
+          id: 'exp-3',
+          amount: 12000,
           category: ExpenseCategory.SALARIES,
-          sourceType: ExpenseSourceType.SALARY_ADVANCE,
-          spentAt: new Date('2026-10-12T00:00:00Z'),
+          sourceType: ExpenseSourceType.PAYROLL_NET,
+          spentAt: new Date('2026-10-31T00:00:00Z'),
         },
       ]);
 
@@ -282,7 +296,7 @@ describe('ExpenseService', () => {
           month: 10,
           year: 2026,
           businessId: 'biz-1',
-          type: ExpenseSourceType.SALARY_ADVANCE,
+          type: ExpenseSourceType.PAYROLL_NET,
         },
       );
 
@@ -290,15 +304,15 @@ describe('ExpenseService', () => {
         expect.objectContaining({
           where: expect.objectContaining({
             businessId: 'biz-1',
-            sourceType: ExpenseSourceType.SALARY_ADVANCE,
+            sourceType: ExpenseSourceType.PAYROLL_NET,
             deletedAt: null,
           }),
         }),
       );
-      expect(res.summary.totalExpenses).toBe(3000);
+      expect(res.summary.totalExpenses).toBe(12000);
       expect(res.summary.expenseCount).toBe(1);
       expect(res.summary.byType).toEqual([
-        { type: ExpenseSourceType.SALARY_ADVANCE, total: 3000, count: 1 },
+        { type: ExpenseSourceType.PAYROLL_NET, total: 12000, count: 1 },
       ]);
     });
 
@@ -432,14 +446,26 @@ describe('ExpenseService', () => {
       expect(res.totalAmount).toBe(15000);
     });
 
-    it('supports independent type filter and category filter', async () => {
+    it('rejects list with BadRequestException when type is SALARY_ADVANCE per owner MVP policy', async () => {
+      await expect(
+        service.list(
+          { sub: 'admin-1', role: Role.ADMIN, businessIds: ['biz-1'] },
+          {
+            businessId: 'biz-1',
+            type: ExpenseSourceType.SALARY_ADVANCE,
+          },
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('filters list by PAYROLL_NET type and category', async () => {
       expenseFindMany.mockResolvedValue([
         {
-          id: 'exp-adv-1',
-          title: 'Salary Advance - Alex Rivera',
-          amount: 2000,
+          id: 'exp-pr-1',
+          title: 'Payroll - Alex Rivera',
+          amount: 14000,
           category: ExpenseCategory.SALARIES,
-          sourceType: ExpenseSourceType.SALARY_ADVANCE,
+          sourceType: ExpenseSourceType.PAYROLL_NET,
         },
       ]);
 
@@ -447,7 +473,7 @@ describe('ExpenseService', () => {
         { sub: 'admin-1', role: Role.ADMIN, businessIds: ['biz-1'] },
         {
           businessId: 'biz-1',
-          type: ExpenseSourceType.SALARY_ADVANCE,
+          type: ExpenseSourceType.PAYROLL_NET,
           category: ExpenseCategory.SALARIES,
         },
       );
@@ -456,31 +482,24 @@ describe('ExpenseService', () => {
         expect.objectContaining({
           where: expect.objectContaining({
             businessId: 'biz-1',
-            sourceType: ExpenseSourceType.SALARY_ADVANCE,
+            sourceType: ExpenseSourceType.PAYROLL_NET,
             category: ExpenseCategory.SALARIES,
             deletedAt: null,
           }),
         }),
       );
       expect(res.items).toHaveLength(1);
-      expect(res.items[0].type).toBe(ExpenseSourceType.SALARY_ADVANCE);
+      expect(res.items[0].type).toBe(ExpenseSourceType.PAYROLL_NET);
     });
 
-    it('omits sourceType in where when no type filter is supplied so all types appear together', async () => {
+    it('restricts list to MANUAL and PAYROLL_NET when no type filter is supplied, excluding legacy SALARY_ADVANCE', async () => {
       expenseFindMany.mockResolvedValue([
         {
           id: 'exp-1',
           title: 'Desk',
           amount: 500,
-          category: ExpenseCategory.OFFICE,
+          category: ExpenseCategory.OTHER,
           sourceType: ExpenseSourceType.MANUAL,
-        },
-        {
-          id: 'exp-2',
-          title: 'Salary Advance - Alex',
-          amount: 1000,
-          category: ExpenseCategory.SALARIES,
-          sourceType: ExpenseSourceType.SALARY_ADVANCE,
         },
         {
           id: 'exp-3',
@@ -498,13 +517,113 @@ describe('ExpenseService', () => {
 
       expect(expenseFindMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.not.objectContaining({
-            sourceType: expect.anything(),
+          where: expect.objectContaining({
+            sourceType: {
+              in: [ExpenseSourceType.MANUAL, ExpenseSourceType.PAYROLL_NET],
+            },
           }),
         }),
       );
-      expect(res.items).toHaveLength(3);
-      expect(res.totalAmount).toBe(15500);
+      expect(res.items).toHaveLength(2);
+      expect(res.totalAmount).toBe(14500);
+    });
+  });
+
+  describe('update', () => {
+    it('updates a MANUAL expense successfully', async () => {
+      expenseFindFirst.mockResolvedValue({
+        id: 'exp-1',
+        businessId: 'biz-1',
+        sourceType: ExpenseSourceType.MANUAL,
+        advanceId: null,
+        payrollId: null,
+        deletedAt: null,
+      });
+
+      const mockUpdated = {
+        id: 'exp-1',
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+        userId: 'admin-1',
+        beneficiaryCashierId: null,
+        amount: 6000,
+        title: 'Updated Rent',
+        category: ExpenseCategory.RENT,
+        sourceType: ExpenseSourceType.MANUAL,
+        note: 'Updated note',
+        spentAt: new Date('2026-10-16T10:00:00Z'),
+        paidAt: null,
+        advanceId: null,
+        payrollId: null,
+        deletedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        location: { id: 'loc-1', name: 'Branch 1' },
+        beneficiaryCashier: null,
+        user: { id: 'admin-1', fullName: 'Admin', email: 'admin@suntech.com', role: Role.ADMIN },
+      };
+
+      locationFindFirst.mockResolvedValue({ id: 'loc-1' });
+      expenseUpdate.mockResolvedValue(mockUpdated);
+
+      const res = await service.update(
+        { sub: 'admin-1', role: Role.ADMIN, businessIds: ['biz-1'] },
+        'exp-1',
+        {
+          businessId: 'biz-1',
+          amount: 6000,
+          title: 'Updated Rent',
+          locationId: 'loc-1',
+          category: ExpenseCategory.RENT,
+          note: 'Updated note',
+        },
+      );
+
+      expect(expenseUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'exp-1' },
+          data: expect.objectContaining({
+            amount: 6000,
+            title: 'Updated Rent',
+            category: ExpenseCategory.RENT,
+            note: 'Updated note',
+            location: { connect: { id: 'loc-1' } },
+          }),
+        }),
+      );
+      expect(res.amount).toBe(6000);
+      expect(res.title).toBe('Updated Rent');
+    });
+
+    it('throws BadRequestException when attempting to update a PAYROLL_NET expense', async () => {
+      expenseFindFirst.mockResolvedValue({
+        id: 'exp-pr',
+        businessId: 'biz-1',
+        sourceType: ExpenseSourceType.PAYROLL_NET,
+        payrollId: 'pr-1',
+        deletedAt: null,
+      });
+
+      await expect(
+        service.update(
+          { sub: 'admin-1', role: Role.ADMIN, businessIds: ['biz-1'] },
+          'exp-pr',
+          { businessId: 'biz-1', amount: 9999 },
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(expenseUpdate).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when updating non-existent expense', async () => {
+      expenseFindFirst.mockResolvedValue(null);
+
+      await expect(
+        service.update(
+          { sub: 'admin-1', role: Role.ADMIN, businessIds: ['biz-1'] },
+          'exp-404',
+          { businessId: 'biz-1', amount: 500 },
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

@@ -72,7 +72,7 @@ export class CreateCatalogOrderDto {
   })
   @ValidateIf((dto: CreateCatalogOrderDto) => !dto.paymentType)
   @IsEnum(PaymentMethod)
-  paymentMethod: PaymentMethod;
+  paymentMethod?: PaymentMethod;
 
   @ApiPropertyOptional({
     enum: PaymentMethod,

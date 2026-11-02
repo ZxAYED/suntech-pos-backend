@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -298,6 +299,21 @@ export class ProductService {
         ? actor.locationId
         : requestedLocationId?.trim() || undefined;
 
+    if (effectiveLocationId && this.prisma.location?.findFirst) {
+      const loc = await this.prisma.location.findFirst({
+        where: { id: effectiveLocationId, deletedAt: null },
+        select: { id: true, businessId: true },
+      });
+      if (!loc) {
+        throw new NotFoundException('Branch location not found');
+      }
+      if (loc.businessId && loc.businessId !== businessId) {
+        throw new BadRequestException(
+          'Location does not belong to the specified business',
+        );
+      }
+    }
+
     const [productsCount, variants] = await Promise.all([
       this.prisma.product.count({
         where: {
@@ -339,12 +355,10 @@ export class ProductService {
     for (const v of variants) {
       let stock = v.stock;
       if (effectiveLocationId) {
-        if (v.locationStocks && v.locationStocks.length > 0) {
-          const match = v.locationStocks.find(
-            (ls) => ls.locationId === effectiveLocationId,
-          );
-          stock = match ? match.stock : 0;
-        }
+        const match = (v.locationStocks ?? []).find(
+          (ls) => ls.locationId === effectiveLocationId,
+        );
+        stock = match ? match.stock : 0;
       }
 
       totalUnits += stock;

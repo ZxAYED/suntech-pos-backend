@@ -20,4 +20,12 @@ export class CloseShiftDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @ApiPropertyOptional({
+    description: 'Tenant business UUID (Admin closure of specific shift)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsOptional()
+  @IsString()
+  businessId?: string;
 }

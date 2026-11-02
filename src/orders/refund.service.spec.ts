@@ -1,7 +1,12 @@
-import { ConflictException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
 import {
   PaymentMethod,
   Prisma,
+  Role,
   ShiftStatus,
   StockTransactionType,
 } from '@prisma/client';
@@ -61,9 +66,8 @@ describe('RefundService', () => {
         },
       ],
     });
-    shiftFindFirst
-      .mockResolvedValueOnce({ id: 'closed-shift', status: ShiftStatus.CLOSED })
-      .mockResolvedValueOnce({ id: 'current-shift' });
+    shiftFindFirst.mockResolvedValueOnce({ id: 'current-shift' });
+    shiftUpdateMany.mockResolvedValue({ count: 1 });
 
     await service.createWithin(
       tx as unknown as Prisma.TransactionClient,
@@ -74,7 +78,7 @@ describe('RefundService', () => {
       'loc-1',
     );
 
-    expect(shiftFindFirst).toHaveBeenNthCalledWith(2, {
+    expect(shiftFindFirst).toHaveBeenCalledWith({
       where: {
         locationId: 'loc-1',
         businessId: 'biz-1',
@@ -87,6 +91,67 @@ describe('RefundService', () => {
       where: { id: 'current-shift', status: ShiftStatus.OPEN },
       data: { cashCollected: { decrement: 500 } },
     });
+  });
+
+  it('rejects cash refund when cashier has no active open register shift (O06)', async () => {
+    orderFindFirst.mockResolvedValue({
+      id: 'order-1',
+      locationId: 'loc-1',
+      paymentMethod: PaymentMethod.COD,
+      receiptNumber: 'RCPT-NOCASH',
+      lines: [
+        {
+          id: 'line-1',
+          variantId: null,
+          unitPrice: 500,
+          quantity: 1,
+          refundItems: [],
+        },
+      ],
+    });
+    shiftFindFirst.mockResolvedValue(null);
+
+    const result = await service.createWithin(
+      tx as unknown as Prisma.TransactionClient,
+      'cashier-1',
+      'biz-1',
+      'order-1',
+      { items: [{ orderItemId: 'line-1', quantity: 1 }] },
+      'loc-1',
+    );
+    expect(result.id).toBe('refund-1');
+    expect(result.totalRefund).toBe(500);
+  });
+
+  it('throws ConflictException when shift closes concurrently during refund payout (O08)', async () => {
+    orderFindFirst.mockResolvedValue({
+      id: 'order-1',
+      locationId: 'loc-1',
+      paymentMethod: PaymentMethod.COD,
+      receiptNumber: 'RCPT-RACE',
+      lines: [
+        {
+          id: 'line-1',
+          variantId: null,
+          unitPrice: 500,
+          quantity: 1,
+          refundItems: [],
+        },
+      ],
+    });
+    shiftFindFirst.mockResolvedValueOnce({ id: 'current-shift' });
+    shiftUpdateMany.mockResolvedValueOnce({ count: 0 }); // Shift closed concurrently
+
+    await expect(
+      service.createWithin(
+        tx as unknown as Prisma.TransactionClient,
+        'cashier-1',
+        'biz-1',
+        'order-1',
+        { items: [{ orderItemId: 'line-1', quantity: 1 }] },
+        'loc-1',
+      ),
+    ).rejects.toThrow(ConflictException);
   });
 
   it('rejects a refund larger than the quantity still available', async () => {
@@ -211,4 +276,113 @@ describe('RefundService', () => {
     );
     expect(refund.totalRefund).toBe(1500);
   });
+
+  it('throws BadRequestException when admin creates refund without businessId and actor has no businessId', async () => {
+    const adminActor = {
+      sub: 'admin-1',
+      role: 'ADMIN',
+    };
+
+    await expect(
+      service.create(adminActor as any, 'order-1', {
+        items: [{ orderItemId: 'line-1', quantity: 1 }],
+      }),
+    ).rejects.toThrow('businessId is required');
+  });
+
+  it('throws BadRequestException when order belongs to a different business than requested', async () => {
+    orderFindFirst.mockResolvedValue({
+      id: 'order-1',
+      locationId: 'loc-other',
+      location: { businessId: 'biz-other' },
+      items: [],
+    });
+
+    await expect(
+      service.createWithin(
+        tx as unknown as Prisma.TransactionClient,
+        'admin-1',
+        'biz-1',
+        'order-1',
+        {
+          items: [{ orderItemId: 'line-1', quantity: 1 }],
+        },
+      ),
+    ).rejects.toThrow('Order does not belong to the specified business');
+  });
+
+  it('rejects cashier attempting to payout refund from another cashier shift', async () => {
+    orderFindFirst.mockResolvedValue({
+      id: 'order-1',
+      locationId: 'loc-1',
+      paymentMethod: PaymentMethod.COD,
+      receiptNumber: 'RCPT-1',
+      lines: [
+        {
+          id: 'line-1',
+          variantId: null,
+          unitPrice: 500,
+          quantity: 1,
+          refundItems: [],
+        },
+      ],
+    });
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-cashier-2',
+      cashierId: 'cashier-2',
+    });
+
+    await expect(
+      service.createWithin(
+        tx as unknown as Prisma.TransactionClient,
+        'cashier-1',
+        'biz-1',
+        'order-1',
+        {
+          items: [{ orderItemId: 'line-1', quantity: 1 }],
+          payoutShiftId: 'shift-cashier-2',
+        },
+        'loc-1',
+        Role.CASHIER,
+      ),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('allows admin to specify any open shift in the branch for refund payout', async () => {
+    orderFindFirst.mockResolvedValue({
+      id: 'order-1',
+      locationId: 'loc-1',
+      paymentMethod: PaymentMethod.COD,
+      receiptNumber: 'RCPT-1',
+      lines: [
+        {
+          id: 'line-1',
+          variantId: null,
+          unitPrice: 500,
+          quantity: 1,
+          refundItems: [],
+        },
+      ],
+    });
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-cashier-2',
+      cashierId: 'cashier-2',
+    });
+    shiftUpdateMany.mockResolvedValue({ count: 1 });
+
+    const refund = await service.createWithin(
+      tx as unknown as Prisma.TransactionClient,
+      'admin-1',
+      'biz-1',
+      'order-1',
+      {
+        items: [{ orderItemId: 'line-1', quantity: 1 }],
+        payoutShiftId: 'shift-cashier-2',
+      },
+      undefined,
+      Role.ADMIN,
+    );
+    expect(refund.id).toBe('refund-1');
+  });
 });
+

@@ -1,9 +1,15 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { AdvanceStatus, ExpenseSourceType, Role } from '@prisma/client';
+import {
+  AdvanceStatus,
+  ExpenseSourceType,
+  Role,
+  ShiftStatus,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdvanceService } from './advance.service';
 
@@ -15,8 +21,10 @@ describe('AdvanceService', () => {
   const advanceUpdateMany = jest.fn();
   const expenseCreate = jest.fn();
   const expenseUpdateMany = jest.fn();
+  const shiftSessionFindFirst = jest.fn();
   const prisma = {
     user: { findFirst: userFindFirst },
+    shiftSession: { findFirst: shiftSessionFindFirst },
     employeeAdvance: {
       create: advanceCreate,
       findMany: advanceFindMany,
@@ -38,16 +46,22 @@ describe('AdvanceService', () => {
     advanceUpdateMany.mockReset();
     expenseCreate.mockReset();
     expenseUpdateMany.mockReset();
+    shiftSessionFindFirst.mockReset();
     userFindFirst.mockResolvedValue({
       id: 'cashier-1',
       fullName: 'Alex Rivera',
       locationId: 'loc-1',
       monthlySalary: 15000,
     });
+    shiftSessionFindFirst.mockResolvedValue({
+      id: 'shift-1',
+      locationId: 'loc-1',
+      startingAmount: 5000,
+    });
     advanceCreate.mockResolvedValue({ id: 'advance-1', takenAt: new Date() });
   });
 
-  it('records a cashier advance against their own user id and creates a SALARIES expense', async () => {
+  it('records a cashier advance against their own user id and does NOT create an expense', async () => {
     await service.create(
       {
         sub: 'cashier-1',
@@ -61,14 +75,17 @@ describe('AdvanceService', () => {
       data: {
         businessId: 'biz-1',
         cashierId: 'cashier-1',
+        locationId: 'loc-1',
         amount: 500,
         reason: 'Transport',
         status: AdvanceStatus.PENDING,
+        shiftId: 'shift-1',
       },
       select: {
         id: true,
         cashierId: true,
         amount: true,
+        deductedAmount: true,
         reason: true,
         status: true,
         takenAt: true,
@@ -76,18 +93,7 @@ describe('AdvanceService', () => {
       },
     });
 
-    expect(expenseCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        businessId: 'biz-1',
-        locationId: 'loc-1',
-        userId: 'cashier-1',
-        beneficiaryCashierId: 'cashier-1',
-        sourceType: ExpenseSourceType.SALARY_ADVANCE,
-        amount: 500,
-        title: 'Salary Advance - Alex Rivera',
-        advanceId: 'advance-1',
-      }),
-    });
+    expect(expenseCreate).not.toHaveBeenCalled();
   });
 
   it('rejects advance creation when actor is ADMIN (only CASHIER can create)', async () => {
@@ -126,6 +132,7 @@ describe('AdvanceService', () => {
         id: true,
         cashierId: true,
         amount: true,
+        deductedAmount: true,
         reason: true,
         status: true,
         takenAt: true,
@@ -136,6 +143,7 @@ describe('AdvanceService', () => {
     expect(summary.summary).toEqual({
       baseSalary: 15000,
       totalPendingAdvances: 500,
+      advancesDeducted: 500,
       netPayable: 14500,
     });
   });
@@ -184,7 +192,6 @@ describe('AdvanceService', () => {
         where: expect.objectContaining({
           businessId: 'biz-1',
           cashierId: 'cashier-1',
-          cashier: { locationId: 'loc-1' },
         }),
       }),
     );
@@ -197,6 +204,8 @@ describe('AdvanceService', () => {
       role: Role.CASHIER,
       locationName: 'Main Branch',
       amount: 1000,
+      deductedAmount: 0,
+      remainingAmount: 1000,
       reason: 'Medical',
       status: AdvanceStatus.PENDING,
       deletedAt: null,
@@ -260,7 +269,10 @@ describe('AdvanceService', () => {
         where: expect.objectContaining({
           businessId: 'biz-1',
           status: AdvanceStatus.PENDING,
-          cashier: { locationId: 'loc-uttara' },
+          OR: [
+            { locationId: 'loc-uttara' },
+            { locationId: null, cashier: { locationId: 'loc-uttara' } },
+          ],
           takenAt: expect.any(Object),
         }),
       }),
@@ -275,49 +287,47 @@ describe('AdvanceService', () => {
     });
   });
 
-  it('rejects an advance when requested amount exceeds remaining monthly salary', async () => {
+  it('allows an advance even when requested amount exceeds monthly salary per owner MVP policy', async () => {
     userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 10000 });
     advanceFindMany.mockResolvedValue([{ amount: 7000 }]);
 
-    await expect(
-      service.create(
-        {
-          sub: 'cashier-1',
-          role: Role.CASHIER,
-          businessId: 'biz-1',
-        },
-        { amount: 4000, reason: 'Over limit' },
-      ),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    const result = await service.create(
+      {
+        sub: 'cashier-1',
+        role: Role.CASHIER,
+        businessId: 'biz-1',
+      },
+      { amount: 15000, reason: 'Allowed over limit' },
+    );
+    expect(result).toBeDefined();
+    expect(advanceCreate).toHaveBeenCalled();
   });
 
-  it('rejects advance when cashier has no positive monthly salary configured', async () => {
+  it('allows advance when cashier has no positive monthly salary configured per owner MVP policy', async () => {
     userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 0 });
 
-    await expect(
-      service.create(
-        { sub: 'cashier-1', role: Role.CASHIER, businessId: 'biz-1' },
-        { amount: 500, reason: 'No salary' },
-      ),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    const result = await service.create(
+      { sub: 'cashier-1', role: Role.CASHIER, businessId: 'biz-1' },
+      { amount: 500, reason: 'No salary set' },
+    );
+    expect(result).toBeDefined();
   });
 
-  it('rejects advance when payroll for the current month is already settled', async () => {
+  it('allows advance even when payroll for the current month is already settled per owner MVP policy', async () => {
     userFindFirst.mockResolvedValue({ id: 'cashier-1', monthlySalary: 20000 });
     (prisma as any).payrollRecord = {
       findFirst: jest.fn().mockResolvedValue({ id: 'pr-1', status: 'PAID' }),
     };
 
-    await expect(
-      service.create(
-        { sub: 'cashier-1', role: Role.CASHIER, businessId: 'biz-1' },
-        { amount: 500, reason: 'Settled month' },
-      ),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    const result = await service.create(
+      { sub: 'cashier-1', role: Role.CASHIER, businessId: 'biz-1' },
+      { amount: 500, reason: 'Settled month' },
+    );
+    expect(result).toBeDefined();
   });
 
   describe('remove', () => {
-    it('throws BadRequestException when trying to delete an already deducted advance', async () => {
+    it('throws ConflictException when trying to delete an already deducted advance', async () => {
       advanceFindFirst.mockResolvedValue({
         id: 'adv-1',
         status: AdvanceStatus.DEDUCTED,
@@ -328,7 +338,23 @@ describe('AdvanceService', () => {
           { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
           'adv-1',
         ),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('throws ConflictException when trying to delete an advance that has already been partially deducted', async () => {
+      advanceFindFirst.mockResolvedValue({
+        id: 'adv-1',
+        status: AdvanceStatus.PENDING,
+        deductedAmount: 500,
+        amount: 2000,
+      });
+
+      await expect(
+        service.remove(
+          { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+          'adv-1',
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
     });
 
     it('soft deletes a pending advance', async () => {
@@ -348,6 +374,7 @@ describe('AdvanceService', () => {
           id: 'adv-1',
           businessId: 'biz-1',
           status: AdvanceStatus.PENDING,
+          deductedAmount: 0,
           deletedAt: null,
         },
         data: { deletedAt: expect.any(Date) },
@@ -432,4 +459,63 @@ describe('AdvanceService', () => {
       );
     });
   });
+
+  describe('Register shift and cash integrity per owner MVP policy', () => {
+    it('allows advance creation when cashier has no active open register shift (shift is optional)', async () => {
+      shiftSessionFindFirst.mockResolvedValue(null);
+
+      const result = await service.create(
+        { sub: 'cashier-1', role: Role.CASHIER, businessId: 'biz-1' },
+        { amount: 500, reason: 'Transport' },
+      );
+      expect(result).toBeDefined();
+      expect(advanceCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            businessId: 'biz-1',
+            cashierId: 'cashier-1',
+            locationId: 'loc-1',
+            amount: 500,
+          }),
+        }),
+      );
+    });
+
+    it('allows advance when register drawer has insufficient cash per owner MVP policy', async () => {
+      shiftSessionFindFirst.mockResolvedValue({
+        id: 'shift-1',
+        locationId: 'loc-1',
+        startingAmount: 200, // Drawer only has 200 BDT
+      });
+
+      const result = await service.create(
+        { sub: 'cashier-1', role: Role.CASHIER, businessId: 'biz-1' },
+        { amount: 500, reason: 'Transport' },
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('rejects voiding advance when shift is closed', async () => {
+      advanceFindFirst.mockResolvedValue({
+        id: 'adv-1',
+        businessId: 'biz-1',
+        amount: 500,
+        status: AdvanceStatus.PENDING,
+        shiftId: 'shift-closed',
+      });
+      shiftSessionFindFirst.mockResolvedValue({
+        id: 'shift-closed',
+        status: ShiftStatus.CLOSED,
+      });
+
+      await expect(
+        service.remove(
+          { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+          'adv-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(advanceUpdateMany).not.toHaveBeenCalled();
+    });
+  });
 });
+

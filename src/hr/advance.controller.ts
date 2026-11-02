@@ -42,7 +42,7 @@ export class AdvanceController {
   @ApiOperation({
     summary: '[CASHIER] Record employee salary advance',
     description:
-      'Cashiers can input fee/advance amount with a note (reason) to immediately record a salary advance. No admin approval is required; it is auto-added to the ledger history (status PENDING until monthly payroll settlement). Only cashiers can create advances. Admin can view history, summary, and delete. Enforces atomic salary cap check: total pending advances for current payroll month cannot exceed employee monthlySalary.',
+      'Cashiers can input fee/advance amount with an optional reason to immediately record a salary advance withdrawal. No admin approval or open shift is required; it is auto-added to the Advance Ledger history. Only cashiers can create advances. Admin can view history and summary.',
   })
   @ApiResponse({ status: 201, description: 'Advance recorded' })
   @ApiResponse({
@@ -56,7 +56,7 @@ export class AdvanceController {
   @ApiResponse({
     status: 400,
     description:
-      'Advance amount exceeds remaining monthly salary limit or cashier has no salary configured',
+      'Invalid advance withdrawal amount or cashier not assigned to business/branch',
   })
   @Roles(Role.CASHIER)
   @Idempotent()

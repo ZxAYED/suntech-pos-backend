@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 
@@ -17,10 +17,7 @@ export function requireBusinessId(
 
   const businessId = requestedBusinessId?.trim() || actor.businessId;
   if (!businessId) {
-    if (actor.businessIds && actor.businessIds.length === 1) {
-      return actor.businessIds[0];
-    }
-    throw new ForbiddenException('Business context is required');
+    throw new BadRequestException('businessId is required');
   }
 
   if (actor.role === Role.ADMIN) {

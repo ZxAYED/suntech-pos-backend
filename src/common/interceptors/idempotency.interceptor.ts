@@ -102,7 +102,8 @@ export class IdempotencyInterceptor implements NestInterceptor {
 
   private resolveScopeId(request: RequestWithUser): string {
     if (request.user?.sub) {
-      return request.user.sub;
+      const biz = request.user.businessId ? `:${request.user.businessId}` : '';
+      return `${request.user.sub}${biz}`;
     }
 
     const forwarded = request.header('x-forwarded-for');
@@ -192,10 +193,13 @@ export class IdempotencyInterceptor implements NestInterceptor {
     }
 
     if (existing.expiresAt.getTime() <= Date.now()) {
-      await this.prisma.idempotencyRecord.deleteMany({
-        where: { id: existing.id },
-      });
-      return null;
+      if (existing.statusCode === PENDING_STATUS) {
+        await this.prisma.idempotencyRecord.deleteMany({
+          where: { id: existing.id, statusCode: PENDING_STATUS },
+        });
+        return null;
+      }
+      // Completed financial/stock operation records are permanently retained for replay protection (O07)
     }
 
     if (existing.path !== path) {

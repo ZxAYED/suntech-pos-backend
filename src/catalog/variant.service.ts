@@ -435,6 +435,21 @@ export class VariantService {
           targetLocationId &&
           tx.locationStock?.upsert
         ) {
+          const locStockRow = tx.locationStock?.findUnique
+            ? await tx.locationStock.findUnique({
+                where: {
+                  locationId_variantId: {
+                    locationId: targetLocationId,
+                    variantId: current.id,
+                  },
+                },
+              })
+            : null;
+          const branchBaseline = locStockRow?.stock ?? 0;
+          // MVP POLICY: negative branch stock is intentionally allowed for online sales/adjustments; do not add availability rejection until owner enables strict stock mode.
+          const newBranchStock = dto.stock;
+          const branchDelta = Math.abs(newBranchStock - branchBaseline);
+
           await tx.locationStock.upsert({
             where: {
               locationId_variantId: {
@@ -446,10 +461,10 @@ export class VariantService {
               businessId,
               locationId: targetLocationId,
               variantId: current.id,
-              stock: dto.stock,
+              stock: newBranchStock,
             },
             update: {
-              stock: dto.stock,
+              stock: newBranchStock,
             },
           });
 
@@ -458,20 +473,20 @@ export class VariantService {
               where: { variantId: current.id },
               _sum: { stock: true },
             });
-            const totalStock = agg._sum.stock ?? dto.stock;
+            const totalStock = agg._sum.stock ?? newBranchStock;
             await tx.variant.update({
               where: { id: current.id },
               data: { stock: totalStock },
             });
           }
 
-          if (tx.stockTransaction?.create) {
+          if (tx.stockTransaction?.create && branchDelta > 0) {
             await tx.stockTransaction.create({
               data: {
                 variantId: current.id,
                 locationId: targetLocationId,
                 type: StockTransactionType.MANUAL_ADJUSTMENT,
-                quantity: Math.abs(dto.stock - (current.stock ?? 0)),
+                quantity: branchDelta,
                 notes: 'Variant metadata stock update',
               },
             });
@@ -572,45 +587,50 @@ export class VariantService {
       );
     }
 
-    let newLocationStock: number;
-    let newGlobalStock: number;
-    let txType: StockTransactionType;
-    let txQty: number;
-
-    if (operation === StockOperation.DEDUCT) {
-      txType = dto.notes?.toLowerCase().includes('sale')
-        ? StockTransactionType.SALE
-        : StockTransactionType.MANUAL_ADJUSTMENT;
-      txQty = changeQty;
-
-      if (!dto.allowNegative && currentBaseline < changeQty) {
-        throw new BadRequestException(
-          `Insufficient stock for "${current.name}". Available: ${currentBaseline}, Requested deduction: ${changeQty}`,
-        );
+    const executeStockMutation = async (tx: any) => {
+      // 1. Fetch fresh baseline inside transaction (O05)
+      let insideBaseline = currentBaseline;
+      if (targetLocationId && tx.locationStock?.findUnique) {
+        const row = await tx.locationStock.findUnique({
+          where: {
+            locationId_variantId: {
+              locationId: targetLocationId,
+              variantId: current.id,
+            },
+          },
+        });
+        if (row !== null && row !== undefined) {
+          insideBaseline = row.stock ?? 0;
+        }
       }
 
-      newLocationStock = dto.allowNegative
-        ? currentBaseline - changeQty
-        : Math.max(0, currentBaseline - changeQty);
-      newGlobalStock = dto.allowNegative
-        ? current.stock - changeQty
-        : Math.max(0, current.stock - changeQty);
-    } else if (operation === StockOperation.ADD) {
-      txType = StockTransactionType.RESTOCK;
-      txQty = changeQty;
+      let newLocationStock: number;
+      let txType: StockTransactionType;
+      let txQty: number;
 
-      newLocationStock = currentBaseline + changeQty;
-      newGlobalStock = current.stock + changeQty;
-    } else {
-      // SET
-      txType = StockTransactionType.MANUAL_ADJUSTMENT;
-      txQty = Math.abs(changeQty - currentBaseline);
+      if (operation === StockOperation.DEDUCT) {
+        // Never infer SALE from notes (O25)
+        txType = StockTransactionType.MANUAL_ADJUSTMENT;
+        txQty = changeQty;
 
-      newLocationStock = Math.max(0, changeQty);
-      newGlobalStock = Math.max(0, changeQty);
-    }
+        // MVP POLICY: negative branch stock is intentionally allowed for online sales/adjustments; do not add availability rejection until owner enables strict stock mode.
+        newLocationStock = insideBaseline - changeQty;
+      } else if (operation === StockOperation.ADD) {
+        txType = StockTransactionType.RESTOCK;
+        txQty = changeQty;
 
-    const executeStockMutation = async (tx: any) => {
+        newLocationStock = insideBaseline + changeQty;
+      } else {
+        // SET: calculate delta against branch baseline (O10)
+        txType = StockTransactionType.MANUAL_ADJUSTMENT;
+        txQty = Math.abs(changeQty - insideBaseline);
+
+        // MVP POLICY: negative branch stock is intentionally allowed for online sales/adjustments; do not add availability rejection until owner enables strict stock mode.
+        newLocationStock = changeQty;
+      }
+
+      let newGlobalStock = newLocationStock;
+
       // 1. Update location stock if targetLocationId is available
       if (targetLocationId && tx.locationStock?.upsert) {
         await tx.locationStock.upsert({
@@ -665,7 +685,9 @@ export class VariantService {
     };
 
     if (this.prisma.$transaction) {
-      await this.prisma.$transaction(executeStockMutation);
+      await this.prisma.$transaction(executeStockMutation, {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      });
     } else {
       await executeStockMutation(this.prisma);
     }
@@ -750,6 +772,15 @@ export class VariantService {
       select: { id: true },
     });
     if (!location) {
+      const anyLoc = await this.prisma.location.findFirst({
+        where: { id: locationId, deletedAt: null },
+        select: { id: true, businessId: true },
+      });
+      if (anyLoc && anyLoc.businessId && anyLoc.businessId !== businessId) {
+        throw new BadRequestException(
+          'Location does not belong to the specified business',
+        );
+      }
       throw new NotFoundException('Branch location not found');
     }
   }

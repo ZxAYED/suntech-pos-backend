@@ -79,6 +79,12 @@ export class ShiftController {
     description:
       'Branch location UUID to check for active shift (Admin lookup). Cashier defaults to assigned location.',
   })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description:
+      'Tenant business UUID (Admin lookup). Cashier defaults to assigned business.',
+  })
   @ApiResponse({ status: 200, description: 'Active shift loaded' })
   @ApiResponse({
     status: 401,
@@ -94,8 +100,9 @@ export class ShiftController {
   getActive(
     @CurrentUser() actor: AccessTokenPayload,
     @Query('locationId') locationId?: string,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.shifts.getActive(actor, locationId);
+    return this.shifts.getActive(actor, locationId, businessId);
   }
 
   @Post('close')

@@ -10,14 +10,12 @@ describe('AuditReadService', () => {
 
   const mockAdmin: AccessTokenPayload = {
     sub: 'admin-user-id',
-    email: 'admin@suntech.com',
     role: Role.ADMIN,
     businessId: 'biz-1',
   };
 
   const mockCashier: AccessTokenPayload = {
     sub: 'cashier-user-id',
-    email: 'cashier@suntech.com',
     role: Role.CASHIER,
     businessId: 'biz-1',
   };

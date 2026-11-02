@@ -5,7 +5,7 @@ import { IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 export class CreateAdvanceDto {
   @ApiProperty({
     description:
-      'Advance withdrawal amount in BDT (strictly capped at employee remaining monthly salary)',
+      'Advance withdrawal amount in whole BDT (recorded in Advance Ledger)',
     example: 2000,
     minimum: 1,
   })

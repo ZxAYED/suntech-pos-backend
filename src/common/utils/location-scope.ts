@@ -28,14 +28,7 @@ export function resolveLocationScope(
     };
   }
 
-  let effectiveBusinessId = requestedBusinessId?.trim() || actor?.businessId;
-  if (
-    !effectiveBusinessId &&
-    actor?.businessIds &&
-    actor.businessIds.length === 1
-  ) {
-    effectiveBusinessId = actor.businessIds[0];
-  }
+  const effectiveBusinessId = requestedBusinessId?.trim() || actor?.businessId;
 
   if (!effectiveBusinessId || typeof effectiveBusinessId !== 'string') {
     throw new ForbiddenException('Business context is required');

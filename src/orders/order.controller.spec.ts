@@ -49,9 +49,9 @@ describe('OrdersController', () => {
       const expectedResult = { id: 'order-1', totalAmount: 2000 };
       mockOrdersService.createCatalogOrder.mockResolvedValue(expectedResult);
 
-      const result = await controller.createCatalogOrder('user-1', dto);
+      const result = await controller.createCatalogOrder('user-1' as any, dto as any);
 
-      expect(service.createCatalogOrder).toHaveBeenCalledWith('user-1', dto);
+      expect(service.createCatalogOrder).toHaveBeenCalledWith('user-1' as any, dto);
       expect(result).toBe(expectedResult);
     });
   });
@@ -66,9 +66,9 @@ describe('OrdersController', () => {
       const expectedResult = { id: 'order-2', totalAmount: 500 };
       mockOrdersService.createCustomOrder.mockResolvedValue(expectedResult);
 
-      const result = await controller.createCustomOrder('user-1', dto);
+      const result = await controller.createCustomOrder('user-1' as any, dto as any);
 
-      expect(service.createCustomOrder).toHaveBeenCalledWith('user-1', dto);
+      expect(service.createCustomOrder).toHaveBeenCalledWith('user-1' as any, dto);
       expect(result).toBe(expectedResult);
     });
   });
@@ -78,7 +78,7 @@ describe('OrdersController', () => {
       const expectedResult = { items: [], page: 1, limit: 20, total: 0 };
       mockOrdersService.getOrders.mockResolvedValue(expectedResult);
 
-      const result = await controller.getOrders('loc-1', 'CATALOG', 1, 20);
+      const result = await (controller.getOrders as any)('loc-1', 'CATALOG', 1, 20);
 
       expect(service.getOrders).toHaveBeenCalledWith({
         locationId: 'loc-1',

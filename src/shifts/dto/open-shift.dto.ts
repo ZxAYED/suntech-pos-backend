@@ -24,6 +24,14 @@ export class OpenShiftDto {
 
   @ApiPropertyOptional({
     description:
+      'Tenant business ID for Admin. Cashier shifts always use the business in the access token and ignore this field.',
+  })
+  @IsOptional()
+  @IsEntityId()
+  businessId?: string;
+
+  @ApiPropertyOptional({
+    description:
       'Location ID for Admin. Cashier shifts always use the location in the access token and ignore this field.',
   })
   @IsOptional()

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
@@ -332,6 +333,57 @@ describe('ShiftService', () => {
     await expect(
       service.getActive(admin as any, 'loc-other'),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('throws BadRequestException when admin requests active shift for location belonging to another business in multi-business scope', async () => {
+    locationFindFirst.mockResolvedValue({
+      id: 'loc-biz2',
+      businessId: 'biz-2',
+    });
+    const admin = {
+      sub: 'admin-1',
+      role: Role.ADMIN,
+      businessId: 'biz-1',
+      businessIds: ['biz-1', 'biz-2'],
+    };
+
+    await expect(
+      service.getActive(admin as any, 'loc-biz2', 'biz-1'),
+    ).rejects.toThrow('Location does not belong to the specified business');
+  });
+
+  it('throws BadRequestException when admin opens shift without businessId and actor has no businessId', async () => {
+    const admin = {
+      sub: 'admin-1',
+      role: Role.ADMIN,
+    };
+
+    await expect(
+      service.open(admin as any, { startingAmount: 1000, locationId: 'loc-1' }),
+    ).rejects.toThrow('businessId is required');
+  });
+
+  it('throws BadRequestException when admin opens shift with mismatched business and location', async () => {
+    locationFindFirst.mockImplementation(({ where }: { where: { businessId?: string } }) => {
+      if (where.businessId) {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve({ id: 'loc-2', businessId: 'biz-2' });
+    });
+    const admin = {
+      sub: 'admin-1',
+      role: Role.ADMIN,
+      businessId: 'biz-1',
+      businessIds: ['biz-1', 'biz-2'],
+    };
+
+    await expect(
+      service.open(admin as any, {
+        startingAmount: 1000,
+        businessId: 'biz-1',
+        locationId: 'loc-2',
+      }),
+    ).rejects.toThrow('Location does not belong to the specified business');
   });
 
   it('closes active shift, calculates expected cash and variance', async () => {

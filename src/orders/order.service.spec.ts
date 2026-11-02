@@ -157,6 +157,7 @@ describe('OrdersService', () => {
       const result = await service.createCatalogOrder('user-cashier-1', {
         locationId: 'loc-1',
         shiftId: 'shift-1',
+        paymentMethod: PaymentMethod.COD,
         tenderedAmount: 3500,
         customerName: 'Rahim Khan',
         customerPhone: '01711111111',
@@ -275,12 +276,12 @@ describe('OrdersService', () => {
       );
     });
 
-    it('rejects online catalog order when stock is insufficient and does not allow negative stock', async () => {
+    it('allows online catalog order when branch has no existing location stock (upserts negative balance)', async () => {
       variantFindMany.mockResolvedValueOnce([
         {
           id: 'variant-1',
           name: '128GB Black',
-          stock: 1, // Insufficient for quantity 2
+          stock: 0,
           sellingPrice: 1500,
           isActive: true,
           product: {
@@ -289,34 +290,42 @@ describe('OrdersService', () => {
             isActive: true,
             deletedAt: null,
           },
-          locationStocks: [{ id: 'ls-1', stock: 1 }],
+          locationStocks: [], // No stock record for this branch
         },
       ]);
+      locationStockUpsert.mockResolvedValueOnce({ id: 'ls-new', stock: -2 });
 
-      await expect(
-        service.createCatalogOrder('user-cashier-1', {
-          locationId: 'loc-1',
-          tenderedAmount: 3000,
-          lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
-        }),
-      ).rejects.toThrow(BadRequestException);
+      const result = await service.createCatalogOrder('user-cashier-1', {
+        locationId: 'loc-1',
+        paymentMethod: PaymentMethod.COD,
+        tenderedAmount: 3000,
+        lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
+      });
 
-      expect(variantUpdate).not.toHaveBeenCalled();
-      expect(orderCreate).not.toHaveBeenCalled();
+      expect(result).toBeDefined();
+      expect(result.status).toBe('PAID');
+      expect(locationStockUpsert).toHaveBeenCalled();
+      expect(orderCreate).toHaveBeenCalled();
     });
 
-    it('rejects online catalog order when concurrent checkout exhausts stock (atomic conflict)', async () => {
-      locationStockUpdateMany.mockResolvedValueOnce({ count: 0 });
+    it('allows online catalog order when stock is insufficient and allows negative stock (MVP Policy)', async () => {
+      locationStockUpdate.mockResolvedValueOnce({ stock: -1 });
 
-      await expect(
-        service.createCatalogOrder('user-cashier-1', {
-          locationId: 'loc-1',
-          tenderedAmount: 3000,
-          lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
-        }),
-      ).rejects.toThrow(ConflictException);
+      const result = await service.createCatalogOrder('user-cashier-1', {
+        locationId: 'loc-1',
+        paymentMethod: PaymentMethod.COD,
+        tenderedAmount: 3000,
+        lines: [{ variantId: 'variant-1', quantity: 2, unitPrice: 1500 }],
+      });
 
-      expect(orderCreate).not.toHaveBeenCalled();
+      expect(result).toBeDefined();
+      expect(result.status).toBe('PAID');
+      expect(locationStockUpdate).toHaveBeenCalled();
+      expect(variantUpdate).toHaveBeenCalledWith({
+        where: { id: 'variant-1' },
+        data: { stock: { decrement: 2 } },
+      });
+      expect(orderCreate).toHaveBeenCalled();
     });
 
     it('rejects online catalog order when variant is inactive', async () => {
@@ -403,6 +412,7 @@ describe('OrdersService', () => {
 
       await service.createCatalogOrder('user-cashier-1', {
         locationId: 'loc-1',
+        paymentMethod: PaymentMethod.COD,
         tenderedAmount: 1500,
         lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
       });
@@ -420,7 +430,9 @@ describe('OrdersService', () => {
       variantFindMany.mockResolvedValue([mockCatalogVariant]);
 
       await service.createCatalogOrder('user-admin-1', {
+        businessId: 'biz-1',
         locationId: 'loc-1',
+        paymentMethod: PaymentMethod.COD,
         tenderedAmount: 1500,
         lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
       });
@@ -437,6 +449,30 @@ describe('OrdersService', () => {
       );
     });
 
+    it('rejects Admin checkout with HTTP 400 when businessId is missing', async () => {
+      userFindFirst.mockResolvedValue(adminUser);
+
+      await expect(
+        service.createCatalogOrder('user-admin-1', {
+          locationId: 'loc-1',
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        }),
+      ).rejects.toThrow(new BadRequestException('businessId is required for Admin checkout'));
+    });
+
+    it('rejects Admin checkout with HTTP 400 when locationId is missing', async () => {
+      userFindFirst.mockResolvedValue(adminUser);
+
+      await expect(
+        service.createCatalogOrder('user-admin-1', {
+          businessId: 'biz-1',
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        }),
+      ).rejects.toThrow(new BadRequestException('locationId is required for Admin checkout'));
+    });
+
     it('ignores a payload location and uses the cashier token location', async () => {
       const cashierActor = {
         sub: 'user-cashier-1',
@@ -449,6 +485,7 @@ describe('OrdersService', () => {
 
       await service.createCatalogOrder(cashierActor, {
         locationId: 'loc-other',
+        paymentMethod: PaymentMethod.COD,
         tenderedAmount: 1500,
         lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
       });
@@ -483,6 +520,51 @@ describe('OrdersService', () => {
         }),
       );
     });
+
+    it('throws BadRequestException when paymentMethod is omitted on checkout (no default COD)', async () => {
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
+
+      await expect(
+        service.createCatalogOrder('user-cashier-1', {
+          locationId: 'loc-1',
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        } as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('throws BadRequestException when paymentMethod and paymentType conflict', async () => {
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
+
+      await expect(
+        service.createCatalogOrder('user-cashier-1', {
+          locationId: 'loc-1',
+          paymentMethod: PaymentMethod.COD,
+          paymentType: PaymentMethod.BKASH,
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('throws ConflictException with PRICE_CHANGED when submitted unitPrice differs from DB sellingPrice', async () => {
+      variantFindMany.mockResolvedValue([mockCatalogVariant]); // sellingPrice is 1500
+
+      await expect(
+        service.createCatalogOrder('user-cashier-1', {
+          locationId: 'loc-1',
+          paymentMethod: PaymentMethod.COD,
+          tenderedAmount: 1200,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1200 }], // Cart has stale price 1200
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({
+          code: 'PRICE_CHANGED',
+          currentPrice: 1500,
+          submittedPrice: 1200,
+        }),
+      });
+    });
   });
 
   describe('createCustomOrder (Flow 2)', () => {
@@ -490,6 +572,7 @@ describe('OrdersService', () => {
       const result = await service.createCustomOrder('user-cashier-1', {
         locationId: 'loc-1',
         shiftId: 'shift-1',
+        paymentMethod: PaymentMethod.COD,
         tenderedAmount: 1000,
         customerName: 'Karim',
         customerPhone: '01822222222',
@@ -1043,7 +1126,7 @@ describe('OrdersService', () => {
       );
     });
 
-    it('rejects legacy checkout when branch stock is insufficient', async () => {
+    it('allows legacy checkout when branch stock is insufficient (negative stock)', async () => {
       shiftFindFirst.mockResolvedValue(null);
       variantFindFirst.mockResolvedValue({
         id: 'variant-1',
@@ -1054,21 +1137,23 @@ describe('OrdersService', () => {
         product: { name: 'Catalog item', isActive: true, deletedAt: null },
       });
       locationStockFindUnique.mockResolvedValue({ id: 'ls-1', stock: 1 });
+      locationStockUpdate.mockResolvedValue({ id: 'ls-1', stock: -1 });
 
-      await expect(
-        service.checkoutWithin(
-          tx as unknown as Prisma.TransactionClient,
-          {
-            sub: 'cashier-1',
-            role: Role.CASHIER,
-            businessId: 'biz-1',
-            locationId: 'loc-1',
-          },
-          'biz-1',
-          { items: [{ variantId: 'variant-1', quantity: 2 }] },
-          'RCPT-TEST',
-        ),
-      ).rejects.toThrow(BadRequestException);
+      const result = await service.checkoutWithin(
+        tx as unknown as Prisma.TransactionClient,
+        {
+          sub: 'cashier-1',
+          role: Role.CASHIER,
+          businessId: 'biz-1',
+          locationId: 'loc-1',
+        },
+        'biz-1',
+        { items: [{ variantId: 'variant-1', quantity: 2 }] },
+        'RCPT-TEST',
+      );
+
+      expect(result).toBeDefined();
+      expect(result.status).toBe('PAID');
     });
   });
 
@@ -1184,6 +1269,77 @@ describe('OrdersService', () => {
       await expect(
         service.getOrderById(adminActor, 'order-303'),
       ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('throws BadRequestException when Admin checks out without businessId', async () => {
+      userFindFirst.mockResolvedValue({
+        id: 'admin-1',
+        role: Role.ADMIN,
+        ownedBusinesses: [{ id: 'biz-1' }],
+      });
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+      };
+
+      await expect(
+        service.createCatalogOrder(adminActor as any, {
+          locationId: 'loc-1',
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        } as any),
+      ).rejects.toThrow('businessId is required for Admin checkout');
+    });
+
+    it('throws BadRequestException when Admin checks out without locationId', async () => {
+      userFindFirst.mockResolvedValue({
+        id: 'admin-1',
+        role: Role.ADMIN,
+        ownedBusinesses: [{ id: 'biz-1' }],
+      });
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+      };
+
+      await expect(
+        service.createCatalogOrder(adminActor as any, {
+          businessId: 'biz-1',
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        } as any),
+      ).rejects.toThrow('locationId is required for Admin checkout');
+    });
+
+    it('throws BadRequestException when Admin checks out with mismatched business and location', async () => {
+      userFindFirst.mockResolvedValue({
+        id: 'admin-1',
+        role: Role.ADMIN,
+        ownedBusinesses: [{ id: 'biz-1' }, { id: 'biz-2' }],
+      });
+      locationFindFirst.mockImplementation(({ where }: { where: { businessId?: string } }) => {
+        if (where.businessId) {
+          return Promise.resolve(null);
+        }
+        return Promise.resolve({ id: 'loc-2', businessId: 'biz-2' });
+      });
+      const adminActor = {
+        sub: 'admin-1',
+        role: Role.ADMIN,
+        businessId: 'biz-1',
+        businessIds: ['biz-1', 'biz-2'],
+      };
+
+      await expect(
+        service.createCatalogOrder(adminActor as any, {
+          businessId: 'biz-1',
+          locationId: 'loc-2',
+          tenderedAmount: 1500,
+          lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+        } as any),
+      ).rejects.toThrow('Location does not belong to the specified business');
     });
   });
 });

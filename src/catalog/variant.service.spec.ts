@@ -16,6 +16,7 @@ describe('VariantService', () => {
   const variantUpdate = jest.fn();
   const variantUpdateMany = jest.fn();
   const variantDelete = jest.fn();
+  const locationStockFindUnique = jest.fn();
   const locationStockUpsert = jest.fn();
   const locationStockAggregate = jest.fn();
   const locationStockDeleteMany = jest.fn();
@@ -36,6 +37,7 @@ describe('VariantService', () => {
       delete: variantDelete,
     },
     locationStock: {
+      findUnique: locationStockFindUnique,
       upsert: locationStockUpsert,
       aggregate: locationStockAggregate,
       deleteMany: locationStockDeleteMany,
@@ -108,7 +110,7 @@ describe('VariantService', () => {
         },
       };
 
-      const presented = presentVariant(row);
+      const presented = presentVariant(row as any);
 
       expect(presented.productName).toBe('iPhone 15');
       expect(presented.categoryId).toBe('cat-1');
@@ -172,7 +174,7 @@ describe('VariantService', () => {
         sellingPrice: 1500,
       });
 
-      expect(created.businessId).toBe('biz-1');
+      expect((created as any).businessId).toBe('biz-1');
       expect(created.sku).toMatch(/^PRD-[A-Z2-9]{6}$/);
       expect(created.productName).toBe('Product');
       expect(created.categoryName).toBe('Uncategorized');
@@ -247,6 +249,46 @@ describe('VariantService', () => {
         }),
       ).rejects.toThrow(BadRequestException);
       expect(variantUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('calculates stock movement quantity using branch baseline instead of global stock (O10)', async () => {
+      variantFindFirst.mockResolvedValueOnce({
+        id: 'var-1',
+        name: 'Existing Variant',
+        sku: 'EXT-1',
+        barcode: null,
+        stock: 10, // Global stock across all branches is 10 (e.g., Branch B has 10)
+      });
+      variantUpdateMany.mockResolvedValueOnce({ count: 1 });
+      locationStockFindUnique.mockResolvedValueOnce({
+        stock: 0, // Branch A baseline is 0
+      });
+      locationStockAggregate.mockResolvedValueOnce({
+        _sum: { stock: 20 },
+      });
+      variantFindFirst.mockResolvedValueOnce({
+        id: 'var-1',
+        name: 'Existing Variant',
+        sku: 'EXT-1',
+        stock: 20,
+        locationStocks: [{ locationId: 'loc-A', stock: 10 }],
+      });
+
+      await service.update(admin, 'var-1', {
+        stock: 10,
+        locationId: 'loc-A',
+      });
+
+      expect(stockTransactionCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            variantId: 'var-1',
+            locationId: 'loc-A',
+            type: StockTransactionType.MANUAL_ADJUSTMENT,
+            quantity: 10, // Must be 10 (10 - 0), NOT 0 (|10 - global 10|)
+          }),
+        }),
+      );
     });
   });
 
@@ -452,7 +494,7 @@ describe('VariantService', () => {
       locationStocks: [{ locationId: 'loc-1', stock: 8 }],
     };
 
-    it('deducts stock for custom sale and logs SALE stock transaction', async () => {
+    it('deducts stock for custom sale and logs MANUAL_ADJUSTMENT (O25)', async () => {
       // 1. Initial variant query
       variantFindFirst
         .mockResolvedValueOnce({
@@ -499,7 +541,7 @@ describe('VariantService', () => {
           data: expect.objectContaining({
             variantId: 'var-1',
             locationId: 'loc-1',
-            type: StockTransactionType.SALE,
+            type: StockTransactionType.MANUAL_ADJUSTMENT,
             quantity: 2,
             notes: 'Custom sale checkout',
           }),
@@ -630,25 +672,38 @@ describe('VariantService', () => {
       );
     });
 
-    it('throws BadRequestException when stock is insufficient and allowNegative is false', async () => {
-      variantFindFirst.mockResolvedValueOnce({
-        id: 'var-1',
-        name: 'Test Variant',
-        stock: 2,
-        locationStocks: [{ stock: 2 }],
+    it('allows negative stock on manual deduction without requiring allowNegative flag (Phase 2 Owner-Approved Policy)', async () => {
+      variantFindFirst
+        .mockResolvedValueOnce({
+          id: 'var-1',
+          name: 'Test Variant',
+          stock: 2,
+          locationStocks: [{ stock: 2 }],
+        })
+        .mockResolvedValueOnce({
+          ...mockReturnedVariant,
+          stock: -3,
+          locationStocks: [{ locationId: 'loc-1', stock: -3 }],
+        });
+
+      locationStockAggregate.mockResolvedValueOnce({
+        _sum: { stock: -3 },
       });
 
-      await expect(
-        service.updateStock(admin, 'var-1', {
-          operation: StockOperation.DEDUCT,
-          quantity: 5,
-          locationId: 'loc-1',
-          allowNegative: false,
+      await service.updateStock(admin, 'var-1', {
+        operation: StockOperation.DEDUCT,
+        quantity: 5,
+        locationId: 'loc-1',
+      });
+
+      expect(locationStockUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: { stock: -3 },
         }),
-      ).rejects.toThrow(BadRequestException);
+      );
     });
 
-    it('allows negative stock when allowNegative is explicitly true', async () => {
+    it('allows negative stock when allowNegative is explicitly true or false', async () => {
       variantFindFirst
         .mockResolvedValueOnce({
           id: 'var-1',

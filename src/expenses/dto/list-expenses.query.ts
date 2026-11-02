@@ -6,7 +6,8 @@ import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 export class ListExpensesQueryDto {
   @ApiPropertyOptional({
     enum: ExpenseSourceType,
-    description: 'Filter expenses by type (MANUAL, SALARY_ADVANCE, PAYROLL_NET)',
+    description:
+      'Filter expenses by type (MANUAL, PAYROLL_NET). Note: SALARY_ADVANCE is tracked in the separate advance ledger and rejected with 400.',
   })
   @IsOptional()
   @IsEnum(ExpenseSourceType)

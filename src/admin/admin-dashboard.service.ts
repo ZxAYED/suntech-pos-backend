@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  ExpenseSourceType,
   OrderStatus,
   PaymentMethod,
   Prisma,
@@ -156,15 +157,20 @@ export class AdminDashboardService {
     const location = await this.prisma.location.findFirst({
       where: {
         id: locationId,
-        businessId,
         deletedAt: null,
       },
-      select: { id: true, name: true },
+      select: { id: true, name: true, businessId: true },
     });
 
     if (!location) {
       throw new NotFoundException(
         'Branch location was not found in the selected business',
+      );
+    }
+
+    if (location.businessId && location.businessId !== businessId) {
+      throw new BadRequestException(
+        'Location does not belong to the specified business',
       );
     }
 
@@ -209,6 +215,9 @@ export class AdminDashboardService {
       locationId,
       spentAt: { gte: startOfToday, lte: endOfToday },
       deletedAt: null,
+      sourceType: {
+        in: [ExpenseSourceType.MANUAL, ExpenseSourceType.PAYROLL_NET],
+      },
     };
 
     const [
@@ -288,13 +297,7 @@ export class AdminDashboardService {
         }),
         this.prisma.refund.aggregate({
           where: {
-            OR: [
-              { payoutShiftId: activeShift.id },
-              {
-                payoutShiftId: null,
-                order: { shiftId: activeShift.id },
-              },
-            ],
+            payoutShiftId: activeShift.id,
             order: {
               paymentMethod: PaymentMethod.COD,
             },

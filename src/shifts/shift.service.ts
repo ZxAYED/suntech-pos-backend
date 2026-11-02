@@ -89,7 +89,10 @@ export class ShiftService {
     actor: AccessTokenPayload,
     dto: OpenShiftDto,
   ): Promise<PresentedShift> {
-    const businessId = requireBusinessId(actor);
+    const businessId =
+      actor.role === Role.ADMIN
+        ? requireBusinessId(actor, dto.businessId)
+        : requireBusinessId(actor);
     const locationId = this.resolveOpenLocationId(actor, dto);
 
     try {
@@ -101,6 +104,22 @@ export class ShiftService {
           });
 
           if (!location) {
+            const anyLoc = await tx.location.findFirst({
+              where: { id: locationId, deletedAt: null },
+              select: { id: true, businessId: true },
+            });
+            if (
+              anyLoc &&
+              anyLoc.businessId &&
+              anyLoc.businessId !== businessId
+            ) {
+              throw new BadRequestException(
+                'Location does not belong to the specified business',
+              );
+            }
+            if (actor.role === Role.ADMIN) {
+              throw new NotFoundException('Branch location not found');
+            }
             throw new ForbiddenException(
               'Your location is no longer available',
             );
@@ -133,13 +152,7 @@ export class ShiftService {
             const refundPromise = tx.refund?.aggregate
               ? tx.refund.aggregate({
                   where: {
-                    OR: [
-                      { payoutShiftId: openShift.id },
-                      {
-                        payoutShiftId: null,
-                        order: { shiftId: openShift.id },
-                      },
-                    ],
+                    payoutShiftId: openShift.id,
                     order: {
                       paymentMethod: PaymentMethod.COD,
                     },
@@ -227,12 +240,13 @@ export class ShiftService {
   async getActive(
     actor: AccessTokenPayload,
     locationId?: string,
+    businessIdQuery?: string,
   ): Promise<ActiveShiftDetails> {
     const effectiveLocationId =
       locationId?.trim() ||
       (actor.role === Role.CASHIER ? actor.locationId : undefined);
 
-    let businessId = requireBusinessId(actor);
+    let businessId = requireBusinessId(actor, businessIdQuery);
     if (effectiveLocationId && this.prisma.location) {
       const loc = this.prisma.location.findFirst
         ? await this.prisma.location.findFirst({
@@ -258,12 +272,13 @@ export class ShiftService {
             'Location does not belong to your business',
           );
         }
-      } else if (loc.businessId !== businessId) {
-        throw new ForbiddenException(
-          'Location does not belong to your business',
+      }
+
+      if (loc.businessId && loc.businessId !== businessId) {
+        throw new BadRequestException(
+          'Location does not belong to the specified business',
         );
       }
-      businessId = loc.businessId;
     }
 
     const shift = await this.prisma.shiftSession.findFirst({
@@ -302,7 +317,10 @@ export class ShiftService {
     shiftId: string | undefined,
     dto: CloseShiftDto,
   ): Promise<PresentedShift> {
-    const businessId = requireBusinessId(cashier);
+    const businessId =
+      cashier.role === Role.ADMIN
+        ? requireBusinessId(cashier, dto.businessId)
+        : requireBusinessId(cashier);
 
     const executeClose = async (tx: Prisma.TransactionClient) => {
       const shift = await tx.shiftSession.findFirst({
@@ -362,7 +380,9 @@ export class ShiftService {
     };
 
     if (this.prisma.$transaction) {
-      return this.prisma.$transaction(executeClose);
+      return this.prisma.$transaction(executeClose, {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      });
     }
     return executeClose(this.prisma as unknown as Prisma.TransactionClient);
   }
@@ -373,6 +393,22 @@ export class ShiftService {
       query.locationId,
       query.businessId,
     );
+
+    if (scope.locationId && this.prisma.location?.findFirst) {
+      const loc = await this.prisma.location.findFirst({
+        where: { id: scope.locationId, deletedAt: null },
+        select: { id: true, businessId: true },
+      });
+      if (!loc) {
+        throw new NotFoundException('Location not found');
+      }
+      if (loc.businessId && loc.businessId !== scope.businessId) {
+        throw new BadRequestException(
+          'Location does not belong to the specified business',
+        );
+      }
+    }
+
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 10));
     const skip = (page - 1) * limit;
@@ -422,10 +458,7 @@ export class ShiftService {
     const refundPromise = client.refund?.aggregate
       ? client.refund.aggregate({
           where: {
-            OR: [
-              { payoutShiftId: shiftId },
-              { payoutShiftId: null, order: { shiftId } },
-            ],
+            payoutShiftId: shiftId,
             order: {
               paymentMethod: PaymentMethod.COD,
             },
@@ -494,9 +527,9 @@ export class ShiftService {
       return actor.locationId;
     }
 
-    const locationId = dto.locationId ?? actor.locationId;
+    const locationId = dto.locationId?.trim() || actor.locationId;
     if (!locationId) {
-      throw new ForbiddenException('Location ID is required to open a shift');
+      throw new BadRequestException('locationId is required to open a shift');
     }
 
     return locationId;

@@ -78,14 +78,13 @@ export class UpdateVariantDto {
   costPrice?: number | null;
 
   @ApiPropertyOptional({
-    description: 'Available stock quantity',
+    description:
+      'Available stock quantity (negative values allowed per MVP policy)',
     example: 35,
-    minimum: 0,
   })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(0)
   stock?: number;
 
   @ApiPropertyOptional({

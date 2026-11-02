@@ -18,8 +18,8 @@ describe('IdempotencyInterceptor', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     interceptor = new IdempotencyInterceptor(
-      mockPrisma as unknown as PrismaService,
       mockReflector as unknown as Reflector,
+      mockPrisma as unknown as PrismaService,
     );
   });
 
@@ -68,6 +68,55 @@ describe('IdempotencyInterceptor', () => {
       const hash2 = (interceptor as any).requestHash(req2);
 
       expect(hash1).toEqual(hash2);
+    });
+  });
+
+  describe('resolveScopeId', () => {
+    it('scopes user sub with businessId when user is authenticated', () => {
+      const req: any = {
+        user: { sub: 'user-123', businessId: 'biz-456' },
+      };
+      const scope = (interceptor as any).resolveScopeId(req);
+      expect(scope).toBe('user-123:biz-456');
+    });
+
+    it('falls back to client ip when user is unauthenticated', () => {
+      const req: any = {
+        header: () => undefined,
+        ip: '192.168.1.1',
+        socket: {},
+      };
+      const scope = (interceptor as any).resolveScopeId(req);
+      expect(scope).toBe('192.168.1.1');
+    });
+  });
+
+  describe('readReplay', () => {
+    it('replays completed response even if expiresAt has passed (permanent replay protection O07)', async () => {
+      (interceptor as any).prisma.idempotencyRecord = {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'rec-1',
+          statusCode: 201,
+          responseBody: { success: true },
+          path: '/api/v1/orders',
+          requestHash: 'hash-abc',
+          expiresAt: new Date(Date.now() - 1000), // expired 1s ago
+        }),
+        deleteMany: jest.fn(),
+      };
+
+      const replay = await (interceptor as any).readReplay(
+        'user-1:biz-1',
+        'key-1',
+        '/api/v1/orders',
+        'hash-abc',
+      );
+
+      expect(replay).toEqual({
+        statusCode: 201,
+        responseBody: { success: true },
+      });
+      expect((interceptor as any).prisma.idempotencyRecord.deleteMany).not.toHaveBeenCalled();
     });
   });
 });

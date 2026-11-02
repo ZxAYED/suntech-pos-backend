@@ -497,6 +497,17 @@ export class TenantService {
       }
     }
 
+    if (this.prisma.user?.findFirst) {
+      const activeCashier = await this.prisma.user.findFirst({
+        where: { locationId, role: Role.CASHIER, deletedAt: null },
+      });
+      if (activeCashier) {
+        throw new ConflictException(
+          'Cannot delete a location with active assigned cashiers. Reassign or delete cashiers first.',
+        );
+      }
+    }
+
     const deletedAt = new Date();
     await this.prisma.location.update({
       where: { id: locationId },

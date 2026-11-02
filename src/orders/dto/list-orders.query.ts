@@ -22,4 +22,12 @@ export class ListOrdersQueryDto {
   @Min(1)
   @Max(100)
   limit?: number;
+
+  @ApiPropertyOptional({ description: 'Business ID (required for Admin)' })
+  @IsOptional()
+  businessId?: string;
+
+  @ApiPropertyOptional({ description: 'Optional location ID filter' })
+  @IsOptional()
+  locationId?: string;
 }

@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -11,6 +12,7 @@ import {
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiParam,
   ApiQuery,
   ApiResponse,
   ApiTags,
@@ -26,6 +28,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { ExpenseSummaryQueryDto } from './dto/expense-summary.query';
 import { ListExpensesQueryDto } from './dto/list-expenses.query';
+import { UpdateExpenseDto } from './dto/update-expense.dto';
 import { ExpenseService } from './expense.service';
 
 @ApiTags('Expenses')
@@ -153,6 +156,26 @@ export class ExpenseController {
     @Query() query: ExpenseSummaryQueryDto,
   ) {
     return this.expenseService.summary(admin, query);
+  }
+
+  @Patch(':id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({
+    summary: 'Update a manual expense',
+    description:
+      'Enables store admin to update details of an operational expense. Only MANUAL expenses can be updated; system-managed payroll expenses are immutable.',
+  })
+  @ApiParam({ name: 'id', description: 'Expense ID' })
+  @ApiResponse({ status: 200, description: 'Expense updated successfully' })
+  @ApiResponse({ status: 400, description: 'Validation failed or not a manual expense' })
+  @ApiResponse({ status: 404, description: 'Expense not found' })
+  @ResponseMessage('Expense updated successfully')
+  update(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Param('id') id: string,
+    @Body() dto: UpdateExpenseDto,
+  ) {
+    return this.expenseService.update(admin, id, dto);
   }
 
   @Delete(':id')

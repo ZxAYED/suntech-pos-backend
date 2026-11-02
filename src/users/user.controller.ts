@@ -17,6 +17,7 @@ import {
   ApiConsumes,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -197,13 +198,19 @@ export class UserController {
     status: 409,
     description: 'Cannot delete cashier with active open shift',
   })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Target business UUID for multi-business Admin',
+  })
   @Roles(Role.ADMIN)
   @ResponseMessage('Cashier deleted')
   deleteCashier(
     @CurrentUser() admin: AccessTokenPayload,
     @Param('id') id: string,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.userService.deleteCashier(admin, id);
+    return this.userService.deleteCashier(admin, id, businessId);
   }
 
   @Patch(':id/status')
@@ -213,6 +220,11 @@ export class UserController {
       'Updates account status (ACTIVE, SUSPENDED, REJECTED). Prevents self-suspension. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Employee user UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Target business UUID for multi-business Admin',
+  })
   @ApiResponse({ status: 200, description: 'Status updated' })
   @ApiResponse({ status: 400, description: 'Cannot suspend own admin account' })
   @ApiResponse({
@@ -226,8 +238,9 @@ export class UserController {
     @CurrentUser() admin: AccessTokenPayload,
     @Param('id') id: string,
     @Body() dto: UpdateUserStatusDto,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.userService.updateStatus(admin, id, dto);
+    return this.userService.updateStatus(admin, id, dto, businessId);
   }
 
   @Post(':id/profile-image')
@@ -238,6 +251,11 @@ export class UserController {
   })
   @ApiConsumes('multipart/form-data')
   @ApiParam({ name: 'id', description: 'Employee user UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Target business UUID for multi-business Admin',
+  })
   @ApiBody({
     schema: {
       type: 'object',
@@ -263,8 +281,9 @@ export class UserController {
     @CurrentUser() admin: AccessTokenPayload,
     @Param('id') id: string,
     @UploadedFile() file: UploadedImage,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.userService.setStaffProfileImage(admin, id, file);
+    return this.userService.setStaffProfileImage(admin, id, file, businessId);
   }
 
   @Delete(':id/profile-image')
@@ -274,6 +293,11 @@ export class UserController {
       'Deletes profile image from Cloudinary and clears profileImageUrl and key fields for an employee. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Employee user UUID' })
+  @ApiQuery({
+    name: 'businessId',
+    required: false,
+    description: 'Target business UUID for multi-business Admin',
+  })
   @ApiResponse({ status: 200, description: 'Profile image removed' })
   @ApiResponse({
     status: 401,
@@ -285,7 +309,8 @@ export class UserController {
   clearStaffProfileImage(
     @CurrentUser() admin: AccessTokenPayload,
     @Param('id') id: string,
+    @Query('businessId') businessId?: string,
   ) {
-    return this.userService.clearStaffProfileImage(admin, id);
+    return this.userService.clearStaffProfileImage(admin, id, businessId);
   }
 }

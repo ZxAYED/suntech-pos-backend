@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 import { ExpenseSummaryQueryDto } from './dto/expense-summary.query';
 import { ListExpensesQueryDto } from './dto/list-expenses.query';
+import { UpdateExpenseDto } from './dto/update-expense.dto';
 
 const expenseSelect = {
   id: true,
@@ -98,6 +99,28 @@ function formatExpense(
 export class ExpenseService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async assertLocation(
+    businessId: string,
+    locationId: string,
+  ): Promise<void> {
+    const location = await this.prisma.location.findFirst({
+      where: { id: locationId, businessId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!location) {
+      const anyLoc = await this.prisma.location.findFirst({
+        where: { id: locationId, deletedAt: null },
+        select: { id: true, businessId: true },
+      });
+      if (anyLoc && anyLoc.businessId && anyLoc.businessId !== businessId) {
+        throw new BadRequestException(
+          'Location does not belong to the specified business',
+        );
+      }
+      throw new NotFoundException('Branch location not found');
+    }
+  }
+
   async create(
     admin: AccessTokenPayload,
     dto: CreateExpenseDto,
@@ -105,12 +128,7 @@ export class ExpenseService {
     const businessId = requireBusinessId(admin, dto.businessId);
 
     if (dto.locationId) {
-      const location = await this.prisma.location.findFirst({
-        where: { id: dto.locationId, businessId, deletedAt: null },
-      });
-      if (!location) {
-        throw new NotFoundException('Branch location not found');
-      }
+      await this.assertLocation(businessId, dto.locationId);
     }
 
     const spentAt = dto.spentAt ? new Date(dto.spentAt) : new Date();
@@ -131,6 +149,66 @@ export class ExpenseService {
     });
 
     return formatExpense(created);
+  }
+
+  async update(
+    admin: AccessTokenPayload,
+    expenseId: string,
+    dto: UpdateExpenseDto,
+  ): Promise<PresentedExpense> {
+    const businessId = requireBusinessId(admin, dto.businessId);
+
+    const existing = await this.prisma.expense.findFirst({
+      where: { id: expenseId, businessId, deletedAt: null },
+    });
+
+    if (!existing) {
+      throw new NotFoundException('Expense not found');
+    }
+
+    if (
+      existing.sourceType !== ExpenseSourceType.MANUAL ||
+      existing.advanceId ||
+      existing.payrollId
+    ) {
+      throw new BadRequestException(
+        'Cannot manually update a system-managed expense (PAYROLL_NET). Only MANUAL expenses can be edited.',
+      );
+    }
+
+    if (dto.locationId) {
+      await this.assertLocation(businessId, dto.locationId);
+    }
+
+    const data: Prisma.ExpenseUpdateInput = {};
+    if (dto.amount !== undefined) {
+      data.amount = dto.amount;
+    }
+    if (dto.title !== undefined) {
+      data.title = dto.title.trim();
+    }
+    if (dto.category !== undefined) {
+      data.category = dto.category;
+    }
+    if (dto.note !== undefined) {
+      data.note = dto.note.trim() || null;
+    }
+    if (dto.spentAt !== undefined) {
+      data.spentAt = new Date(dto.spentAt);
+    }
+    if (dto.locationId !== undefined) {
+      data.location = dto.locationId
+        ? { connect: { id: dto.locationId } }
+        : { disconnect: true };
+    }
+
+    const updated = await this.prisma.expense.update({
+      where: { id: expenseId },
+      data,
+      select: expenseSelect,
+    });
+
+    return formatExpense(updated);
   }
 
   async remove(
@@ -173,6 +251,12 @@ export class ExpenseService {
   ): Promise<MonthlyExpenseSummary> {
     const businessId = requireBusinessId(admin, query.businessId);
 
+    if (query.type === ('SALARY_ADVANCE' as any)) {
+      throw new BadRequestException(
+        'SALARY_ADVANCE is an obsolete expense type. Salary advances are tracked separately in the advance ledger.',
+      );
+    }
+
     const now = new Date();
     const currentPeriod = getDhakaDateParts(now);
     const month = query.month ?? currentPeriod.month;
@@ -183,14 +267,25 @@ export class ExpenseService {
       businessId,
       deletedAt: null,
       spentAt: { gte: start, lt: end },
+      // MVP POLICY: Public expenses only include MANUAL and PAYROLL_NET. Legacy SALARY_ADVANCE is excluded.
+      sourceType: query.type
+        ? query.type
+        : { in: [ExpenseSourceType.MANUAL, ExpenseSourceType.PAYROLL_NET] },
     };
 
     if (query.locationId) {
+      if (this.prisma.location?.findFirst) {
+        const anyLoc = await this.prisma.location.findFirst({
+          where: { id: query.locationId, deletedAt: null },
+          select: { id: true, businessId: true },
+        });
+        if (anyLoc && anyLoc.businessId && anyLoc.businessId !== businessId) {
+          throw new BadRequestException(
+            'Location does not belong to the specified business',
+          );
+        }
+      }
       where.locationId = query.locationId;
-    }
-
-    if (query.type) {
-      where.sourceType = query.type;
     }
 
     if (query.category) {
@@ -286,17 +381,34 @@ export class ExpenseService {
   }> {
     const businessId = requireBusinessId(admin, query.businessId);
 
+    if (query.type === ('SALARY_ADVANCE' as any)) {
+      throw new BadRequestException(
+        'SALARY_ADVANCE is an obsolete expense type. Salary advances are tracked separately in the advance ledger.',
+      );
+    }
+
     const where: Prisma.ExpenseWhereInput = {
       businessId,
       deletedAt: null,
+      // MVP POLICY: Public expenses only include MANUAL and PAYROLL_NET. Legacy SALARY_ADVANCE is excluded.
+      sourceType: query.type
+        ? query.type
+        : { in: [ExpenseSourceType.MANUAL, ExpenseSourceType.PAYROLL_NET] },
     };
 
     if (query.locationId) {
+      if (this.prisma.location?.findFirst) {
+        const anyLoc = await this.prisma.location.findFirst({
+          where: { id: query.locationId, deletedAt: null },
+          select: { id: true, businessId: true },
+        });
+        if (anyLoc && anyLoc.businessId && anyLoc.businessId !== businessId) {
+          throw new BadRequestException(
+            'Location does not belong to the specified business',
+          );
+        }
+      }
       where.locationId = query.locationId;
-    }
-
-    if (query.type) {
-      where.sourceType = query.type;
     }
 
     if (query.category) {

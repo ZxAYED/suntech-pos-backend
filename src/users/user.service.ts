@@ -137,6 +137,19 @@ export class UserService {
     });
 
     if (!location) {
+      const anyLocation = await this.prisma.location.findFirst({
+        where: { id: dto.locationId, deletedAt: null },
+        select: { id: true, businessId: true },
+      });
+      if (
+        anyLocation &&
+        anyLocation.businessId &&
+        anyLocation.businessId !== businessId
+      ) {
+        throw new BadRequestException(
+          'Location does not belong to the specified business',
+        );
+      }
       throw new NotFoundException('Location not found');
     }
 
@@ -205,6 +218,19 @@ export class UserService {
       });
 
       if (!location) {
+        const anyLocation = await this.prisma.location.findFirst({
+          where: { id: dto.locationId, deletedAt: null },
+          select: { id: true, businessId: true },
+        });
+        if (
+          anyLocation &&
+          anyLocation.businessId &&
+          anyLocation.businessId !== businessId
+        ) {
+          throw new BadRequestException(
+            'Location does not belong to the specified business',
+          );
+        }
         throw new NotFoundException('Location not found');
       }
 
@@ -321,8 +347,9 @@ export class UserService {
   async deleteCashier(
     admin: AccessTokenPayload,
     cashierId: string,
+    requestedBusinessId?: string,
   ): Promise<{ id: string; deletedAt: Date }> {
-    const businessId = await this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin, requestedBusinessId);
 
     const cashier = await this.prisma.user.findFirst({
       where: {
@@ -376,8 +403,12 @@ export class UserService {
     admin: AccessTokenPayload,
     userId: string,
     dto: UpdateUserStatusDto,
+    requestedBusinessId?: string,
   ): Promise<PresentedProfile> {
-    const businessId = await this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(
+      admin,
+      requestedBusinessId || dto.businessId,
+    );
 
     if (userId === admin.sub && dto.status !== AccountStatus.ACTIVE) {
       throw new BadRequestException(
@@ -438,16 +469,18 @@ export class UserService {
     admin: AccessTokenPayload,
     userId: string,
     file: UploadedImage,
+    requestedBusinessId?: string,
   ): Promise<PresentedProfile> {
-    const businessId = await this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin, requestedBusinessId);
     return this.replaceProfileImage({ id: userId, businessId }, file);
   }
 
   async clearStaffProfileImage(
     admin: AccessTokenPayload,
     userId: string,
+    requestedBusinessId?: string,
   ): Promise<PresentedProfile> {
-    const businessId = await this.requireBusinessId(admin);
+    const businessId = await this.requireBusinessId(admin, requestedBusinessId);
     return this.clearProfileImage({
       id: userId,
       businessId,
@@ -539,27 +572,10 @@ export class UserService {
     admin: AccessTokenPayload,
     requestedBusinessId?: string,
   ): Promise<string> {
-    let businessId = requestedBusinessId?.trim() || admin.businessId;
-
-    if (!businessId && admin.role === Role.ADMIN) {
-      const user = await this.prisma.user.findFirst({
-        where: { id: admin.sub, deletedAt: null },
-        select: {
-          businessId: true,
-          ownedBusinesses: {
-            where: { deletedAt: null },
-            select: { id: true },
-            take: 1,
-          },
-        },
-      });
-
-      businessId =
-        user?.businessId || user?.ownedBusinesses?.[0]?.id || undefined;
-    }
+    const businessId = requestedBusinessId?.trim() || admin.businessId;
 
     if (!businessId) {
-      throw new ForbiddenException('Create a business before managing staff');
+      throw new BadRequestException('businessId is required');
     }
 
     if (admin.role === Role.ADMIN) {
