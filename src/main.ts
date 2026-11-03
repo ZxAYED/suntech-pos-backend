@@ -17,11 +17,16 @@ async function bootstrap(): Promise<void> {
   const configService = app.get(ConfigService);
 
   const configuredFrontendUrl = configService.get<string>('FRONTEND_URL');
+  // In production the only browser origin is the explicitly configured one.
   const allowedOrigins = [
     configuredFrontendUrl,
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:5173',
+    ...(configService.get<string>('NODE_ENV') === 'production'
+      ? []
+      : [
+          'http://localhost:3000',
+          'http://localhost:3001',
+          'http://localhost:5173',
+        ]),
   ].filter(Boolean) as string[];
 
   app.enableCors({
@@ -77,7 +82,7 @@ Endpoints are tagged with required access levels in brackets:
     },
   });
 
-  const port = Number(configService.get<string>('PORT', '3000'));
+  const port = Number(configService.getOrThrow<string>('PORT'));
   await app.listen(port);
   console.log(`🚀 SunTech POS Backend is running on: http://localhost:${port}`);
   console.log(

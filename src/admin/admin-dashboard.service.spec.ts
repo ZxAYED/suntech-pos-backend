@@ -192,6 +192,59 @@ describe('AdminDashboardService', () => {
       expect(overview.drawer.expectedCashInDrawer).toBe(19000); // 5000 + 15000 - 1000
     });
 
+    it('correctly calculates mixed payment scenario: kpis.netCashflowToday (18k) vs drawer.expectedCashInDrawer (10k)', async () => {
+      // Setup:
+      // All-channel orders: 25,000 (10,000 COD + 15,000 bKash) across 2 orders
+      orderCount.mockResolvedValue(2);
+      orderAggregate
+        .mockResolvedValueOnce({ _sum: { totalAmount: 25000 } }) // day orders (all methods)
+        .mockResolvedValueOnce({ _sum: { totalAmount: 10000 } }); // shift cash orders (COD only)
+
+      // Refunds: 2,000 COD refund
+      refundCount.mockResolvedValue(1);
+      refundAggregate
+        .mockResolvedValueOnce({ _sum: { totalRefund: 2000 } }) // day refunds (all)
+        .mockResolvedValueOnce({ _sum: { totalRefund: 2000 } }); // shift COD refunds
+
+      // Expenses: 5,000 BDT
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 5000 } });
+
+      // Employee cash advance: 1,000 BDT paid out from drawer
+      employeeAdvanceAggregate.mockResolvedValue({ _sum: { amount: 1000 } });
+
+      // Active shift with opening float of 3,000 BDT
+      shiftSessionFindFirst.mockResolvedValue({
+        id: 'shift-mixed-1',
+        startingAmount: 3000,
+        status: ShiftStatus.OPEN,
+        openedAt: new Date('2026-10-31T04:00:00Z'),
+        cashier: {
+          id: 'user-1',
+          fullName: 'Tanvir Cashier',
+          publicId: 'CSH-0001',
+        },
+      });
+
+      const overview = await service.getOverview(adminActor, {
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      });
+
+      // Assert high-level business cashflow (all payment channels)
+      expect(overview.kpis.todayGrossSales).toBe(25000);
+      expect(overview.kpis.todayRefundedAmount).toBe(2000);
+      expect(overview.kpis.todayNetSales).toBe(23000); // 25,000 - 2,000
+      expect(overview.kpis.todayExpenseTotal).toBe(5000);
+      expect(overview.kpis.netCashflowToday).toBe(18000); // 23,000 - 5,000
+
+      // Assert physical cash drawer isolation (COD and physical cash only)
+      expect(overview.drawer.hasActiveShift).toBe(true);
+      expect(overview.drawer.openingFloat).toBe(3000);
+      expect(overview.drawer.cashCollected).toBe(8000); // 10,000 COD sales - 2,000 COD refund
+      expect(overview.drawer.cashPaidOut).toBe(1000); // 1,000 advance
+      expect(overview.drawer.expectedCashInDrawer).toBe(10000); // 3,000 + 8,000 - 1,000
+    });
+
     it('isolates expenses strictly by locationId, excluding other branches and unallocated records (cross-branch & unallocated isolation)', async () => {
       orderCount.mockResolvedValue(0);
       orderAggregate.mockResolvedValue({ _sum: { totalAmount: null } });

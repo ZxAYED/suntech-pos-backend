@@ -11,13 +11,13 @@ export async function runDatabaseSeed(
   const logger = new Logger('DatabaseSeed');
 
   // 1. Super Admin Account (Configured via environment variables)
-  const superAdminEmail = (
-    process.env.SUPER_ADMIN_EMAIL || process.env.ADMIN_EMAIL
-  )
-    ?.trim()
-    .toLowerCase();
-  const superAdminPasswordRaw =
-    process.env.SUPER_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD;
+  const superAdminEmail = process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase();
+  const superAdminPasswordRaw = process.env.SUPER_ADMIN_PASSWORD;
+  if (!superAdminEmail || !superAdminPasswordRaw?.trim()) {
+    throw new Error(
+      'SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD are required to run the bootstrap seed',
+    );
+  }
 
   if (superAdminEmail && superAdminPasswordRaw) {
     const superAdminPassword = await bcrypt.hash(
@@ -40,19 +40,12 @@ export async function runDatabaseSeed(
 
     const superAdmin = await prisma.user.upsert({
       where: { email: superAdminEmail },
-      update: {
-        password: superAdminPassword,
-        role: Role.SUPER_ADMIN,
-        status: AccountStatus.ACTIVE,
-        deletedAt: null,
-      },
+      // Existing identity/password/status are owned by the live auth flows.
+      update: {},
       create: {
         email: superAdminEmail,
         password: superAdminPassword,
-        fullName:
-          process.env.SUPER_ADMIN_NAME?.trim() ||
-          process.env.ADMIN_NAME?.trim() ||
-          'Super Admin',
+        fullName: process.env.SUPER_ADMIN_NAME?.trim() || 'Super Admin',
         role: Role.SUPER_ADMIN,
         status: AccountStatus.ACTIVE,
         ...(defaultSuperAdminPublicId
@@ -61,29 +54,24 @@ export async function runDatabaseSeed(
       },
     });
 
-    logger.log(
-      `Super Admin bootstrapped successfully for email: ${superAdminEmail} (Role: ${superAdmin.role})`,
-    );
-  } else {
-    logger.warn(
-      'SUPER_ADMIN_EMAIL or SUPER_ADMIN_PASSWORD environment variables not configured. Skipping Super Admin bootstrap.',
-    );
+    if (superAdmin.role !== Role.SUPER_ADMIN) {
+      throw new Error('Configured bootstrap email belongs to a non-SUPER_ADMIN user');
+    }
+    logger.log(`Super Admin bootstrap checked for email: ${superAdminEmail}`);
   }
 
+
   // 2. Store Admin Account (Optional, configured via environment variables)
-  const adminEmail = (
-    process.env.DEFAULT_ADMIN_EMAIL ||
-    (process.env.ADMIN_EMAIL !== superAdminEmail
-      ? process.env.ADMIN_EMAIL
-      : undefined)
-  )
-    ?.trim()
-    .toLowerCase();
-  const adminPasswordRaw =
-    process.env.DEFAULT_ADMIN_PASSWORD ||
-    (process.env.ADMIN_EMAIL !== superAdminEmail
-      ? process.env.ADMIN_PASSWORD
-      : undefined);
+  const adminEmail = process.env.DEFAULT_ADMIN_EMAIL?.trim().toLowerCase();
+  const adminPasswordRaw = process.env.DEFAULT_ADMIN_PASSWORD;
+  if (Boolean(adminEmail) !== Boolean(adminPasswordRaw?.trim())) {
+    throw new Error(
+      'DEFAULT_ADMIN_EMAIL and DEFAULT_ADMIN_PASSWORD must both be provided when bootstrapping a store admin',
+    );
+  }
+  if (adminEmail && adminEmail === superAdminEmail) {
+    throw new Error('DEFAULT_ADMIN_EMAIL must differ from SUPER_ADMIN_EMAIL');
+  }
 
   if (adminEmail && adminPasswordRaw && adminEmail !== superAdminEmail) {
     const adminPassword = await bcrypt.hash(adminPasswordRaw, BCRYPT_ROUNDS);
@@ -102,56 +90,35 @@ export async function runDatabaseSeed(
 
     const admin = await prisma.user.upsert({
       where: { email: adminEmail },
-      update: {
-        password: adminPassword,
-        role: Role.ADMIN,
-        status: AccountStatus.ACTIVE,
-        deletedAt: null,
-      },
+      update: {},
       create: {
         email: adminEmail,
         password: adminPassword,
-        fullName:
-          process.env.DEFAULT_ADMIN_NAME?.trim() ||
-          process.env.ADMIN_NAME?.trim() ||
-          'Store Admin',
+        fullName: process.env.DEFAULT_ADMIN_NAME?.trim() || 'Store Admin',
         role: Role.ADMIN,
         status: AccountStatus.ACTIVE,
         ...(defaultAdminPublicId ? { publicId: defaultAdminPublicId } : {}),
       },
     });
 
-    logger.log(
-      `Store Admin bootstrapped successfully for email: ${adminEmail} (Role: ${admin.role})`,
-    );
+    if (admin.role !== Role.ADMIN) {
+      throw new Error('Configured bootstrap email belongs to a non-ADMIN user');
+    }
+    logger.log(`Store Admin bootstrap checked for email: ${adminEmail}`);
   }
 }
 
 @Injectable()
 export class SeedService implements OnModuleInit {
-  private readonly logger = new Logger(SeedService.name);
-
   constructor(private readonly prisma: PrismaService) {}
 
   async onModuleInit(): Promise<void> {
-    if (process.env.NODE_ENV === 'test') {
+    // Seeding is an explicit one-time deployment action, not a side-effect of
+    // every API startup. Never silently reset credentials or revive suspended users.
+    if (process.env.NODE_ENV === 'test' || process.env.RUN_BOOTSTRAP_SEED !== 'true') {
       return;
     }
-
-    try {
-      await runDatabaseSeed(this.prisma);
-    } catch (error: unknown) {
-      const err = error as { code?: string; message?: string };
-      if (err?.code === 'P2021') {
-        this.logger.warn(
-          'Database tables do not exist yet. Please run `npx prisma db push` to initialize the database schema before seeding.',
-        );
-      } else {
-        this.logger.error(
-          `Failed to run automatic database seed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
+    await runDatabaseSeed(this.prisma);
   }
 
   async seed(): Promise<void> {

@@ -10,13 +10,16 @@ import { presentVariant, VariantService } from './variant.service';
 
 describe('VariantService', () => {
   const productFindFirst = jest.fn();
+  const productUpdate = jest.fn();
   const variantFindFirst = jest.fn();
   const variantFindMany = jest.fn();
   const variantCreate = jest.fn();
   const variantUpdate = jest.fn();
   const variantUpdateMany = jest.fn();
   const variantDelete = jest.fn();
+  const variantCount = jest.fn();
   const locationStockFindUnique = jest.fn();
+  const locationStockFindFirst = jest.fn();
   const locationStockUpsert = jest.fn();
   const locationStockAggregate = jest.fn();
   const locationStockDeleteMany = jest.fn();
@@ -27,7 +30,11 @@ describe('VariantService', () => {
   const orderLineCount = jest.fn();
 
   const prisma = {
-    product: { findFirst: productFindFirst },
+    $transaction: jest.fn((callback) => callback(prisma)),
+    product: {
+      findFirst: productFindFirst,
+      update: productUpdate,
+    },
     variant: {
       findFirst: variantFindFirst,
       findMany: variantFindMany,
@@ -35,8 +42,10 @@ describe('VariantService', () => {
       update: variantUpdate,
       updateMany: variantUpdateMany,
       delete: variantDelete,
+      count: variantCount,
     },
     locationStock: {
+      findFirst: locationStockFindFirst,
       findUnique: locationStockFindUnique,
       upsert: locationStockUpsert,
       aggregate: locationStockAggregate,
@@ -62,13 +71,17 @@ describe('VariantService', () => {
 
   beforeEach(() => {
     productFindFirst.mockReset();
+    productUpdate.mockReset();
     variantFindFirst.mockReset();
     variantFindMany.mockReset();
     variantCreate.mockReset();
     variantUpdate.mockReset();
     variantUpdateMany.mockReset();
     variantDelete.mockReset();
+    variantCount.mockReset();
     locationStockUpsert.mockReset();
+    locationStockFindFirst.mockReset();
+    locationStockFindFirst.mockResolvedValue(null);
     locationStockAggregate.mockReset();
     locationStockDeleteMany.mockReset();
     variantImageDeleteMany.mockReset();
@@ -77,8 +90,11 @@ describe('VariantService', () => {
     locationFindFirst.mockReset();
     orderLineCount.mockReset();
 
-    productFindFirst.mockResolvedValue({ id: 'product-1' });
+    productFindFirst.mockResolvedValue({ id: 'product-1', isActive: false });
+    productUpdate.mockResolvedValue({ id: 'product-1', isActive: true });
     variantFindFirst.mockResolvedValue(null);
+    variantCount.mockResolvedValue(1);
+    variantUpdateMany.mockResolvedValue({ count: 1 });
     locationStockAggregate.mockResolvedValue({ _sum: { stock: 10 } });
     locationFindFirst.mockResolvedValue({ id: 'loc-1' });
     orderLineCount.mockResolvedValue(0);
@@ -232,9 +248,54 @@ describe('VariantService', () => {
       ).rejects.toThrow(BadRequestException);
       expect(variantCreate).not.toHaveBeenCalled();
     });
+
+    it('automatically activates inactive parent product when creating an active variant', async () => {
+      productFindFirst.mockResolvedValue({ id: 'product-1', isActive: false });
+      variantCreate.mockImplementation(({ data }: any) =>
+        Promise.resolve({
+          ...data,
+          id: 'var-1',
+          isActive: true,
+          sellingPrice: 1000,
+          costPrice: null,
+          stock: 0,
+          product: {
+            id: 'product-1',
+            name: 'Product',
+            categoryId: null,
+            category: null,
+          },
+        }),
+      );
+
+      await service.create(admin, {
+        productId: 'product-1',
+        name: 'Variant 1',
+        sellingPrice: 1000,
+        isActive: true,
+      });
+
+      expect(productUpdate).toHaveBeenCalledWith({
+        where: { id: 'product-1' },
+        data: { isActive: true },
+      });
+    });
   });
 
   describe('update', () => {
+    it('rejects moving a sold variant to another product', async () => {
+      variantFindFirst.mockResolvedValueOnce({
+        id: 'var-1', productId: 'product-1',
+        name: 'Existing Variant', sku: 'SKU-1', barcode: null,
+      });
+      orderLineCount.mockResolvedValueOnce(1);
+
+      await expect(service.update(admin, 'var-1', {
+        productId: 'product-2',
+      })).rejects.toThrow(ConflictException);
+      expect(variantUpdateMany).not.toHaveBeenCalled();
+    });
+
     it('rejects variant update with stock when locationId is omitted without mutating variant (F32)', async () => {
       variantFindFirst.mockResolvedValueOnce({
         id: 'var-1',
@@ -289,6 +350,42 @@ describe('VariantService', () => {
           }),
         }),
       );
+    });
+
+    it('deactivates parent product when its last active variant is updated to inactive', async () => {
+      variantFindFirst.mockResolvedValue({
+        id: 'var-1',
+        productId: 'product-1',
+        businessId: 'biz-1',
+        name: 'Var 1',
+        sku: 'SKU-1',
+        barcode: null,
+        stock: 0,
+        sellingPrice: 100,
+        costPrice: 50,
+        isActive: true,
+      });
+      variantUpdate.mockResolvedValue({
+        id: 'var-1',
+        productId: 'product-1',
+        businessId: 'biz-1',
+        name: 'Var 1',
+        sku: 'SKU-1',
+        barcode: null,
+        stock: 0,
+        sellingPrice: 100,
+        costPrice: 50,
+        isActive: false,
+        product: { id: 'product-1', name: 'Parent', category: null },
+      });
+      variantCount.mockResolvedValue(0);
+
+      await service.update(admin, 'var-1', { isActive: false });
+
+      expect(productUpdate).toHaveBeenCalledWith({
+        where: { id: 'product-1' },
+        data: { isActive: false },
+      });
     });
   });
 
@@ -353,7 +450,7 @@ describe('VariantService', () => {
   });
 
   describe('remove', () => {
-    it('archives variant without renaming SKU or barcode', async () => {
+    it('rejects deleting a sold variant, including fully refunded sales', async () => {
       variantFindFirst.mockResolvedValue({
         id: 'var-1',
         sku: 'SKU-100',
@@ -361,27 +458,23 @@ describe('VariantService', () => {
       });
       orderLineCount.mockResolvedValue(3);
 
-      const res = await service.remove(admin, 'var-1');
-
-      expect(res.id).toBe('var-1');
-      expect(res.deletedAt).toBeInstanceOf(Date);
-      expect(variantUpdate).toHaveBeenCalledWith({
-        where: { id: 'var-1' },
-        data: {
-          isActive: false,
-          deletedAt: expect.any(Date),
-        },
+      await expect(service.remove(admin, 'var-1')).rejects.toThrow(
+        ConflictException,
+      );
+      expect(orderLineCount).toHaveBeenCalledWith({
+        where: { variantId: 'var-1' },
       });
+      expect(variantUpdate).not.toHaveBeenCalled();
       expect(variantDelete).not.toHaveBeenCalled();
-      expect(locationStockDeleteMany).not.toHaveBeenCalled();
-      expect(stockTransactionDeleteMany).not.toHaveBeenCalled();
     });
 
     it('archives variant without physical delete even when zero sales history exists', async () => {
       variantFindFirst.mockResolvedValue({
         id: 'var-fresh',
+        productId: 'product-1',
         sku: 'FRESH-1',
         barcode: null,
+        stock: 0,
       });
       orderLineCount.mockResolvedValue(0);
 
@@ -398,6 +491,37 @@ describe('VariantService', () => {
       });
       expect(locationStockDeleteMany).not.toHaveBeenCalled();
       expect(stockTransactionDeleteMany).not.toHaveBeenCalled();
+    });
+
+    it('deactivates parent product when the last active variant is removed', async () => {
+      variantFindFirst.mockResolvedValue({
+        id: 'var-last',
+        productId: 'product-1',
+        sku: 'LAST-1',
+        barcode: null,
+        stock: 0,
+      });
+      orderLineCount.mockResolvedValue(0);
+      variantCount.mockResolvedValue(0); // 0 remaining active variants
+
+      await service.remove(admin, 'var-last');
+
+      expect(productUpdate).toHaveBeenCalledWith({
+        where: { id: 'product-1' },
+        data: { isActive: false },
+      });
+    });
+
+    it('blocks deletion of an unsold variant if any branch has inventory', async () => {
+      variantFindFirst.mockResolvedValue({
+        id: 'var-stock', sku: 'STOCK-1', barcode: null, stock: 0,
+      });
+      locationStockFindFirst.mockResolvedValue({ id: 'branch-stock-1' });
+
+      await expect(service.remove(admin, 'var-stock')).rejects.toThrow(
+        ConflictException,
+      );
+      expect(variantUpdate).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException when removing a non-existent variant', async () => {

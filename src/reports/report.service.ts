@@ -259,53 +259,49 @@ export class ReportService {
     }
 
     const [total, orders] = await Promise.all([
-      this.prisma.order.count
-        ? this.prisma.order.count({ where })
-        : Promise.resolve(0),
-      this.prisma.order.findMany
-        ? this.prisma.order.findMany({
-            where,
+      this.prisma.order.count({ where }),
+      this.prisma.order.findMany({
+        where,
+        select: {
+          id: true,
+          invoiceNumber: true,
+          receiptNumber: true,
+          orderType: true,
+          status: true,
+          locationId: true,
+          location: {
             select: {
               id: true,
-              invoiceNumber: true,
-              receiptNumber: true,
-              orderType: true,
-              status: true,
-              locationId: true,
-              location: {
+              name: true,
+              address: true,
+              businessId: true,
+              business: {
                 select: {
                   id: true,
                   name: true,
-                  address: true,
-                  businessId: true,
-                  business: {
-                    select: {
-                      id: true,
-                      name: true,
-                    },
-                  },
                 },
               },
-              customerName: true,
-              customerPhone: true,
-              customerNumber: true,
-              totalAmount: true,
-              subtotal: true,
-              tenderedAmount: true,
-              changeDue: true,
-              paymentMethod: true,
-              createdAt: true,
-              occurredAt: true,
-              cashier: {
-                select: { id: true, fullName: true, publicId: true },
-              },
-              lines: { select: transactionLineSelect },
             },
-            orderBy: { occurredAt: 'desc' },
-            skip: (page - 1) * limit,
-            take: limit,
-          })
-        : Promise.resolve([]),
+          },
+          customerName: true,
+          customerPhone: true,
+          customerNumber: true,
+          totalAmount: true,
+          subtotal: true,
+          tenderedAmount: true,
+          changeDue: true,
+          paymentMethod: true,
+          createdAt: true,
+          occurredAt: true,
+          cashier: {
+            select: { id: true, fullName: true, publicId: true },
+          },
+          lines: { select: transactionLineSelect },
+        },
+        orderBy: { occurredAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
     ]);
 
     const items = (orders || []).map((order) => {
@@ -394,9 +390,7 @@ export class ReportService {
       this.netRevenue({ ...mine, occurredAt: today }),
       this.netRevenue({ ...mine, occurredAt: month }),
       this.unitsSold({ ...mine, occurredAt: today }),
-      this.prisma.order.count
-        ? this.prisma.order.count({ where: { ...mine, occurredAt: today } })
-        : Promise.resolve(0),
+      this.prisma.order.count({ where: { ...mine, occurredAt: today } }),
     ]);
 
     return {
@@ -502,78 +496,67 @@ export class ReportService {
       occurredAt,
     };
 
-    const lineDelegate =
-      (this.prisma as any).orderLine ?? (this.prisma as any).orderItem;
-
     const [periodRevenue, ordersCount, paymentGroups, lines, periodRefunds] =
       await Promise.all([
         this.netRevenue(periodOrderWhere),
-        this.prisma.order.count
-          ? this.prisma.order.count({
-              where: {
-                ...periodOrderWhere,
-                status: OrderStatus.PAID,
-              },
-            })
-          : Promise.resolve(0),
-        this.prisma.order.groupBy
-          ? this.prisma.order.groupBy({
-              by: ['paymentMethod'],
-              where: {
-                ...periodOrderWhere,
-                status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
-              },
-              _sum: { totalAmount: true },
-            })
-          : Promise.resolve([]),
-        lineDelegate?.findMany
-          ? lineDelegate.findMany({
-              where: {
-                order: {
-                  ...periodOrderWhere,
-                  status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
-                },
-              },
+        this.prisma.order.count({
+          where: {
+            ...periodOrderWhere,
+            status: OrderStatus.PAID,
+          },
+        }),
+        this.prisma.order.groupBy({
+          by: ['paymentMethod'],
+          where: {
+            ...periodOrderWhere,
+            status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
+          },
+          _sum: { totalAmount: true },
+        }),
+        this.prisma.orderLine.findMany({
+          where: {
+            order: {
+              ...periodOrderWhere,
+              status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
+            },
+          },
+          select: {
+            unitPrice: true,
+            unitCost: true,
+            categoryName: true,
+            subtotal: true,
+            quantity: true,
+            variantId: true,
+            refundItems: {
+              select: { quantity: true, refundAmount: true },
+            },
+            variant: {
               select: {
-                unitPrice: true,
-                unitCost: true,
-                categoryName: true,
-                subtotal: true,
-                quantity: true,
-                variantId: true,
-                refundItems: {
-                  select: { quantity: true, refundAmount: true },
-                },
-                variant: {
+                costPrice: true,
+                product: {
                   select: {
-                    costPrice: true,
-                    product: {
-                      select: {
-                        category: {
-                          select: { name: true },
-                        },
-                      },
+                    category: {
+                      select: { name: true },
                     },
                   },
                 },
               },
-            })
-          : Promise.resolve([]),
-        this.prisma.refund.findMany
-          ? this.prisma.refund.findMany({
-              where: {
-                order: {
-                  location: { businessId },
-                  ...(locationId ? { locationId } : {}),
-                },
-                createdAt: occurredAt,
-              },
-              select: {
-                totalRefund: true,
-                order: { select: { paymentMethod: true } },
-              },
-            })
-          : Promise.resolve([]),
+            },
+          },
+        }),
+        this.prisma.refund.findMany({
+          where: {
+            order: {
+              location: { businessId },
+              ...(locationId ? { locationId } : {}),
+            },
+            createdAt: occurredAt,
+          },
+          select: {
+            totalRefund: true,
+            order: { select: { paymentMethod: true } },
+          },
+        }),
       ]);
 
     const averageTicketValue =
@@ -690,9 +673,6 @@ export class ReportService {
     businessId: string,
     locationId?: string,
   ): Promise<RecentTicket[]> {
-    if (!this.prisma.order.findMany) {
-      return [];
-    }
 
     const orders = await this.prisma.order.findMany({
       where: {
@@ -767,28 +747,22 @@ export class ReportService {
       ...(locationId ? { locationId } : {}),
     };
     const [grouped, refunds, cashiers] = await Promise.all([
-      this.prisma.order.groupBy
-        ? this.prisma.order.groupBy({
-            by: ['cashierId'],
-            where,
-            _sum: { totalAmount: true },
-          })
-        : Promise.resolve([]),
-      this.prisma.refund.findMany
-        ? this.prisma.refund.findMany({
-            where: { order: where },
-            select: {
-              totalRefund: true,
-              order: { select: { cashierId: true } },
-            },
-          })
-        : Promise.resolve([]),
-      this.prisma.user.findMany
-        ? this.prisma.user.findMany({
-            where: userWhere,
-            select: { id: true, fullName: true, publicId: true },
-          })
-        : Promise.resolve([]),
+      this.prisma.order.groupBy({
+        by: ['cashierId'],
+        where,
+        _sum: { totalAmount: true },
+      }),
+      this.prisma.refund.findMany({
+        where: { order: where },
+        select: {
+          totalRefund: true,
+          order: { select: { cashierId: true } },
+        },
+      }),
+      this.prisma.user.findMany({
+        where: userWhere,
+        select: { id: true, fullName: true, publicId: true },
+      }),
     ]);
     const revenue = new Map(
       (grouped || []).map((row) => [row.cashierId, row._sum.totalAmount ?? 0]),
@@ -870,16 +844,15 @@ export class ReportService {
 
   async variantRevenue(
     actor: AccessTokenPayload,
+    query?: { businessId?: string },
   ): Promise<
     Array<{ variantLabel: string; totalRevenue: number; totalQuantity: number }>
   > {
-    const businessId = await this.resolveReportBusinessId(actor);
-    const lineDelegate = (this.prisma as any).orderLine;
-    if (!lineDelegate) {
-      return [];
-    }
-
-    const lines = await lineDelegate.findMany({
+    const businessId = await this.resolveReportBusinessId(
+      actor,
+      query?.businessId,
+    );
+    const lines = await this.prisma.orderLine.findMany({
       where: { order: { location: { businessId } } },
       select: {
         variantName: true,

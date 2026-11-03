@@ -230,6 +230,21 @@ export class VariantService {
             }
           }
 
+          // INVARIANT: If this newly created variant is active, unlock the parent product
+          // from draft to active.
+          if (created.isActive) {
+            const parentProduct = await tx.product.findFirst({
+              where: { id: dto.productId, businessId, deletedAt: null },
+              select: { id: true, isActive: true },
+            });
+            if (parentProduct && !parentProduct.isActive) {
+              await tx.product.update({
+                where: { id: parentProduct.id },
+                data: { isActive: true },
+              });
+            }
+          }
+
           return created;
         };
 
@@ -375,6 +390,16 @@ export class VariantService {
 
     if (dto.productId) {
       await this.assertProduct(businessId, dto.productId);
+      if (dto.productId !== current.productId) {
+        const sold = await this.prisma.orderLine.count({
+          where: { variantId, order: { location: { businessId } } },
+        });
+        if (sold > 0) {
+          throw new ConflictException(
+            'Cannot move a variant with sales history to another product',
+          );
+        }
+      }
     }
 
     const sku = dto.sku?.trim();
@@ -480,7 +505,7 @@ export class VariantService {
             });
           }
 
-          if (tx.stockTransaction?.create && branchDelta > 0) {
+          if (branchDelta > 0) {
             await tx.stockTransaction.create({
               data: {
                 variantId: current.id,
@@ -489,6 +514,36 @@ export class VariantService {
                 quantity: branchDelta,
                 notes: 'Variant metadata stock update',
               },
+            });
+          }
+        }
+
+        // INVARIANT: Synchronize parent product status with active variant availability
+        if (isActive === false) {
+          const otherActive = await tx.variant.count({
+            where: {
+              productId: current.productId,
+              businessId,
+              id: { not: current.id },
+              isActive: true,
+              deletedAt: null,
+            },
+          });
+          if (otherActive === 0) {
+            await tx.product.update({
+              where: { id: current.productId },
+              data: { isActive: false },
+            });
+          }
+        } else if (isActive === true) {
+          const parent = await tx.product.findFirst({
+            where: { id: current.productId, businessId, deletedAt: null },
+            select: { id: true, isActive: true },
+          });
+          if (parent && !parent.isActive) {
+            await tx.product.update({
+              where: { id: parent.id },
+              data: { isActive: true },
             });
           }
         }
@@ -669,7 +724,7 @@ export class VariantService {
       }
 
       // 3. Create stock transaction record
-      if (tx.stockTransaction?.create && txQty > 0) {
+      if (txQty > 0) {
         await tx.stockTransaction.create({
           data: {
             variantId: current.id,
@@ -703,23 +758,60 @@ export class VariantService {
     const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
     const variant = await this.prisma.variant.findFirst({
       where: { id: variantId, businessId, deletedAt: null },
-      select: { id: true, sku: true, barcode: true },
+      select: {
+        id: true,
+        sku: true,
+        barcode: true,
+        stock: true,
+        productId: true,
+      },
     });
 
     if (!variant) {
       throw new NotFoundException('Variant not found');
     }
 
-    // Archive variant without renaming SKU/barcode.
-    // Retain LocationStock, VariantImage, and StockTransaction history.
+    // Refunds still retain sales history. Archive only unused variants.
     const deletedAt = new Date();
-    await this.prisma.variant.update({
-      where: { id: variant.id },
-      data: {
-        isActive: false,
-        deletedAt,
-      },
-    });
+    await this.prisma.$transaction(async (tx) => {
+      const soldLines = await tx.orderLine.count({
+        where: { variantId: variant.id },
+      });
+      if (soldLines > 0) {
+        throw new ConflictException(
+          `Cannot delete variant "${variant.sku}" because it has sales history`,
+        );
+      }
+      const branchStock = await tx.locationStock.findFirst({
+        where: { variantId: variant.id, stock: { not: 0 } },
+        select: { id: true },
+      });
+      if (variant.stock !== 0 || branchStock) {
+        throw new ConflictException(
+          `Cannot delete variant "${variant.sku}" while it has non-zero inventory`,
+        );
+      }
+      await tx.variant.update({
+        where: { id: variant.id },
+        data: { isActive: false, deletedAt },
+      });
+
+      // INVARIANT: If this was the last active variant, deactivate the parent product.
+      const remainingActive = await tx.variant.count({
+        where: {
+          productId: variant.productId,
+          businessId,
+          isActive: true,
+          deletedAt: null,
+        },
+      });
+      if (remainingActive === 0) {
+        await tx.product.update({
+          where: { id: variant.productId },
+          data: { isActive: false },
+        });
+      }
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     return { id: variantId, deletedAt };
   }

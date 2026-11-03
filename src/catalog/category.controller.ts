@@ -171,7 +171,7 @@ export class CategoryController {
   @ApiOperation({
     summary: '[ADMIN] Delete category',
     description:
-      'Soft-deletes category and detaches linked products. Requires ADMIN role.',
+      'Soft-archives an unused category. Returns 409 if it has active products or catalog sales history. Requires ADMIN role.',
   })
   @ApiParam({ name: 'id', description: 'Category UUID' })
   @ApiQuery({

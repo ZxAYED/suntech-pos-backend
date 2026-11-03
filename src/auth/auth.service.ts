@@ -227,9 +227,7 @@ export class AuthService {
       throw new BadRequestException('Reset code is invalid');
     }
 
-    const secret =
-      this.configService.get<string>('JWT_RESET_SECRET') ??
-      this.configService.getOrThrow<string>('JWT_ACCESS_SECRET');
+    const secret = this.configService.getOrThrow<string>('JWT_RESET_SECRET');
     const resetToken = await this.jwtService.signAsync(
       {
         sub: user.id,
@@ -503,9 +501,7 @@ export class AuthService {
     token: string,
   ): Promise<PasswordResetTokenPayload> {
     try {
-      const secret =
-        this.configService.get<string>('JWT_RESET_SECRET') ??
-        this.configService.getOrThrow<string>('JWT_ACCESS_SECRET');
+      const secret = this.configService.getOrThrow<string>('JWT_RESET_SECRET');
       const payload =
         await this.jwtService.verifyAsync<PasswordResetTokenPayload>(token, {
           secret,

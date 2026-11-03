@@ -1,4 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProductService } from './product.service';
@@ -13,6 +17,7 @@ describe('ProductService', () => {
   const productCount = jest.fn();
   const categoryFindFirst = jest.fn();
   const variantFindMany = jest.fn();
+  const variantFindFirst = jest.fn();
   const variantUpdate = jest.fn();
   const variantUpdateMany = jest.fn();
   const variantCount = jest.fn();
@@ -33,6 +38,7 @@ describe('ProductService', () => {
       findFirst: categoryFindFirst,
     },
     variant: {
+      findFirst: variantFindFirst,
       count: variantCount,
       findMany: variantFindMany,
       update: variantUpdate,
@@ -60,6 +66,7 @@ describe('ProductService', () => {
     productCount.mockReset();
     categoryFindFirst.mockReset();
     variantFindMany.mockReset();
+    variantFindFirst.mockReset();
     variantUpdate.mockReset();
     variantUpdateMany.mockReset();
     variantCount.mockReset();
@@ -69,6 +76,7 @@ describe('ProductService', () => {
     productFindFirst.mockResolvedValue(null);
     categoryFindFirst.mockResolvedValue({ id: 'cat-1' });
     variantFindMany.mockResolvedValue([]);
+    variantFindFirst.mockResolvedValue(null);
     variantUpdate.mockResolvedValue({ id: 'var-1' });
     variantCount.mockResolvedValue(0);
     orderLineCount.mockResolvedValue(0);
@@ -106,7 +114,7 @@ describe('ProductService', () => {
       name: 'iPhone 15 Pro',
       description: 'Flagship phone',
       categoryId: 'cat-1',
-      isActive: true,
+      isActive: false,
       customAttributes: Prisma.DbNull,
     });
     expect(res.name).toBe('iPhone 15 Pro');
@@ -271,33 +279,42 @@ describe('ProductService', () => {
     expect(productUpdate).not.toHaveBeenCalled();
   });
 
-  it('archives product and linked variants without renaming human-facing name', async () => {
+  it('blocks deletion of a product that has sales history (even refunded)', async () => {
     productFindFirst.mockResolvedValue({
       id: 'prod-1',
       name: 'iPhone 15 Pro',
     });
-    variantCount.mockResolvedValue(2);
     orderLineCount.mockResolvedValue(4);
 
-    const res = await service.remove(admin, 'prod-1');
+    await expect(service.remove(admin, 'prod-1')).rejects.toThrow(
+      ConflictException,
+    );
+    expect(orderLineCount).toHaveBeenCalledWith({
+      where: { variant: { is: { productId: 'prod-1', businessId: 'biz-1' } } },
+    });
+    expect(variantUpdateMany).not.toHaveBeenCalled();
+    expect(productUpdate).not.toHaveBeenCalled();
+  });
 
-    expect(res.id).toBe('prod-1');
-    expect(res.deletedAt).toBeInstanceOf(Date);
-    expect(variantUpdateMany).toHaveBeenCalledWith({
-      where: { productId: 'prod-1', deletedAt: null },
-      data: {
-        isActive: false,
-        deletedAt: expect.any(Date),
-      },
+  it('prevents recategorizing a product after its first sale', async () => {
+    productFindFirst.mockResolvedValue({
+      id: 'prod-sold', name: 'Historical item', categoryId: 'cat-1',
     });
-    expect(productUpdate).toHaveBeenCalledWith({
-      where: { id: 'prod-1' },
-      data: {
-        isActive: false,
-        deletedAt: expect.any(Date),
-      },
-    });
-    expect(productDelete).not.toHaveBeenCalled();
+    orderLineCount.mockResolvedValue(1);
+
+    await expect(service.update(admin, 'prod-sold', {
+      categoryId: 'cat-2',
+    })).rejects.toThrow(ConflictException);
+    expect(productUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects deleting an unsold product with nonzero branch stock', async () => {
+    productFindFirst.mockResolvedValue({ id: 'p-stock', name: 'Stocked' });
+    variantFindFirst.mockResolvedValue({ id: 'v-stock' });
+
+    await expect(service.remove(admin, 'p-stock')).rejects.toThrow(ConflictException);
+    expect(variantUpdateMany).not.toHaveBeenCalled();
+    expect(productUpdate).not.toHaveBeenCalled();
   });
 
   it('archives product without physical delete even when zero sales history exists', async () => {
@@ -417,6 +434,64 @@ describe('ProductService', () => {
         value: 78400,
         currency: 'BDT',
       });
+    });
+  });
+
+  describe('Product activation invariant', () => {
+    it('rejects activating a product with zero active variants', async () => {
+      productFindFirst.mockResolvedValue({
+        id: 'prod-1',
+        name: 'Draft Phone',
+        isActive: false,
+        categoryId: null,
+      });
+      variantCount.mockResolvedValue(0);
+
+      await expect(
+        service.update(admin, 'prod-1', { isActive: true }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('allows activating a product when it has at least one active variant', async () => {
+      productFindFirst.mockResolvedValue({
+        id: 'prod-1',
+        name: 'Draft Phone',
+        isActive: false,
+        categoryId: null,
+        variants: [{ id: 'var-1', isActive: true, stock: 10 }],
+      });
+      variantCount.mockResolvedValue(1);
+
+      const updated = await service.update(admin, 'prod-1', { isActive: true });
+      expect(updated.id).toBe('prod-1');
+      expect(productUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ isActive: true }),
+        }),
+      );
+    });
+
+    it('allows editing metadata on an inactive draft product without requiring variants', async () => {
+      productFindFirst.mockResolvedValue({
+        id: 'prod-1',
+        name: 'Draft Phone',
+        description: 'Old description',
+        isActive: false,
+        categoryId: null,
+        variants: [],
+      });
+
+      const updated = await service.update(admin, 'prod-1', {
+        description: 'New updated description',
+      });
+      expect(updated.id).toBe('prod-1');
+      expect(productUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            description: 'New updated description',
+          }),
+        }),
+      );
     });
   });
 });

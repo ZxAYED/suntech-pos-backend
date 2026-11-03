@@ -1,9 +1,20 @@
 import { BadRequestException } from '@nestjs/common';
 
-const INT_MAX = 2_147_483_647;
+export const INT_MAX = 2_147_483_647;
 
 export function lineTotal(price: number, quantity: number): number {
-  if (quantity > 0 && price > Math.floor(INT_MAX / quantity)) {
+  if (
+    !Number.isSafeInteger(price) ||
+    price < 0 ||
+    price > INT_MAX ||
+    !Number.isSafeInteger(quantity) ||
+    quantity <= 0 ||
+    quantity > INT_MAX
+  ) {
+    throw new BadRequestException('Invalid price or quantity');
+  }
+
+  if (price > Math.floor(INT_MAX / quantity)) {
     throw new BadRequestException('Line total is too large');
   }
 
@@ -14,6 +25,10 @@ export function sumMoney(amounts: number[]): number {
   let total = 0;
 
   for (const amount of amounts) {
+    if (!Number.isSafeInteger(amount) || amount < 0 || amount > INT_MAX) {
+      throw new BadRequestException('Invalid monetary amount');
+    }
+
     if (amount > INT_MAX - total) {
       throw new BadRequestException('Order total is too large');
     }

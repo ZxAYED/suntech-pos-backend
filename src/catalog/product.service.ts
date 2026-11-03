@@ -186,12 +186,10 @@ export class ProductService {
       dto.attachments;
     const customAttributes = normalizeCustomAttributes(rawAttrs);
 
-    const isActive =
-      dto.isActive !== undefined
-        ? dto.isActive
-        : dto.status !== undefined
-          ? dto.status === 'ACTIVE'
-          : true;
+    // INVARIANT: A newly created product has 0 variants. Therefore, it is always created
+    // as an inactive draft (isActive: false). Activation occurs when an active variant is added
+    // or via update after a variant exists.
+    const isActive = false;
 
     try {
       const product = await this.prisma.product.create({
@@ -409,8 +407,24 @@ export class ProductService {
       admin,
       requestedBusinessId || dto.businessId,
     );
-    await this.findProduct(businessId, productId);
+    const currentProduct = await this.findProduct(businessId, productId);
     const name = dto.name?.trim();
+
+    // A sold item's historical product/category association must not change.
+    // Price/name/description/status updates remain allowed.
+    if (
+      dto.categoryId !== undefined &&
+      dto.categoryId !== currentProduct.categoryId
+    ) {
+      const sold = await this.prisma.orderLine.count({
+        where: { variant: { is: { productId, businessId } } },
+      });
+      if (sold > 0) {
+        throw new ConflictException(
+          'Cannot move a product with sales history to another category',
+        );
+      }
+    }
 
     if (name) {
       await this.assertNameAvailable(businessId, name, productId);
@@ -435,6 +449,23 @@ export class ProductService {
         : dto.status !== undefined
           ? dto.status === 'ACTIVE'
           : undefined;
+
+    // INVARIANT: An ACTIVE product cannot exist with 0 active, nondeleted variants.
+    if (isActive === true) {
+      const activeVariantsCount = await this.prisma.variant.count({
+        where: {
+          productId,
+          businessId,
+          isActive: true,
+          deletedAt: null,
+        },
+      });
+      if (activeVariantsCount === 0) {
+        throw new BadRequestException(
+          'Cannot activate a product with zero active variants',
+        );
+      }
+    }
 
     const data: Prisma.ProductUpdateManyMutationInput = {
       ...(name ? { name } : {}),
@@ -493,6 +524,36 @@ export class ProductService {
     // Archive product and its linked variants atomically.
     // Stock history, location stocks, and transaction ledgers remain intact.
     await this.prisma.$transaction(async (tx) => {
+      // Count even refunded orders and already-archived variants; a soft
+      // delete must not hide products that ever appeared on a catalog sale.
+      const soldLines = await tx.orderLine.count({
+        where: { variant: { is: { productId: product.id, businessId } } },
+      });
+      if (soldLines > 0) {
+        throw new ConflictException(
+          `Cannot delete product "${product.name}" because it has sales history`,
+        );
+      }
+
+      // Archiving stock-bearing variants hides inventory from normal screens.
+      // The Admin can instead deactivate the product or adjust branch stock to 0.
+      const stockedVariant = await tx.variant.findFirst({
+        where: {
+          productId: product.id,
+          businessId,
+          OR: [
+            { stock: { not: 0 } },
+            { locationStocks: { some: { stock: { not: 0 } } } },
+          ],
+        },
+        select: { id: true },
+      });
+      if (stockedVariant) {
+        throw new ConflictException(
+          `Cannot delete product "${product.name}" while it has non-zero inventory`,
+        );
+      }
+
       // Inactivate and archive linked variants to make them unsellable
       await tx.variant.updateMany({
         where: { productId: product.id, deletedAt: null },
@@ -510,7 +571,7 @@ export class ProductService {
           deletedAt,
         },
       });
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     return { id: productId, deletedAt };
   }

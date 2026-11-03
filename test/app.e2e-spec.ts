@@ -25,7 +25,10 @@ describe('AppController (e2e)', () => {
           expect.objectContaining({
             success: true,
             message: 'Service is running',
-            data: 'Hello World!',
+            data: expect.objectContaining({
+              name: 'SunTech POS Backend API',
+              status: 'online',
+            }),
           }),
         );
       });

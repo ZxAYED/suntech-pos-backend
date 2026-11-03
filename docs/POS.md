@@ -101,10 +101,13 @@
 
 - **Files:** [`src/orders/money.ts`](file:///d:/Project/SuntechPOS-backend/src/orders/money.ts), Prisma Schemas.
 - **Storage Standard:** All financial amounts are stored as whole integer BDT amounts (for example, `1500` means Tk 1,500; no paisa conversion).
-- **Guards:**
+- **Strict Validation Rules:**
   - Prevents IEEE-754 floating-point inaccuracies (e.g., `0.1 + 0.2 !== 0.3`).
-  - Overflow protection asserts amounts do not exceed PostgreSQL 32-bit signed integer limits (`INT_MAX = 2,147,483,647`).
-  - Negative value validation asserts monetary inputs (`amount`, `sellingPrice`, `startingAmount`, `unitPrice`) are non-negative.
+  - Strict type checking via `Number.isSafeInteger()`. Rejects non-integers, fractional values, `NaN`, and `+/-Infinity` with `400 Bad Request` (`INVALID_MONEY_INPUT`).
+  - Overflow protection: Every single money value and accumulated total is guarded against exceeding PostgreSQL 32-bit signed integer limits (`INT_MAX = 2,147,483,647`). Values exceeding `INT_MAX` are rejected with `400 Bad Request` (`MONEY_OVERFLOW`).
+  - Non-negative validation asserts monetary inputs (`amount`, `sellingPrice`, `startingAmount`, `unitPrice`) satisfy `>= 0`.
+  - Complimentary items with legal 0 BDT price are fully supported.
+  - Multi-line totals (`lineTotal`) and invoice aggregations (`sumMoney`) validate each component and resulting sum within safe bounds before database persistence.
 
 ### 1.8 Soft-Delete Mechanics, Safe Deletion & Collision-Free Code Reuse
 
@@ -511,7 +514,7 @@ erDiagram
   - Returns category tree with aggregated analytics: `productsCount`, `activeSkus`, `totalUnits`, `inventoryValue`, `salesCount`, `salesRevenue`.
 - `POST /catalog/categories` (`ADMIN`): Creates category. Unique on `name` within business.
 - `PATCH /catalog/categories/:id` (`ADMIN`): Updates name, description, and `isActive` toggle.
-- `DELETE /catalog/categories/:id` (`ADMIN`): Soft delete suffixes `name` and `slug` with `__del_${timestamp}`.
+- `DELETE /catalog/categories/:id` (`ADMIN`): Runs inside a `Serializable` transaction. Blocks with `409 Conflict` if the category contains active products or if any product (including archived) has historical order lines (sold items or refunded orders). On success, soft-deletes by suffixing `name` and `slug` with `__del_${timestamp}`.
 
 #### Products (`/catalog/products`)
 
@@ -520,8 +523,12 @@ erDiagram
   - Cashiers strictly filtered to `isActive: true`.
   - Returns products with nested active variants and category info.
 - `POST /catalog/products` (`ADMIN`): Creates product within business and assigns optional `categoryId`.
+  - **Draft Invariant:** Newly created products are initialized as non-sellable drafts (`isActive: false`) because zero variants exist upon creation. This aligns with the two-step frontend creation workflow (`createProduct` followed by `createVariant`) without creating sellable orphan products.
 - `PATCH /catalog/products/:id` (`ADMIN`): Updates product details including `isActive` toggle.
-- `DELETE /catalog/products/:id` (`ADMIN`): Soft delete suffixes `name` with `__del_${timestamp}`.
+  - **Activation Invariant:** Activating a product (`isActive: true`) requires at least one active, non-deleted variant; otherwise rejected with `400 Bad Request` (`"Cannot activate a product with zero active variants"`).
+  - **Draft Metadata Freedom:** Inactive draft products can have their name, description, category, and custom attributes freely edited without requiring variants.
+  - **Recategorization guard:** Changing `categoryId` is blocked with `409 Conflict` if the product has any historical order lines.
+- `DELETE /catalog/products/:id` (`ADMIN`): Runs inside a `Serializable` transaction. Blocks with `409 Conflict` if any variant has historical order lines (sold/refunded) or if any variant has nonzero global or branch inventory (`stock !== 0` or `locationStocks.some.stock !== 0`). Unsold zero-stock products and their variants are atomically soft-archived with `name` suffixed `__del_${timestamp}`.
 
 #### Variants & Inventory (`/catalog/variants`)
 
@@ -531,8 +538,12 @@ erDiagram
   - Calculates `marginPercent = Math.round(((sellingPrice - costPrice) / sellingPrice) * 100)`.
   - `lowStockOnly=true` strictly filters items with `stock <= 5`.
 - `POST /catalog/variants` (`ADMIN`): Creates variant with `sku` (auto-generated or custom), `barcode`, `sellingPrice`, `costPrice`, `stock`.
+  - **Auto-Activation Propagation:** Creating an active variant (`isActive: true` or default) for an inactive parent product automatically activates the parent product (`isActive: true`), seamlessly publishing the product for sales once sellable inventory exists.
 - `PATCH /catalog/variants/:id` (`ADMIN`): Updates pricing, barcode, stock, and `isActive` status.
-- `DELETE /catalog/variants/:id` (`ADMIN`): Soft delete suffixes `sku` and non-null `barcode` with `__del_${timestamp}`.
+  - **Auto-Deactivation Propagation:** If a variant is deactivated (`isActive: false`) and zero remaining active variants exist for the parent product, the parent product is automatically deactivated (`isActive: false`). If a variant is activated (`isActive: true`), the parent product is automatically activated if previously inactive.
+  - **Reparenting guard:** Moving a variant to a different `productId` is blocked with `409 Conflict` if the variant has any historical order lines.
+- `DELETE /catalog/variants/:id` (`ADMIN`): Runs inside a `Serializable` transaction. Blocks with `409 Conflict` if the variant has any historical order lines or if global or branch stock is nonzero (`variant.stock !== 0` or `locationStock.findFirst.stock !== 0`). On success, soft-deletes by suffixing `sku` and non-null `barcode` with `__del_${timestamp}`.
+  - **Auto-Deactivation Propagation:** If deleting a variant leaves the parent product with zero active variants, the parent product is automatically deactivated (`isActive: false`).
 
 ---
 
@@ -1012,6 +1023,21 @@ Each result is `{ clientOrderId, status:'ACCEPTED'|'DUPLICATE'|'REJECTED', order
 | GET | `/audit-logs` | ADMIN | required `businessId`; optional `locationId`, `action`, `entityType`, `entityId`, `actorId`, `from`, `to`, `page` (default 1), `limit` (default 20, max 100) |
 | GET | `/audit-logs/:id` | ADMIN | `businessId` required; returns only an authorized record |
 
+| GET | `/admin/dashboard/overview` | ADMIN | `businessId`, `locationId`; provides live branch KPIs and real-time cash drawer status |
+| GET | `/admin/dashboard/inventory-alerts` | ADMIN | `businessId`, `locationId`; out-of-stock and low-stock SKU critical alerts |
+| GET | `/admin/dashboard/recent-activity` | ADMIN | `businessId`, `locationId`, `limit?`; latest branch order tickets with customer and item summaries |
+
+#### Admin Dashboard Financial Metrics & Cash Drawer Separation
+
+`GET /admin/dashboard/overview` clearly separates overall business operating metrics from physical branch drawer cash:
+- **`kpis.netCashflowToday` (Business Operational Net Cashflow):**
+  - Formula: `todayNetSales - todayExpenseTotal`
+  - Where `todayNetSales = todayGrossSales (all channels) - todayRefundedAmount (all channels)`.
+  - Encompasses all payment methods (Cash, bKash, Nagad, Bank Transfer) minus all operational expenses incurred today.
+- **`drawer.expectedCashInDrawer` (Physical Drawer Cash):**
+  - Formula: `openingFloat + (COD sales - COD refunds) - advance withdrawals`
+  - Strictly isolates physical cash inside the register. Non-cash payments (bKash/Nagad/Bank) and non-cash expenses do NOT inflate physical drawer accountability.
+
 Audit list response data is `{ items, meta:{ page, limit, total, totalPages } }`, newest first with deterministic ID ordering. Offline mismatch metadata includes order/invoice, variant, location, cached and server prices, difference, quantity, device, occurrence time, and synchronization time. Passwords, tokens, OTPs, hashes, and secrets are redacted.
 
 ### Idempotency and caching
@@ -1026,17 +1052,25 @@ For a fresh database, apply the complete schema/migration history. For an existi
 
 All code commits must satisfy the following zero-error verification standard:
 
-1. **Prettier Formatting:**
+1. **Prisma Schema Validation & Migrations:**
    ```bash
-   npx prettier --check "src/**/*.ts" "docs/POS.md"
+   npx prisma validate --schema prisma/schema
+   npx prisma migrate status --schema prisma/schema
    ```
-2. **Jest Unit Test Suite:**
+   - _Status:_ Schema is valid. Database schema is up to date (all 7 migrations applied).
+2. **TypeScript Compilation:**
    ```bash
-   npm test
-   ```
-   - _Status:_ 22 / 22 test suites passing, 144 / 144 tests passing (100% green).
-3. **TypeScript Compilation:**
-   ```bash
+   npx tsc --noEmit
    npm run build
    ```
    - _Status:_ Clean build, zero compilation errors.
+3. **Jest Unit Test Suite:**
+   ```bash
+   npm test -- --runInBand
+   ```
+   - _Status:_ 32 / 32 test suites passing, 331 / 331 tests passing (100% green).
+4. **Jest End-to-End Suite:**
+   ```bash
+   npm run test:e2e -- --runInBand
+   ```
+   - _Status:_ 1 / 1 e2e test suite passing (100% green).

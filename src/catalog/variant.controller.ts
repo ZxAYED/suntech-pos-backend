@@ -334,7 +334,7 @@ export class VariantController {
   @Delete(':id')
   @ApiOperation({
     summary: '[ADMIN] Delete variant',
-    description: 'Soft-deletes a variant from catalog. Requires ADMIN role.',
+    description: 'Soft-archives only a variant with no catalog sales history and zero branch inventory; otherwise returns 409.',
   })
   @ApiParam({ name: 'id', description: 'Variant UUID' })
   @ApiQuery({

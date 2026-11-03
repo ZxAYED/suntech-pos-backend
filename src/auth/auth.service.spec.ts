@@ -46,6 +46,7 @@ describe('AuthService', () => {
       const values: Record<string, string> = {
         JWT_REFRESH_SECRET: 'refresh-secret',
         JWT_REFRESH_TTL: '30d',
+        JWT_RESET_SECRET: 'reset-secret',
       };
       const value = values[key];
       if (!value) {

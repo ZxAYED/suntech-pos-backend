@@ -503,40 +503,55 @@ export class CategoryService {
     requestedBusinessId?: string,
   ): Promise<{ id: string; deletedAt: Date }> {
     const businessId = await this.resolveBusinessId(admin, requestedBusinessId);
-    const category = await this.prisma.category.findFirst({
-      where: { id: categoryId, businessId, deletedAt: null },
-      select: { id: true, name: true, slug: true },
-    });
 
-    if (!category) {
-      throw new NotFoundException('Category not found');
-    }
+    return this.prisma.$transaction(async (tx) => {
+      const category = await tx.category.findFirst({
+        where: { id: categoryId, businessId, deletedAt: null },
+        select: { id: true, name: true, slug: true },
+      });
+      if (!category) {
+        throw new NotFoundException('Category not found');
+      }
 
-    // 1. Safeguard: Category CANNOT be deleted if it contains active products
-    const activeProductsCount = this.prisma.product?.count
-      ? await this.prisma.product.count({
-          where: { categoryId: category.id, deletedAt: null },
-        })
-      : 0;
+      const activeProductsCount = await tx.product.count({
+        where: { categoryId: category.id, businessId, deletedAt: null },
+      });
+      if (activeProductsCount > 0) {
+        throw new ConflictException(
+          `Cannot delete category "${category.name}" because it contains ${activeProductsCount} active product(s)`,
+        );
+      }
 
-    if (activeProductsCount > 0) {
-      throw new ConflictException(
-        `Cannot delete category "${category.name}" because it still contains ${activeProductsCount} active product(s). Please delete all products under this category first.`,
-      );
-    }
+      // Include archived products/variants: refunds do not erase sales history.
+      const historicalSales = await tx.orderLine.count({
+        where: {
+          variantId: { not: null },
+          order: { location: { businessId } },
+          OR: [
+            // Link to the current product category, including archived rows.
+            {
+              variant: {
+                is: { product: { is: { categoryId: category.id, businessId } } },
+              },
+            },
+            // Order-time snapshot also covers a previously moved product.
+            { categoryName: { equals: category.name, mode: 'insensitive' } },
+          ],
+        },
+      });
+      if (historicalSales > 0) {
+        throw new ConflictException(
+          `Cannot delete category "${category.name}" because it has sales history`,
+        );
+      }
 
-    // Archive category without renaming original human-facing name or slug.
-    // Preserves historical FK integrity and analytics.
-    const deletedAt = new Date();
-    await this.prisma.category.update({
-      where: { id: category.id },
-      data: {
-        isActive: false,
-        deletedAt,
-      },
-    });
-
-    return { id: categoryId, deletedAt };
+      const deletedAt = new Date();
+      await tx.category.update({
+        where: { id: category.id },
+        data: { isActive: false, deletedAt },
+      });
+      return { id: categoryId, deletedAt };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   private async findCategory(businessId: string, categoryId: string) {

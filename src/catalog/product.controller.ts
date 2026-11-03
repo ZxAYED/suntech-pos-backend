@@ -247,7 +247,7 @@ export class ProductController {
   @Delete(':id')
   @ApiOperation({
     summary: '[ADMIN] Delete product',
-    description: 'Soft-deletes product and its variants. Requires ADMIN role.',
+    description: 'Soft-archives only a product with no catalog sales history and zero inventory. Otherwise returns 409.',
   })
   @ApiParam({ name: 'id', description: 'Product UUID' })
   @ApiQuery({

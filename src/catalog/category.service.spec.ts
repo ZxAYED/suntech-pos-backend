@@ -15,6 +15,7 @@ describe('CategoryService', () => {
   const orderLineCount = jest.fn();
 
   const prisma = {
+    $transaction: jest.fn((callback) => callback(prisma)),
     category: {
       findFirst: categoryFindFirst,
       findMany: categoryFindMany,
@@ -220,6 +221,29 @@ describe('CategoryService', () => {
     );
     expect(categoryUpdate).not.toHaveBeenCalled();
     expect(categoryDelete).not.toHaveBeenCalled();
+  });
+
+  it('rejects deletion of a category with sold archived products', async () => {
+    categoryFindFirst.mockResolvedValue({
+      id: 'cat-sold', name: 'Sold Category', slug: 'sold-category',
+    });
+    productCount.mockResolvedValue(0);
+    orderLineCount.mockResolvedValue(1);
+
+    await expect(service.remove(admin, 'cat-sold')).rejects.toThrow(
+      ConflictException,
+    );
+    expect(orderLineCount).toHaveBeenCalledWith({
+      where: {
+        variantId: { not: null },
+        order: { location: { businessId: 'biz-1' } },
+        OR: [
+          { variant: { is: { product: { is: { categoryId: 'cat-sold', businessId: 'biz-1' } } } } },
+          { categoryName: { equals: 'Sold Category', mode: 'insensitive' } },
+        ],
+      },
+    });
+    expect(categoryUpdate).not.toHaveBeenCalled();
   });
 
   it('archives category without renaming human-facing name or slug', async () => {
