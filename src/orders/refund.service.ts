@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  AccountStatus,
   OrderStatus,
   PaymentMethod,
   Prisma,
@@ -14,10 +15,14 @@ import {
   StockTransactionType,
 } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
+import { getDhakaDayRange } from '../common/utils/timezone.util';
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateRefundDto } from './dto/create-refund.dto';
 import { lineTotal, sumMoney } from './money';
+import { readAtomicReplay, type AtomicReceiptContext, type AtomicStoredResponse } from '../common/interceptors/atomic-idempotency';
+import { toStoredJson } from '../common/interceptors/to-stored-json';
+import { sanitizeResponseData } from '../common/interceptors/sanitize-response-data';
 import { RefundStatus, refundStatus } from './refund-status';
 
 const refundItemSelect = {
@@ -31,6 +36,7 @@ const refundSelect = {
   id: true,
   orderId: true,
   processedById: true,
+  payoutShiftId: true,
   totalRefund: true,
   reason: true,
   createdAt: true,
@@ -87,6 +93,66 @@ export class RefundService {
     }
   }
 
+  /** Keep the original route/key/envelope. The refund, drawer/stock writes and
+   * successful HTTP result are committed together. Legacy pending keys remain
+   * locked because their pre-upgrade outcomes cannot be inferred. */
+  async createAtomic(
+    actor: AccessTokenPayload,
+    orderId: string,
+    dto: CreateRefundDto,
+    context: AtomicReceiptContext,
+  ): Promise<AtomicStoredResponse> {
+    const businessId = requireBusinessId(actor, dto.businessId);
+    if (actor.role === Role.CASHIER && !actor.locationId) {
+      throw new ForbiddenException('Cashier account must be assigned to an active business and branch location');
+    }
+    const locationId = actor.role === Role.CASHIER ? actor.locationId : undefined;
+    const where = { scopeId_key: { scopeId: context.scopeId, key: context.key } };
+    // Check current resource access even for a replay; an old successful response
+    // is not permission to access a different branch or a transferred business.
+    const checkScope = async (tx: Prisma.TransactionClient) => {
+      const user = await tx.user.findFirst({ where: {
+        id: actor.sub, role: actor.role, status: AccountStatus.ACTIVE, deletedAt: null,
+        ...(actor.role === Role.CASHIER ? { businessId, locationId, isLoggedIn: true, sessionId: actor.sessionId ?? '__invalid_session__' } : {}),
+      }, select: { id: true } });
+      if (!user) throw new ForbiddenException('Refund authority is no longer active');
+      const order = await tx.order.findFirst({ where: {
+        id: orderId, location: { businessId, deletedAt: null, business: { deletedAt: null, ...(actor.role === Role.ADMIN ? { ownerId: actor.sub } : {}) } },
+        ...(locationId ? { locationId } : {}),
+      }, select: { id: true } });
+      if (!order) throw new NotFoundException('Order not found');
+    };
+    try {
+      return await this.prisma.$transaction(async tx => {
+        await checkScope(tx);
+        const existing = await tx.idempotencyRecord.findUnique({ where });
+        if (existing) return readAtomicReplay(existing, context);
+        await tx.idempotencyRecord.create({ data: {
+          scopeId: context.scopeId, key: context.key, path: context.path,
+          requestHash: context.requestHash, statusCode: 0,
+          responseBody: { pending: true }, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        } });
+        const refund = await this.createWithin(tx, actor.sub, businessId, orderId, dto, locationId, actor.role);
+        const responseBody = toStoredJson({ success: true, message: context.message, data: sanitizeResponseData(refund, actor.role === Role.CASHIER), timestamp: new Date().toISOString() });
+        const saved = await tx.idempotencyRecord.update({ where, data: { statusCode: context.statusCode, responseBody } });
+        return { statusCode: saved.statusCode, responseBody: saved.responseBody };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (cause) {
+      if (cause instanceof Prisma.PrismaClientKnownRequestError && ['P2002', 'P2034'].includes(cause.code)) {
+        // Transaction rolled back. A concurrent winner may now have a durable
+        // receipt. Re-read under the original scope, never create another key.
+        const replay = await this.prisma.$transaction(async tx => {
+          await checkScope(tx);
+          const row = await tx.idempotencyRecord.findUnique({ where });
+          return row ? readAtomicReplay(row, context) : null;
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        if (replay) return replay;
+        throw new ConflictException({ code: 'REFUND_RETRY_SAME_ID', message: 'Concurrent refund processing. Retry the original refund without paying again.' });
+      }
+      throw cause;
+    }
+  }
+
   async createWithin(
     tx: Prisma.TransactionClient,
     actorId: string,
@@ -95,6 +161,7 @@ export class RefundService {
     dto: CreateRefundDto,
     cashierLocationId?: string | null,
     actorRole?: Role,
+    options?: { explicitShift: boolean; occurredAt: Date },
   ): Promise<PresentedRefund> {
     const existingOrder = tx.order?.findUnique
       ? await tx.order.findUnique({
@@ -149,6 +216,7 @@ export class RefundService {
         invoiceNumber: true,
         receiptNumber: true,
         shiftId: true,
+        status: true,
         paymentMethod: true,
         lines: {
           select: {
@@ -164,6 +232,10 @@ export class RefundService {
 
     if (!order) {
       throw new NotFoundException('Order not found');
+    }
+
+    if (order.status === OrderStatus.PENDING) {
+      throw new BadRequestException('Cannot refund an unpaid order');
     }
 
     const orderLines =
@@ -269,13 +341,14 @@ export class RefundService {
     let payoutShiftId: string | null = null;
     if (dto.payoutShiftId) {
       if (tx.shiftSession?.findFirst) {
-        const isCashier = Boolean(cashierLocationId) || actorRole === Role.CASHIER;
+        const isCashier = actorRole === Role.CASHIER || (actorRole === undefined && Boolean(cashierLocationId));
         const specifiedShift = await tx.shiftSession.findFirst({
           where: {
             id: dto.payoutShiftId,
             businessId,
             ...(order.locationId ? { locationId: order.locationId } : {}),
             status: ShiftStatus.OPEN,
+            ...(options ? { openedAt: { lte: options.occurredAt } } : {}),
           },
           select: { id: true, cashierId: true },
         });
@@ -291,13 +364,16 @@ export class RefundService {
         }
         payoutShiftId = specifiedShift.id;
       }
-    } else if (order.locationId && tx.shiftSession?.findFirst) {
+    } else if (!options?.explicitShift && order.locationId && tx.shiftSession?.findFirst) {
+      const { start: startOfToday, nextStart: nextDayStart } =
+        getDhakaDayRange();
       const activeShift = await tx.shiftSession.findFirst({
         where: {
           locationId: order.locationId,
           businessId,
           cashierId: actorId,
           status: ShiftStatus.OPEN,
+          openedAt: { gte: startOfToday, lt: nextDayStart },
         },
         select: { id: true },
       });
@@ -309,6 +385,7 @@ export class RefundService {
     const refund = await tx.refund.create({
       data: {
         orderId: order.id,
+        ...(options ? { createdAt: options.occurredAt } : {}),
         processedById: actorId,
         totalRefund: sumMoney(requested.map((line) => line.refundAmount)),
         reason: dto.reason?.trim() || null,

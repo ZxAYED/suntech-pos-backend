@@ -5,6 +5,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -24,6 +25,8 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateRefundDto } from './dto/create-refund.dto';
 import { RefundService } from './refund.service';
+import type { Request } from 'express';
+import { requireAtomicReceipt } from '../common/interceptors/atomic-idempotency';
 
 @ApiTags('Orders - Refunds')
 @ApiBearerAuth()
@@ -54,14 +57,17 @@ export class RefundController {
     description: 'Invalid refund quantities or order not refundable',
   })
   @ApiResponse({ status: 404, description: 'Order not found' })
-  @Idempotent()
+  @Idempotent({ atomic: true })
   @HttpCode(HttpStatus.CREATED)
   @ResponseMessage('Refund completed')
-  create(
+  async create(
     @CurrentUser() actor: AccessTokenPayload,
     @Param('id') id: string,
     @Body() dto: CreateRefundDto,
+    @Req() request: Request,
   ) {
-    return this.refunds.create(actor, id, dto);
+    const receipt = requireAtomicReceipt(request);
+    receipt.response = await this.refunds.createAtomic(actor, id, dto, receipt);
+    return receipt.response.responseBody;
   }
 }

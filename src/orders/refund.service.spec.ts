@@ -84,6 +84,10 @@ describe('RefundService', () => {
         businessId: 'biz-1',
         cashierId: 'cashier-2',
         status: ShiftStatus.OPEN,
+        openedAt: {
+          gte: expect.any(Date),
+          lt: expect.any(Date),
+        },
       },
       select: { id: true },
     });
