@@ -2,6 +2,15 @@ import { ForbiddenException } from '@nestjs/common';
 import { PaymentMethod, Prisma, Role } from '@prisma/client';
 import { OfflineService } from './offline.service';
 
+jest.mock('@nestjs/config', () => ({
+  ConfigService: class ConfigService {
+    get(key: string) {
+      if (key === 'OFFLINE_MAX_FUTURE_SKEW_SECONDS') return 300;
+      return undefined;
+    }
+  },
+}));
+
 describe('OfflineService', () => {
   const userFindFirst = jest.fn();
   const businessFindFirst = jest.fn();
@@ -72,6 +81,8 @@ describe('OfflineService', () => {
         where: expect.objectContaining({ id: 'loc-1', businessId: 'biz-1' }),
       }),
     );
+    expect(snapshot.businessTimezone).toBe('Asia/Dhaka');
+    expect(snapshot.maxFutureSkewSeconds).toBe(300);
     expect(snapshot.user).toEqual(
       expect.objectContaining({ businessId: 'biz-1', locationId: 'loc-1' }),
     );
