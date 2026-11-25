@@ -623,11 +623,31 @@ erDiagram
 #### `POST /orders/sync`
 
 - **Access:** `@Roles(Role.ADMIN, Role.CASHIER)`. No `Idempotency-Key` is required.
-- **Behavior:** Sequentially processes up to 100 queued orders, each in its own database transaction. Results remain in submitted order and use `ACCEPTED`, `DUPLICATE`, or `REJECTED`.
-- **Durable identity:** The PWA UUID v4 `clientOrderId` is permanently unique. A retry returns the existing server order as `DUPLICATE`, including after the ordinary 24-hour HTTP idempotency window.
-- **Offline catalog rules:** Preserves the cached price actually charged, audits `OFFLINE_PRICE_MISMATCH`, permits negative inventory, and audits `LOW_STOCK_AFTER_SALE` at branch stock `<= 5`. A deleted variant is accepted from cached line snapshots, skips stock mutation, and emits `VARIANT_UNAVAILABLE`.
-- **Dates:** `occurredAt` is the actual client checkout time used by order filters, dashboards, and sales exports. `createdAt` remains the backend synchronization timestamp.
-- **Payment:** `tenderedAmount` must cover the full total. Due and partial-payment orders are not created.
+- **Behavior:** Sequentially processes up to 100 queued offline orders, each in its own database transaction. Results remain in submitted order and use `ACCEPTED`, `DUPLICATE`, or `REJECTED`.
+- **Durable Identity & Tamper-Proof Replay:** Uses UUID v4 `clientOrderId` and canonical SHA-256 payload hashing (`Order.syncPayloadHash`).
+  - Identical retry returns the existing server order as `DUPLICATE` with original stored `occurredAt`, `createdAt`, and historical warnings.
+  - Modified payload (altered line items, price, tender, or timestamps) returns `REJECTED` with machine-readable `errorCode: 'SYNC_PAYLOAD_MISMATCH'`.
+  - Context mismatch (different tenant or cashier) returns `REJECTED` with machine-readable `errorCode: 'SYNC_IDENTITY_CONFLICT'`.
+  - Legacy orders (created before hashing) return `REJECTED` with `errorCode: 'LEGACY_SYNC_REPLAY_REVIEW_REQUIRED'` until confirmed by an Admin via `POST /orders/:id/confirm-legacy-sync`. Once confirmed, replay returns `DUPLICATE` with warning `LEGACY_REPLAY_ADMIN_CONFIRMED`.
+- **Timestamp & Skew Policy:**
+  - `occurredAt` requires strict ISO 8601 with explicit timezone offset (`Z` or `+HH:MM`/`-HH:MM`). Missing offset is rejected with `errorCode: 'TIMESTAMP_TIMEZONE_REQUIRED'`.
+  - Malformed or impossible calendar dates (e.g., Feb 30 or Feb 29 non-leap) are rejected with `errorCode: 'TIMESTAMP_INVALID'`.
+  - Clock skew is governed by `OFFLINE_MAX_FUTURE_SKEW_SECONDS` (default 300 seconds). Future timestamps `<= 300s` are accepted with warning `CLOCK_SKEW_TOLERATED`. Future timestamps `> 300s` are rejected with `errorCode: 'TIMESTAMP_FUTURE_REVIEW_REQUIRED'`.
+  - No past-age rejection cutoff: valid offline sales from days or weeks ago are processed without backdating or data loss.
+- **Offline Catalog & Stock Rules:** Preserves the cached price actually charged, audits `OFFLINE_PRICE_MISMATCH`, permits negative inventory, and audits `LOW_STOCK_AFTER_SALE` at branch stock `<= 5`. A deleted variant is accepted from cached line snapshots, skips stock mutation, and emits `VARIANT_UNAVAILABLE`.
+- **Response Shape:** Returns top-level `serverTime` (ISO 8601 UTC string) and per-order `results` array containing `status`, `clientOrderId`, `orderId`, `invoiceNumber`, `occurredAt`, `createdAt`, `warnings`, `error`, `errorCode`.
+
+#### `POST /orders/:id/confirm-legacy-sync`
+
+- **Access:** `@Roles(Role.ADMIN, Role.SUPER_ADMIN)`.
+- **Body:** `{ deviceId: string, reason: string, order: SyncOrderItemDto }`.
+- **Behavior:** Administratively reviews and confirms an unhashed legacy offline order, creating a permanent audit trail (`action: 'LEGACY_SYNC_REPLAY_CONFIRMED'`) and unblocking subsequent client replays as `DUPLICATE` with `LEGACY_REPLAY_ADMIN_CONFIRMED`. Rejecting requests with material mismatches in clientOrderId, totalAmount, paymentMethod, or line count.
+
+#### `GET /offline/bootstrap`
+
+- **Access:** `@Roles(Role.ADMIN, Role.CASHIER)`.
+- **Behavior:** Returns a transactionally consistent snapshot of the JWT-scoped cashier, business, location, active catalog, variant selling prices, branch stock, image URLs, payment methods, and server/snapshot timestamps for IndexedDB storage.
+- **Timezone Metadata:** Returns `businessTimezone: 'Asia/Dhaka'`, `serverTime`, `snapshotGeneratedAt`, and `maxFutureSkewSeconds` (configured skew tolerance in seconds).
 
 #### `GET /orders`
 
