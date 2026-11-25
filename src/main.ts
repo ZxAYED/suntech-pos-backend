@@ -1,8 +1,10 @@
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
+import { json, type NextFunction, type Request, type Response } from 'express';
 import { AppModule } from './app.module';
 
 export function isAllowedCorsOrigin(
@@ -13,7 +15,22 @@ export function isAllowedCorsOrigin(
 }
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // 100 saved events include their original signed permissions. The Express
+  // 100 KB default rejects a normal sync batch before it reaches the controller.
+  // Keep the existing default limit for all other routes. The named wrapper
+  // prevents Nest from mistaking this scoped parser for its default jsonParser.
+  const syncParser = json({ limit: '4mb' });
+  app.use(
+    '/api/v1/orders/sync-v2',
+    function parseLocalFirstBatch(
+      request: Request,
+      response: Response,
+      next: NextFunction,
+    ) {
+      syncParser(request, response, next);
+    },
+  );
   const configService = app.get(ConfigService);
 
   const configuredFrontendUrl = configService.get<string>('FRONTEND_URL');
@@ -83,7 +100,7 @@ Endpoints are tagged with required access levels in brackets:
   });
 
   const port = Number(configService.getOrThrow<string>('PORT'));
-  await app.listen(port);
+  await app.listen(port, '0.0.0.0');
   console.log(`🚀 SunTech POS Backend is running on: http://localhost:${port}`);
   console.log(
     `📚 Swagger API Docs available at: http://localhost:${port}/api/docs`,
