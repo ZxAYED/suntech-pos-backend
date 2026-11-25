@@ -42,7 +42,7 @@ export class ShiftController {
   @ApiOperation({
     summary: '[ADMIN, CASHIER] Open a new register shift',
     description:
-      'Opens a register shift with starting cash float. If a shift was left open on a previous calendar day (Dhaka timezone), set autoClosePrevious=true to reconcile and auto-close it. Accessible by CASHIER and ADMIN.',
+      'Opens a register shift with starting cash float. Automatically closes any older open shifts owned by the cashier from previous calendar days (Asia/Dhaka) with count pending and preserved notes. Opening a second shift on the same Dhaka day is rejected with 409.',
   })
   @ApiResponse({ status: 201, description: 'Shift opened successfully' })
   @ApiResponse({
@@ -54,11 +54,9 @@ export class ShiftController {
     description: 'Forbidden - requires CASHIER or ADMIN role',
   })
   @ApiResponse({
-    status: 400,
-    description:
-      'Previous shift was left open on a previous day and requires auto-close confirmation, or an active shift already exists today',
+    status: 409,
+    description: 'A shift has already been opened today for this cashier',
   })
-  @ApiResponse({ status: 409, description: 'Conflict opening shift' })
   @Roles(Role.CASHIER, Role.ADMIN)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
@@ -165,7 +163,7 @@ export class ShiftController {
   @ApiOperation({
     summary: '[ADMIN, CASHIER] List shift history with filters',
     description:
-      'Paginated shift session audit list. Cashier is restricted to own shifts; Admin can filter by location. Accessible by CASHIER and ADMIN.',
+      'Paginated shift session audit list. Cashier is restricted to own shifts; Admin can filter by location, cashierId, and Dhaka date range (fromDate, toDate). Each item returns derived isOverdue and closingCashNotProvided flags.',
   })
   @ApiQuery({
     name: 'locationId',
@@ -178,6 +176,24 @@ export class ShiftController {
     enum: ShiftStatus,
     enumName: 'ShiftStatus',
     description: 'Filter by shift status',
+  })
+  @ApiQuery({
+    name: 'fromDate',
+    required: false,
+    description: 'Filter shifts opened on or after date (YYYY-MM-DD in Asia/Dhaka)',
+    example: '2026-11-01',
+  })
+  @ApiQuery({
+    name: 'toDate',
+    required: false,
+    description: 'Filter shifts opened on or before date (YYYY-MM-DD in Asia/Dhaka)',
+    example: '2026-11-06',
+  })
+  @ApiQuery({
+    name: 'cashierId',
+    required: false,
+    description: 'Filter shifts by cashier UUID (Admin only)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
   })
   @ApiQuery({
     name: 'page',

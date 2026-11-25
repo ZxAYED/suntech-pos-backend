@@ -15,6 +15,12 @@ import {
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { requireBusinessId } from '../hr/require-business-id';
 import { resolveLocationScope } from '../common/utils/location-scope';
+import {
+  getDhakaDayRange,
+  getDhakaStartOfDay,
+  isShiftOverdue,
+  parseDhakaDateString,
+} from '../common/utils/timezone.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloseShiftDto } from './dto/close-shift.dto';
 import { ListShiftsQueryDto } from './dto/list-shifts.query';
@@ -32,6 +38,7 @@ const shiftSelect = {
   cashSales: true,
   advancesOut: true,
   notes: true,
+  autoCloseReason: true,
   status: true,
   openedAt: true,
   closedAt: true,
@@ -54,6 +61,9 @@ export type PresentedShift = Prisma.ShiftSessionGetPayload<{
   select: typeof shiftSelect;
 }> & {
   autoClosedPreviousShiftId?: string;
+  autoClosedPreviousShiftIds?: string[];
+  isOverdue?: boolean;
+  closingCashNotProvided?: boolean;
 };
 
 export interface ActiveShiftDetails extends PresentedShift {
@@ -77,8 +87,7 @@ export function isPreviousCalendarDay(
   if (!openedAt) return false;
   const dateObj = openedAt instanceof Date ? openedAt : new Date(openedAt);
   if (isNaN(dateObj.getTime())) return false;
-  const dtf = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' });
-  return dtf.format(dateObj) < dtf.format(now);
+  return dateObj.getTime() < getDhakaStartOfDay(now).getTime();
 }
 
 @Injectable()
@@ -94,6 +103,9 @@ export class ShiftService {
         ? requireBusinessId(actor, dto.businessId)
         : requireBusinessId(actor);
     const locationId = this.resolveOpenLocationId(actor, dto);
+    const operationTime = new Date();
+    const { start: startOfToday, nextStart: nextDayStart } =
+      getDhakaDayRange(operationTime);
 
     try {
       return await this.prisma.$transaction(
@@ -125,34 +137,36 @@ export class ShiftService {
             );
           }
 
-          const openShift = await tx.shiftSession.findFirst({
+          const sameDayShift = await tx.shiftSession.findFirst({
+            where: {
+              cashierId: actor.sub,
+              openedAt: {
+                gte: startOfToday,
+                lt: nextDayStart,
+              },
+            },
+            select: { id: true, status: true, openedAt: true },
+          });
+
+          if (sameDayShift) {
+            throw new ConflictException(ALREADY_OPEN_TODAY);
+          }
+
+          const olderOpenShifts = await tx.shiftSession.findMany({
             where: {
               businessId,
               cashierId: actor.sub,
               status: ShiftStatus.OPEN,
+              openedAt: { lt: startOfToday },
             },
-            select: { id: true, startingAmount: true, openedAt: true },
+            select: { id: true, startingAmount: true },
           });
 
-          let autoClosedPreviousShiftId: string | undefined;
-
-          if (openShift) {
-            const isStale = isPreviousCalendarDay(openShift.openedAt);
-
-            if (!isStale) {
-              throw new ConflictException(ALREADY_OPEN_TODAY);
-            }
-
-            if (dto.autoClosePrevious !== true) {
-              throw new BadRequestException(
-                'A previous-day shift is still open; set autoClosePrevious=true to reconcile and close it',
-              );
-            }
-
+          for (const oldShift of olderOpenShifts) {
             const refundPromise = tx.refund?.aggregate
               ? tx.refund.aggregate({
                   where: {
-                    payoutShiftId: openShift.id,
+                    payoutShiftId: oldShift.id,
                     order: {
                       paymentMethod: PaymentMethod.COD,
                     },
@@ -165,7 +179,7 @@ export class ShiftService {
               await Promise.all([
                 tx.order.aggregate({
                   where: {
-                    shiftId: openShift.id,
+                    shiftId: oldShift.id,
                     paymentMethod: PaymentMethod.COD,
                     status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
                   },
@@ -173,7 +187,7 @@ export class ShiftService {
                 }),
                 tx.employeeAdvance.aggregate({
                   where: {
-                    shiftId: openShift.id,
+                    shiftId: oldShift.id,
                     businessId,
                     deletedAt: null,
                   },
@@ -187,10 +201,10 @@ export class ShiftService {
             const cashSales = rawCashSales - codRefunds;
             const advancesOut = advancesAgg?._sum?.amount ?? 0;
             const expectedAmount =
-              (openShift.startingAmount ?? 0) + cashSales - advancesOut;
+              (oldShift.startingAmount ?? 0) + cashSales - advancesOut;
 
             await tx.shiftSession.update({
-              where: { id: openShift.id },
+              where: { id: oldShift.id },
               data: {
                 status: ShiftStatus.CLOSED,
                 closingAmount: null,
@@ -198,14 +212,17 @@ export class ShiftService {
                 variance: null,
                 cashSales,
                 advancesOut,
-                notes:
-                  'Auto-closed: previous shift was left open before new shift start (COUNT_PENDING)',
-                closedAt: new Date(),
+                autoCloseReason: 'AUTO_CLOSED_PRIOR_DAY_UNCOUNTED',
+                closedAt: operationTime,
               },
             });
-
-            autoClosedPreviousShiftId = openShift.id;
           }
+
+          const autoClosedPreviousShiftIds = olderOpenShifts.map((s) => s.id);
+          const autoClosedPreviousShiftId =
+            autoClosedPreviousShiftIds.length === 1
+              ? autoClosedPreviousShiftIds[0]
+              : undefined;
 
           const created = await tx.shiftSession.create({
             data: {
@@ -214,13 +231,19 @@ export class ShiftService {
               cashierId: actor.sub,
               startingAmount: dto.startingAmount,
               status: ShiftStatus.OPEN,
+              openedAt: operationTime,
             },
             select: shiftSelect,
           });
 
           return {
             ...created,
+            isOverdue: false,
+            closingCashNotProvided: false,
             ...(autoClosedPreviousShiftId ? { autoClosedPreviousShiftId } : {}),
+            ...(autoClosedPreviousShiftIds.length > 0
+              ? { autoClosedPreviousShiftIds }
+              : {}),
           };
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -303,6 +326,8 @@ export class ShiftService {
 
     return {
       ...shift,
+      isOverdue: isShiftOverdue(shift.openedAt, shift.status),
+      closingCashNotProvided: false,
       openingFloat: shift.startingAmount,
       cashSales,
       advancesOut,
@@ -321,6 +346,7 @@ export class ShiftService {
       cashier.role === Role.ADMIN
         ? requireBusinessId(cashier, dto.businessId)
         : requireBusinessId(cashier);
+    const operationTime = new Date();
 
     const executeClose = async (tx: Prisma.TransactionClient) => {
       const shift = await tx.shiftSession.findFirst({
@@ -331,7 +357,7 @@ export class ShiftService {
           businessId,
           ...(cashier.role === Role.CASHIER ? { cashierId: cashier.sub } : {}),
         },
-        select: { id: true, startingAmount: true, status: true },
+        select: { id: true, startingAmount: true, status: true, notes: true },
       });
 
       if (!shift) {
@@ -351,6 +377,12 @@ export class ShiftService {
       const expectedAmount = shift.startingAmount + cashSales - advancesOut;
       const variance = dto.closingAmount - expectedAmount;
 
+      const closingNotes = dto.notes?.trim()
+        ? shift.notes
+          ? `${shift.notes}\n[Closing Note]: ${dto.notes.trim()}`
+          : dto.notes.trim()
+        : shift.notes ?? null;
+
       const closed = await tx.shiftSession.updateMany({
         where: {
           id: shift.id,
@@ -364,8 +396,8 @@ export class ShiftService {
           variance,
           cashSales,
           advancesOut,
-          notes: dto.notes?.trim() || null,
-          closedAt: new Date(),
+          notes: closingNotes,
+          closedAt: operationTime,
         },
       });
 
@@ -373,10 +405,16 @@ export class ShiftService {
         throw new ConflictException('This shift is already closed');
       }
 
-      return tx.shiftSession.findFirstOrThrow({
+      const closedRecord = await tx.shiftSession.findFirstOrThrow({
         where: { id: shift.id, businessId },
         select: shiftSelect,
       });
+
+      return {
+        ...closedRecord,
+        isOverdue: false,
+        closingCashNotProvided: false,
+      };
     };
 
     if (this.prisma.$transaction) {
@@ -409,6 +447,57 @@ export class ShiftService {
       }
     }
 
+    let fromDateStart: Date | null = null;
+    let toDateNextStart: Date | null = null;
+
+    if (query.fromDate) {
+      fromDateStart = parseDhakaDateString(query.fromDate);
+      if (!fromDateStart) {
+        throw new BadRequestException(
+          'Invalid fromDate format. Expected YYYY-MM-DD',
+        );
+      }
+    }
+
+    if (query.toDate) {
+      const toDateStart = parseDhakaDateString(query.toDate);
+      if (!toDateStart) {
+        throw new BadRequestException(
+          'Invalid toDate format. Expected YYYY-MM-DD',
+        );
+      }
+      toDateNextStart = new Date(toDateStart.getTime() + 24 * 60 * 60 * 1000);
+    }
+
+    if (fromDateStart && toDateNextStart) {
+      if (fromDateStart.getTime() >= toDateNextStart.getTime()) {
+        throw new BadRequestException('fromDate cannot be after toDate');
+      }
+    }
+
+    let targetCashierId: string | undefined = undefined;
+    if (user.role === Role.CASHIER) {
+      if (query.cashierId && query.cashierId !== user.sub) {
+        throw new ForbiddenException('Cashiers may only view their own shifts');
+      }
+      targetCashierId = user.sub;
+    } else if (query.cashierId) {
+      const cashierUser = await this.prisma.user.findFirst({
+        where: {
+          id: query.cashierId,
+          businessId: scope.businessId,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (!cashierUser) {
+        throw new BadRequestException(
+          'Cashier does not belong to the specified business',
+        );
+      }
+      targetCashierId = query.cashierId;
+    }
+
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 10));
     const skip = (page - 1) * limit;
@@ -417,7 +506,15 @@ export class ShiftService {
       businessId: scope.businessId,
       ...(scope.locationId ? { locationId: scope.locationId } : {}),
       ...(query.status ? { status: query.status } : {}),
-      ...(user.role === Role.CASHIER ? { cashierId: user.sub } : {}),
+      ...(targetCashierId ? { cashierId: targetCashierId } : {}),
+      ...(fromDateStart || toDateNextStart
+        ? {
+            openedAt: {
+              ...(fromDateStart ? { gte: fromDateStart } : {}),
+              ...(toDateNextStart ? { lt: toDateNextStart } : {}),
+            },
+          }
+        : {}),
     };
 
     const [total, data] = await Promise.all([
@@ -431,8 +528,15 @@ export class ShiftService {
       }),
     ]);
 
+    const formattedData: PresentedShift[] = data.map((shift) => ({
+      ...shift,
+      isOverdue: isShiftOverdue(shift.openedAt, shift.status),
+      closingCashNotProvided:
+        shift.status === ShiftStatus.CLOSED && shift.closingAmount === null,
+    }));
+
     return {
-      data,
+      data: formattedData,
       meta: {
         total,
         page,

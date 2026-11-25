@@ -15,7 +15,8 @@ export class OpenShiftDto {
   startingAmount: number;
 
   @ApiPropertyOptional({
-    description: 'Auto-close any previous open shift left unclosed',
+    description:
+      'Legacy compatibility flag. Previous-day open shifts are automatically closed on opening a new shift; same-day second shifts are rejected regardless of this flag.',
     default: false,
   })
   @IsOptional()

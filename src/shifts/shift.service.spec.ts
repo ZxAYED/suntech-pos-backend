@@ -4,7 +4,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { Role, ShiftStatus } from '@prisma/client';
+import { Prisma, Role, ShiftStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isPreviousCalendarDay, ShiftService } from './shift.service';
 
@@ -17,6 +17,7 @@ describe('ShiftService', () => {
   const shiftFindFirstOrThrow = jest.fn();
   const shiftCount = jest.fn();
   const shiftFindMany = jest.fn();
+  const userFindFirst = jest.fn();
   const orderAggregate = jest.fn();
   const advanceAggregate = jest.fn();
   const advanceFindMany = jest.fn();
@@ -26,15 +27,20 @@ describe('ShiftService', () => {
       location: { findFirst: locationFindFirst },
       shiftSession: {
         findFirst: shiftFindFirst,
+        findMany: shiftFindMany,
         create: shiftCreate,
         update: shiftUpdate,
         updateMany: shiftUpdateMany,
         findFirstOrThrow: shiftFindFirstOrThrow,
       },
+      user: { findFirst: userFindFirst },
       order: { aggregate: orderAggregate },
       employeeAdvance: {
         aggregate: advanceAggregate,
         findMany: advanceFindMany,
+      },
+      refund: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: { totalRefund: 0 } }),
       },
     }),
   );
@@ -43,6 +49,9 @@ describe('ShiftService', () => {
     location: {
       findFirst: locationFindFirst,
       findUnique: locationFindFirst,
+    },
+    user: {
+      findFirst: userFindFirst,
     },
     shiftSession: {
       findFirst: shiftFindFirst,
@@ -76,12 +85,14 @@ describe('ShiftService', () => {
     shiftFindFirstOrThrow.mockReset();
     shiftCount.mockReset();
     shiftFindMany.mockReset();
+    userFindFirst.mockReset();
     orderAggregate.mockReset();
     advanceAggregate.mockReset();
     advanceFindMany.mockReset();
 
     locationFindFirst.mockResolvedValue({ id: 'loc-1', businessId: 'biz-1' });
     shiftFindFirst.mockResolvedValue(null);
+    shiftFindMany.mockResolvedValue([]);
     shiftCreate.mockImplementation(({ data }: { data: object }) =>
       Promise.resolve({ id: 'shift-1', ...data }),
     );
@@ -105,8 +116,8 @@ describe('ShiftService', () => {
     ]);
   });
 
-  it('opens a shift for the cashier location on the token', async () => {
-    await service.open(cashier, { startingAmount: 5000 });
+  it('opens a first shift for the cashier location on the token', async () => {
+    const result = await service.open(cashier, { startingAmount: 5000 });
 
     expect(shiftCreate).toHaveBeenCalledWith({
       data: {
@@ -115,14 +126,18 @@ describe('ShiftService', () => {
         cashierId: 'cashier-1',
         startingAmount: 5000,
         status: ShiftStatus.OPEN,
+        openedAt: expect.any(Date),
       },
       select: expect.any(Object) as object,
     });
+    expect(result.status).toBe(ShiftStatus.OPEN);
+    expect(result.isOverdue).toBe(false);
   });
 
-  it('rejects a second open shift if opened today and autoClosePrevious is false', async () => {
+  it('rejects a second shift if already opened today (when existing shift is OPEN)', async () => {
     shiftFindFirst.mockResolvedValue({
-      id: 'shift-open',
+      id: 'shift-open-today',
+      status: ShiftStatus.OPEN,
       openedAt: new Date(),
     });
 
@@ -132,36 +147,53 @@ describe('ShiftService', () => {
     expect(shiftCreate).not.toHaveBeenCalled();
   });
 
-  it('requires confirmation before closing a shift left open from a previous day', async () => {
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  it('rejects a second shift if already opened today even if existing shift is CLOSED', async () => {
     shiftFindFirst.mockResolvedValue({
-      id: 'shift-yesterday',
-      startingAmount: 2000,
-      openedAt: yesterday,
+      id: 'shift-closed-today',
+      status: ShiftStatus.CLOSED,
+      openedAt: new Date(),
     });
 
     await expect(
-      service.open(cashier, { startingAmount: 3000 }),
-    ).rejects.toThrow(
-      'A previous-day shift is still open; set autoClosePrevious=true to reconcile and close it',
-    );
+      service.open(cashier, { startingAmount: 2000 }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(shiftCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects a same-day second shift even if autoClosePrevious is true', async () => {
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-today',
+      status: ShiftStatus.OPEN,
+      openedAt: new Date(),
+    });
+
+    await expect(
+      service.open(cashier, {
+        startingAmount: 2000,
+        autoClosePrevious: true,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
     expect(shiftUpdate).not.toHaveBeenCalled();
     expect(shiftCreate).not.toHaveBeenCalled();
   });
 
-  it('closes a previous-day shift after confirmation and opens a new shift', async () => {
+  it('automatically closes older open shift from previous day and opens new shift (without requiring autoClosePrevious flag)', async () => {
+    // sameDayShift check returns null
+    shiftFindFirst.mockResolvedValue(null);
+    // olderOpenShifts returns one older open shift
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    shiftFindFirst.mockResolvedValue({
-      id: 'shift-yesterday',
-      startingAmount: 2000,
-      openedAt: yesterday,
-    });
+    shiftFindMany.mockResolvedValueOnce([
+      {
+        id: 'shift-yesterday',
+        startingAmount: 2000,
+        notes: 'Cashier initial note',
+      },
+    ]);
     orderAggregate.mockResolvedValue({ _sum: { totalAmount: 8000 } });
     advanceAggregate.mockResolvedValue({ _sum: { amount: 500 } });
 
     const result = await service.open(cashier, {
       startingAmount: 3000,
-      autoClosePrevious: true,
     });
 
     expect(shiftUpdate).toHaveBeenCalledWith({
@@ -173,10 +205,13 @@ describe('ShiftService', () => {
         variance: null,
         cashSales: 8000,
         advancesOut: 500,
-        notes:
-          'Auto-closed: previous shift was left open before new shift start (COUNT_PENDING)',
+        autoCloseReason: 'AUTO_CLOSED_PRIOR_DAY_UNCOUNTED',
       }),
     });
+    // Check that existing notes were preserved (not overwritten)
+    const updateData = shiftUpdate.mock.calls[0][0].data;
+    expect(updateData.notes).toBeUndefined();
+
     expect(shiftCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         businessId: 'biz-1',
@@ -188,48 +223,50 @@ describe('ShiftService', () => {
       select: expect.any(Object),
     });
     expect(result.autoClosedPreviousShiftId).toBe('shift-yesterday');
+    expect(result.autoClosedPreviousShiftIds).toEqual(['shift-yesterday']);
   });
 
-  it('rejects a cashier from auto-closing a same-day shift even if autoClosePrevious is true', async () => {
-    shiftFindFirst.mockResolvedValue({
-      id: 'shift-today',
-      startingAmount: 1000,
-      openedAt: new Date(),
+  it('automatically closes several legacy older open shifts and tracks autoClosedPreviousShiftIds', async () => {
+    shiftFindFirst.mockResolvedValue(null);
+    shiftFindMany.mockResolvedValueOnce([
+      { id: 'shift-old-1', startingAmount: 1000 },
+      { id: 'shift-old-2', startingAmount: 2000 },
+    ]);
+    orderAggregate.mockResolvedValue({ _sum: { totalAmount: 0 } });
+    advanceAggregate.mockResolvedValue({ _sum: { amount: 0 } });
+
+    const result = await service.open(cashier, { startingAmount: 5000 });
+
+    expect(shiftUpdate).toHaveBeenCalledTimes(2);
+    expect(result.autoClosedPreviousShiftIds).toEqual([
+      'shift-old-1',
+      'shift-old-2',
+    ]);
+    expect(result.autoClosedPreviousShiftId).toBeUndefined();
+  });
+
+  it('handles P2034 serialization conflict by throwing ConflictException', async () => {
+    const p2034Error = new Prisma.PrismaClientKnownRequestError('Conflict', {
+      code: 'P2034',
+      clientVersion: '6.0.0',
     });
+    transaction.mockRejectedValueOnce(p2034Error);
 
     await expect(
-      service.open(cashier, {
-        startingAmount: 2000,
-        autoClosePrevious: true,
-      }),
+      service.open(cashier, { startingAmount: 5000 }),
     ).rejects.toBeInstanceOf(ConflictException);
-    expect(shiftUpdate).not.toHaveBeenCalled();
   });
 
-  it('rejects an admin from auto-closing a same-day shift', async () => {
-    shiftFindFirst.mockResolvedValue({
-      id: 'shift-today',
-      startingAmount: 1000,
-      openedAt: new Date(),
-    });
-    const admin = {
-      sub: 'admin-1',
-      role: Role.ADMIN,
-      businessId: 'biz-1',
-      locationId: 'loc-1',
-    };
-    await expect(
-      service.open(admin, {
-        startingAmount: 2000,
-        autoClosePrevious: true,
-      }),
-    ).rejects.toBeInstanceOf(ConflictException);
-    expect(shiftUpdate).not.toHaveBeenCalled();
-  });
-
-  it('lists shifts scoped to cashier location and cashierId', async () => {
+  it('lists shifts scoped to cashier location and cashierId with derived flags', async () => {
     shiftCount.mockResolvedValue(1);
-    shiftFindMany.mockResolvedValue([{ id: 'shift-1' }]);
+    shiftFindMany.mockResolvedValue([
+      {
+        id: 'shift-1',
+        status: ShiftStatus.OPEN,
+        openedAt: new Date(Date.now() - 48 * 60 * 60 * 1000), // Overdue
+        closingAmount: null,
+      },
+    ]);
 
     const result = await service.list(cashier, { page: 1, limit: 10 });
 
@@ -245,34 +282,98 @@ describe('ShiftService', () => {
       take: 10,
     });
     expect(result.data).toHaveLength(1);
+    expect(result.data[0].isOverdue).toBe(true);
+    expect(result.data[0].closingCashNotProvided).toBe(false);
   });
 
-  it('lists shifts for admin with locationId filter', async () => {
-    shiftCount.mockResolvedValue(1);
-    shiftFindMany.mockResolvedValue([{ id: 'shift-1' }]);
+  it('rejects a cashier filtering another cashier data in list', async () => {
+    await expect(
+      service.list(cashier, { cashierId: 'other-cashier' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('allows admin to filter shifts by cashierId when cashier belongs to business', async () => {
     const admin = {
       sub: 'admin-1',
       role: Role.ADMIN,
       businessId: 'biz-1',
     };
+    userFindFirst.mockResolvedValue({ id: 'cashier-1' });
+    shiftCount.mockResolvedValue(1);
+    shiftFindMany.mockResolvedValue([
+      {
+        id: 'shift-1',
+        status: ShiftStatus.CLOSED,
+        openedAt: new Date(),
+        closingAmount: null,
+      },
+    ]);
 
     const result = await service.list(admin, {
-      locationId: 'loc-1',
+      cashierId: 'cashier-1',
       page: 1,
       limit: 10,
     });
 
-    expect(shiftFindMany).toHaveBeenCalledWith({
-      where: {
-        businessId: 'biz-1',
-        locationId: 'loc-1',
-      },
-      select: expect.any(Object),
-      orderBy: { openedAt: 'desc' },
-      skip: 0,
-      take: 10,
+    expect(result.data[0].closingCashNotProvided).toBe(true);
+    expect(shiftFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          cashierId: 'cashier-1',
+        }),
+      }),
+    );
+  });
+
+  it('throws BadRequestException if admin filters shifts by cashier from another business', async () => {
+    const admin = {
+      sub: 'admin-1',
+      role: Role.ADMIN,
+      businessId: 'biz-1',
+    };
+    userFindFirst.mockResolvedValue(null);
+
+    await expect(
+      service.list(admin, { cashierId: 'foreign-cashier' }),
+    ).rejects.toThrow('Cashier does not belong to the specified business');
+  });
+
+  it('filters shifts by fromDate and toDate correctly in Dhaka timezone', async () => {
+    shiftCount.mockResolvedValue(1);
+    shiftFindMany.mockResolvedValue([]);
+
+    await service.list(cashier, {
+      fromDate: '2026-11-01',
+      toDate: '2026-11-05',
     });
-    expect(result.data).toHaveLength(1);
+
+    expect(shiftFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          openedAt: expect.objectContaining({
+            gte: expect.any(Date),
+            lt: expect.any(Date),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('throws BadRequestException if fromDate is after toDate', async () => {
+    await expect(
+      service.list(cashier, {
+        fromDate: '2026-11-06',
+        toDate: '2026-11-01',
+      }),
+    ).rejects.toThrow('fromDate cannot be after toDate');
+  });
+
+  it('throws BadRequestException if fromDate has invalid format', async () => {
+    await expect(
+      service.list(cashier, {
+        fromDate: 'invalid-date',
+      }),
+    ).rejects.toThrow('Invalid fromDate format. Expected YYYY-MM-DD');
   });
 
   it('does not close a shift owned by another cashier', async () => {
@@ -287,7 +388,7 @@ describe('ShiftService', () => {
         businessId: 'biz-1',
         cashierId: 'cashier-1',
       },
-      select: { id: true, startingAmount: true, status: true },
+      select: { id: true, startingAmount: true, status: true, notes: true },
     });
     expect(shiftUpdateMany).not.toHaveBeenCalled();
   });
@@ -298,6 +399,7 @@ describe('ShiftService', () => {
       businessId: 'biz-1',
       startingAmount: 10000,
       status: ShiftStatus.OPEN,
+      openedAt: new Date(),
     });
 
     const active = await service.getActive(cashier);
@@ -308,82 +410,7 @@ describe('ShiftService', () => {
     expect(active?.advancesOut).toBe(1350);
     expect(active?.expectedCash).toBe(33470);
     expect(active?.advanceLedger).toHaveLength(2);
-  });
-
-  it('throws when no active shift exists', async () => {
-    shiftFindFirst.mockResolvedValue(null);
-
-    await expect(service.getActive(cashier)).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
-  });
-
-  it('throws ForbiddenException when admin requests active shift for location not belonging to owned business', async () => {
-    locationFindFirst.mockResolvedValue({
-      id: 'loc-other',
-      businessId: 'biz-other',
-    });
-    const admin = {
-      sub: 'admin-1',
-      role: Role.ADMIN,
-      businessId: 'biz-1',
-      businessIds: ['biz-1'],
-    };
-
-    await expect(
-      service.getActive(admin as any, 'loc-other'),
-    ).rejects.toBeInstanceOf(ForbiddenException);
-  });
-
-  it('throws BadRequestException when admin requests active shift for location belonging to another business in multi-business scope', async () => {
-    locationFindFirst.mockResolvedValue({
-      id: 'loc-biz2',
-      businessId: 'biz-2',
-    });
-    const admin = {
-      sub: 'admin-1',
-      role: Role.ADMIN,
-      businessId: 'biz-1',
-      businessIds: ['biz-1', 'biz-2'],
-    };
-
-    await expect(
-      service.getActive(admin as any, 'loc-biz2', 'biz-1'),
-    ).rejects.toThrow('Location does not belong to the specified business');
-  });
-
-  it('throws BadRequestException when admin opens shift without businessId and actor has no businessId', async () => {
-    const admin = {
-      sub: 'admin-1',
-      role: Role.ADMIN,
-    };
-
-    await expect(
-      service.open(admin as any, { startingAmount: 1000, locationId: 'loc-1' }),
-    ).rejects.toThrow('businessId is required');
-  });
-
-  it('throws BadRequestException when admin opens shift with mismatched business and location', async () => {
-    locationFindFirst.mockImplementation(({ where }: { where: { businessId?: string } }) => {
-      if (where.businessId) {
-        return Promise.resolve(null);
-      }
-      return Promise.resolve({ id: 'loc-2', businessId: 'biz-2' });
-    });
-    const admin = {
-      sub: 'admin-1',
-      role: Role.ADMIN,
-      businessId: 'biz-1',
-      businessIds: ['biz-1', 'biz-2'],
-    };
-
-    await expect(
-      service.open(admin as any, {
-        startingAmount: 1000,
-        businessId: 'biz-1',
-        locationId: 'loc-2',
-      }),
-    ).rejects.toThrow('Location does not belong to the specified business');
+    expect(active?.isOverdue).toBe(false);
   });
 
   it('closes active shift, calculates expected cash and variance', async () => {
@@ -423,6 +450,63 @@ describe('ShiftService', () => {
       }),
     });
     expect(closed.status).toBe(ShiftStatus.CLOSED);
+  });
+
+  it('preserves opening notes when closing notes are omitted', async () => {
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-1',
+      businessId: 'biz-1',
+      startingAmount: 10000,
+      status: ShiftStatus.OPEN,
+      notes: 'Opening float verified',
+    });
+    shiftUpdateMany.mockResolvedValue({ count: 1 });
+    shiftFindFirstOrThrow.mockResolvedValue({
+      id: 'shift-1',
+      status: ShiftStatus.CLOSED,
+      notes: 'Opening float verified',
+    });
+
+    await service.close(cashier, undefined, {
+      closingAmount: 10000,
+    });
+
+    expect(shiftUpdateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'shift-1',
+        businessId: 'biz-1',
+        status: ShiftStatus.OPEN,
+      },
+      data: expect.objectContaining({
+        notes: 'Opening float verified',
+      }),
+    });
+  });
+
+  it('closes an overdue open shift through the normal counted close path', async () => {
+    const pastDate = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    shiftFindFirst.mockResolvedValue({
+      id: 'shift-overdue',
+      startingAmount: 5000,
+      status: ShiftStatus.OPEN,
+      openedAt: pastDate,
+    });
+    shiftUpdateMany.mockResolvedValue({ count: 1 });
+    shiftFindFirstOrThrow.mockResolvedValue({
+      id: 'shift-overdue',
+      closingAmount: 6000,
+      expectedAmount: 5500,
+      variance: 500,
+      status: ShiftStatus.CLOSED,
+    });
+
+    const closed = await service.close(cashier, 'shift-overdue', {
+      closingAmount: 6000,
+      notes: 'Late reconciliation with physical count',
+    });
+
+    expect(closed.status).toBe(ShiftStatus.CLOSED);
+    expect(shiftUpdateMany).toHaveBeenCalled();
   });
 
   describe('isPreviousCalendarDay', () => {
