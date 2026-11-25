@@ -1,0 +1,57 @@
+// Enrollment records and original grants are retained for delayed upload and recovery.
+// Revocation blocks new posting; it never deletes a cashier's local payment evidence.
+model OfflineDevice {
+  id String @id @default(uuid())
+  deviceId String
+  userId String
+  businessId String
+  locationId String
+  createdAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  revokedAt DateTime?
+  grants OfflineGrant[]
+
+  @@unique([deviceId, userId, businessId, locationId])
+  @@index([userId, businessId, locationId])
+}
+
+model OfflineGrant {
+  id String @id
+  enrollmentId String
+  enrollment OfflineDevice @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  tokenHash String @unique
+  claims Json
+  issuedAt DateTime
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  @@index([enrollmentId])
+}
+
+// A purchase identity cannot cross from legacy HTTP into v2 (or back).
+// Rows are retained even after a response is lost. They are not lease records.
+model FinancialSaleIdentity {
+  id String @id
+  userId String
+  businessId String?
+  locationId String?
+  protocol String
+  legacyPath String?
+  createdAt DateTime @default(now())
+}
+
+// Immutable command receipt; business effects and this row share a transaction.
+model OfflineCommandReceipt {
+  clientCommandId String @id
+  kind String
+  userId String
+  businessId String
+  locationId String
+  deviceId String
+  payloadHash String
+  occurredAt DateTime
+  postedAt DateTime @default(now())
+  evidence Json
+  result Json
+  @@index([userId, businessId, locationId, deviceId])
+}
