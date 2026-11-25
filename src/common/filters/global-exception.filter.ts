@@ -12,6 +12,10 @@ export interface ApiErrorResponse {
   success: false;
   message: string;
   timestamp: string;
+  code?: string;
+  variantId?: string;
+  currentPrice?: number;
+  submittedPrice?: number;
 }
 
 @Catch()
@@ -37,6 +41,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       success: false,
       message: this.resolveMessage(exception),
       timestamp: new Date().toISOString(),
+      ...this.safeDetails(exception),
     } satisfies ApiErrorResponse);
   }
 
@@ -49,12 +54,18 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       return HttpStatus.BAD_REQUEST;
     }
 
+    if (this.isOversizedBody(exception)) return HttpStatus.PAYLOAD_TOO_LARGE;
+
     return HttpStatus.INTERNAL_SERVER_ERROR;
   }
 
   private resolveMessage(exception: unknown): string {
     if (this.isOversizedUpload(exception)) {
       return 'Image must be 5 MB or smaller';
+    }
+
+    if (this.isOversizedBody(exception)) {
+      return 'Request is too large. Split saved sales into smaller batches and keep their original IDs.';
     }
 
     if (!(exception instanceof HttpException)) {
@@ -80,6 +91,33 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     }
 
     return exception.message;
+  }
+
+  private safeDetails(exception: unknown): Partial<ApiErrorResponse> {
+    if (this.isOversizedBody(exception)) return { code: 'REQUEST_TOO_LARGE' };
+    if (!(exception instanceof HttpException)) return {};
+    const body = exception.getResponse();
+    if (!body || typeof body !== 'object') return {};
+    const details = body as Record<string, unknown>;
+    const result: Partial<ApiErrorResponse> = {};
+    // Preserve the existing PRICE_CHANGED correction contract without leaking
+    // arbitrary exception internals or database details into public responses.
+    if (typeof details.code === 'string') result.code = details.code;
+    if (typeof details.variantId === 'string')
+      result.variantId = details.variantId;
+    for (const key of ['currentPrice', 'submittedPrice'] as const) {
+      if (typeof details[key] === 'number' && Number.isFinite(details[key]))
+        result[key] = details[key];
+    }
+    return result;
+  }
+
+  private isOversizedBody(exception: unknown): boolean {
+    return (
+      exception instanceof Error &&
+      'type' in exception &&
+      exception.type === 'entity.too.large'
+    );
   }
 
   private isOversizedUpload(exception: unknown): boolean {
