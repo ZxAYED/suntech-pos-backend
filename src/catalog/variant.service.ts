@@ -506,13 +506,14 @@ export class VariantService {
           }
 
           if (branchDelta > 0) {
+            const deltaSign = newBranchStock >= branchBaseline ? '+' : '-';
             await tx.stockTransaction.create({
               data: {
                 variantId: current.id,
                 locationId: targetLocationId,
                 type: StockTransactionType.MANUAL_ADJUSTMENT,
                 quantity: branchDelta,
-                notes: 'Variant metadata stock update',
+                notes: `Variant metadata stock update: ${branchBaseline} -> ${newBranchStock} (${deltaSign}${branchDelta})`,
               },
             });
           }
@@ -550,7 +551,9 @@ export class VariantService {
       };
 
       if (this.prisma.$transaction) {
-        await this.prisma.$transaction(executeUpdate);
+        await this.prisma.$transaction(executeUpdate, {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        });
       } else {
         await executeUpdate(this.prisma);
       }
