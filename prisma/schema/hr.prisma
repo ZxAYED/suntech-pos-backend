@@ -99,6 +99,7 @@ model ShiftSession {
   cashCollected  Int         @default(0)
   status         ShiftStatus @default(OPEN)
   notes          String?
+  autoCloseReason String?
 
   openedAt DateTime  @default(now())
   closedAt DateTime?
@@ -110,4 +111,5 @@ model ShiftSession {
   @@index([businessId])
   @@index([locationId])
   @@index([cashierId, status])
+  @@index([cashierId, openedAt])
 }

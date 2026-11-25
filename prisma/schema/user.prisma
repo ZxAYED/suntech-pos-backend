@@ -35,6 +35,12 @@ model User {
   // Sensitive Payroll Data (Hidden from Cashiers)
   monthlySalary Int?
 
+  // Cashier Session Tracking
+  isLoggedIn   Boolean   @default(false)
+  sessionId    String?
+  lastLoginAt  DateTime?
+  lastLogoutAt DateTime?
+
   // Recovery & OTP
   resetOtpHash String?
   otpExpiry    DateTime?
