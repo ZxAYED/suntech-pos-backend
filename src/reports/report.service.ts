@@ -9,6 +9,7 @@ import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { resolveLocationScope } from '../common/utils/location-scope';
 import { requireBusinessId } from '../hr/require-business-id';
 import {
+  DateRange,
   getDhakaDateParts,
   getDhakaMonthBounds,
   getDhakaStartOfDay,
@@ -103,7 +104,7 @@ export interface PeriodAnalytics {
 export function getReportDateRange(
   queryOrRange?: string | ReportDateFilterOptions,
   now = new Date(),
-): { gte: Date; lte?: Date } {
+): DateRange {
   if (typeof queryOrRange === 'string') {
     return resolveDhakaDateRange({ range: queryOrRange }, now);
   }
@@ -243,7 +244,7 @@ export class ReportService {
       const dateRange = getReportDateRange(query);
       where.occurredAt = {
         gte: dateRange.gte,
-        ...(dateRange.lte ? { lte: dateRange.lte } : {}),
+        lt: dateRange.lt,
       };
     }
 
@@ -488,7 +489,7 @@ export class ReportService {
     const dateRange = getReportDateRange(options);
     const occurredAt = {
       gte: dateRange.gte,
-      ...(dateRange.lte ? { lte: dateRange.lte } : {}),
+      lt: dateRange.lt,
     };
     const periodOrderWhere: Prisma.OrderWhereInput = {
       location: { businessId },
@@ -807,6 +808,10 @@ export class ReportService {
   }
 
   private async netRevenue(where: Prisma.OrderWhereInput): Promise<number> {
+    const realizedWhere: Prisma.OrderWhereInput = {
+      ...where,
+      status: where.status ?? { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
+    };
     const refundWhere: Prisma.RefundWhereInput = {
       order: {
         location: where.location,
@@ -815,7 +820,7 @@ export class ReportService {
       ...(where.occurredAt ? { createdAt: where.occurredAt as any } : {}),
     };
     const [orders, refunds] = await Promise.all([
-      this.prisma.order.aggregate({ where, _sum: { totalAmount: true } }),
+      this.prisma.order.aggregate({ where: realizedWhere, _sum: { totalAmount: true } }),
       this.prisma.refund.aggregate({
         where: refundWhere,
         _sum: { totalRefund: true },
@@ -853,8 +858,14 @@ export class ReportService {
       query?.businessId,
     );
     const lines = await this.prisma.orderLine.findMany({
-      where: { order: { location: { businessId } } },
+      where: {
+        order: {
+          location: { businessId },
+          status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
+        },
+      },
       select: {
+        variantId: true,
         variantName: true,
         productName: true,
         subtotal: true,
@@ -868,17 +879,18 @@ export class ReportService {
     >();
 
     for (const line of lines) {
-      // COALESCE(orderLine.variantName, orderLine.productName, 'Custom Ad-hoc Sale')
+      const groupKey =
+        line.variantId ?? `${line.productName ?? ''}:::${line.variantName ?? ''}`;
       const label =
         line.variantName || line.productName || 'Custom Ad-hoc Sale';
-      const existing = grouping.get(label) ?? {
+      const existing = grouping.get(groupKey) ?? {
         variantLabel: label,
         totalRevenue: 0,
         totalQuantity: 0,
       };
       existing.totalRevenue += line.subtotal;
       existing.totalQuantity += line.quantity;
-      grouping.set(label, existing);
+      grouping.set(groupKey, existing);
     }
 
     return [...grouping.values()].sort(

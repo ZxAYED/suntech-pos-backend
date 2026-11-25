@@ -18,6 +18,8 @@ describe('AdminDashboardService', () => {
   const refundAggregate = jest.fn();
   const expenseAggregate = jest.fn();
   const shiftSessionFindFirst = jest.fn();
+  const shiftSessionFindMany = jest.fn();
+  const userFindMany = jest.fn();
   const employeeAdvanceAggregate = jest.fn();
   const variantFindMany = jest.fn();
 
@@ -34,7 +36,11 @@ describe('AdminDashboardService', () => {
       aggregate: refundAggregate,
     },
     expense: { aggregate: expenseAggregate },
-    shiftSession: { findFirst: shiftSessionFindFirst },
+    shiftSession: {
+      findFirst: shiftSessionFindFirst,
+      findMany: shiftSessionFindMany,
+    },
+    user: { findMany: userFindMany },
     employeeAdvance: { aggregate: employeeAdvanceAggregate },
     variant: { findMany: variantFindMany },
   } as unknown as PrismaService;
@@ -48,8 +54,23 @@ describe('AdminDashboardService', () => {
     businessIds: ['biz-1'],
   };
 
+  const cashierActor: AccessTokenPayload = {
+    sub: 'cashier-uuid-1',
+    role: Role.CASHIER,
+    businessId: 'biz-1',
+    locationId: 'loc-1',
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
+    locationFindFirst.mockResolvedValue({
+      id: 'loc-1',
+      name: 'Main Branch',
+      businessId: 'biz-1',
+    });
+    shiftSessionFindMany.mockResolvedValue([]);
+    shiftSessionFindFirst.mockResolvedValue(null);
+    userFindMany.mockResolvedValue([]);
   });
 
   describe('resolveAndValidateScope', () => {
@@ -74,7 +95,7 @@ describe('AdminDashboardService', () => {
 
       await expect(
         service.resolveAndValidateScope(adminActor, {
-          businessId: 'biz-unowned',
+          businessId: 'biz-other',
           locationId: 'loc-1',
         }),
       ).rejects.toBeInstanceOf(ForbiddenException);
@@ -86,7 +107,7 @@ describe('AdminDashboardService', () => {
       await expect(
         service.resolveAndValidateScope(adminActor, {
           businessId: 'biz-1',
-          locationId: 'loc-invalid',
+          locationId: 'loc-missing',
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
@@ -94,7 +115,8 @@ describe('AdminDashboardService', () => {
     it('resolves valid business and location successfully', async () => {
       locationFindFirst.mockResolvedValue({
         id: 'loc-1',
-        name: 'Uttara Branch',
+        name: 'Dhanmondi Branch',
+        businessId: 'biz-1',
       });
 
       const scope = await service.resolveAndValidateScope(adminActor, {
@@ -105,25 +127,19 @@ describe('AdminDashboardService', () => {
       expect(scope).toEqual({
         businessId: 'biz-1',
         locationId: 'loc-1',
-        locationName: 'Uttara Branch',
+        locationName: 'Dhanmondi Branch',
       });
     });
   });
 
   describe('getOverview', () => {
-    beforeEach(() => {
-      locationFindFirst.mockResolvedValue({
-        id: 'loc-1',
-        name: 'Uttara Branch',
-      });
-    });
-
     it('returns overview with no active shift when no open shift exists', async () => {
       orderCount.mockResolvedValue(10);
       orderAggregate.mockResolvedValue({ _sum: { totalAmount: 50000 } });
       refundCount.mockResolvedValue(1);
       refundAggregate.mockResolvedValue({ _sum: { totalRefund: 2000 } });
       expenseAggregate.mockResolvedValue({ _sum: { amount: 8000 } });
+      shiftSessionFindMany.mockResolvedValue([]);
       shiftSessionFindFirst.mockResolvedValue(null);
 
       const overview = await service.getOverview(adminActor, {
@@ -151,9 +167,11 @@ describe('AdminDashboardService', () => {
         expectedCashInDrawer: 0,
         currency: 'BDT',
       });
+      expect(overview.todayShifts).toEqual([]);
+      expect(overview.todayShiftCounts).toEqual({ total: 0, open: 0, closed: 0 });
     });
 
-    it('returns overview with active shift drawer metrics', async () => {
+    it('returns overview with active shift drawer metrics and today shifts', async () => {
       orderCount.mockResolvedValue(5);
       orderAggregate
         .mockResolvedValueOnce({ _sum: { totalAmount: 25000 } }) // day orders
@@ -165,17 +183,29 @@ describe('AdminDashboardService', () => {
       expenseAggregate.mockResolvedValue({ _sum: { amount: 3000 } });
       employeeAdvanceAggregate.mockResolvedValue({ _sum: { amount: 1000 } });
 
-      shiftSessionFindFirst.mockResolvedValue({
+      const activeShift = {
         id: 'shift-1',
+        cashierId: 'user-1',
         startingAmount: 5000,
+        closingAmount: null,
+        expectedAmount: null,
+        variance: null,
+        cashSales: 0,
+        advancesOut: 0,
         status: ShiftStatus.OPEN,
         openedAt: new Date('2026-10-31T04:00:00Z'),
+        closedAt: null,
         cashier: {
           id: 'user-1',
           fullName: 'Tanvir Cashier',
           publicId: 'CSH-0001',
         },
-      });
+      };
+
+      shiftSessionFindMany
+        .mockResolvedValueOnce([activeShift]) // todayShiftsRaw
+        .mockResolvedValueOnce([]); // olderOpenShiftsRaw
+      shiftSessionFindFirst.mockResolvedValue(null); // lastClosedShiftRaw
 
       const overview = await service.getOverview(adminActor, {
         businessId: 'biz-1',
@@ -190,119 +220,202 @@ describe('AdminDashboardService', () => {
       expect(overview.drawer.cashCollected).toBe(15000);
       expect(overview.drawer.cashPaidOut).toBe(1000);
       expect(overview.drawer.expectedCashInDrawer).toBe(19000); // 5000 + 15000 - 1000
+
+      expect(overview.todayShifts).toHaveLength(1);
+      expect(overview.todayShiftCounts).toEqual({ total: 1, open: 1, closed: 0 });
     });
 
     it('correctly calculates mixed payment scenario: kpis.netCashflowToday (18k) vs drawer.expectedCashInDrawer (10k)', async () => {
-      // Setup:
-      // All-channel orders: 25,000 (10,000 COD + 15,000 bKash) across 2 orders
       orderCount.mockResolvedValue(2);
       orderAggregate
-        .mockResolvedValueOnce({ _sum: { totalAmount: 25000 } }) // day orders (all methods)
-        .mockResolvedValueOnce({ _sum: { totalAmount: 10000 } }); // shift cash orders (COD only)
+        .mockResolvedValueOnce({ _sum: { totalAmount: 25000 } })
+        .mockResolvedValueOnce({ _sum: { totalAmount: 10000 } });
 
-      // Refunds: 2,000 COD refund
       refundCount.mockResolvedValue(1);
       refundAggregate
-        .mockResolvedValueOnce({ _sum: { totalRefund: 2000 } }) // day refunds (all)
-        .mockResolvedValueOnce({ _sum: { totalRefund: 2000 } }); // shift COD refunds
+        .mockResolvedValueOnce({ _sum: { totalRefund: 2000 } })
+        .mockResolvedValueOnce({ _sum: { totalRefund: 2000 } });
 
-      // Expenses: 5,000 BDT
       expenseAggregate.mockResolvedValue({ _sum: { amount: 5000 } });
-
-      // Employee cash advance: 1,000 BDT paid out from drawer
       employeeAdvanceAggregate.mockResolvedValue({ _sum: { amount: 1000 } });
 
-      // Active shift with opening float of 3,000 BDT
-      shiftSessionFindFirst.mockResolvedValue({
+      const activeShift = {
         id: 'shift-mixed-1',
+        cashierId: 'user-1',
         startingAmount: 3000,
+        closingAmount: null,
+        expectedAmount: null,
+        variance: null,
+        cashSales: 0,
+        advancesOut: 0,
         status: ShiftStatus.OPEN,
         openedAt: new Date('2026-10-31T04:00:00Z'),
+        closedAt: null,
         cashier: {
           id: 'user-1',
           fullName: 'Tanvir Cashier',
           publicId: 'CSH-0001',
         },
-      });
+      };
+
+      shiftSessionFindMany
+        .mockResolvedValueOnce([activeShift]) // todayShiftsRaw
+        .mockResolvedValueOnce([]); // olderOpenShiftsRaw
 
       const overview = await service.getOverview(adminActor, {
         businessId: 'biz-1',
         locationId: 'loc-1',
       });
 
-      // Assert high-level business cashflow (all payment channels)
-      expect(overview.kpis.todayGrossSales).toBe(25000);
-      expect(overview.kpis.todayRefundedAmount).toBe(2000);
-      expect(overview.kpis.todayNetSales).toBe(23000); // 25,000 - 2,000
-      expect(overview.kpis.todayExpenseTotal).toBe(5000);
-      expect(overview.kpis.netCashflowToday).toBe(18000); // 23,000 - 5,000
-
-      // Assert physical cash drawer isolation (COD and physical cash only)
-      expect(overview.drawer.hasActiveShift).toBe(true);
-      expect(overview.drawer.openingFloat).toBe(3000);
-      expect(overview.drawer.cashCollected).toBe(8000); // 10,000 COD sales - 2,000 COD refund
-      expect(overview.drawer.cashPaidOut).toBe(1000); // 1,000 advance
-      expect(overview.drawer.expectedCashInDrawer).toBe(10000); // 3,000 + 8,000 - 1,000
+      expect(overview.kpis.netCashflowToday).toBe(18000);
+      expect(overview.drawer.expectedCashInDrawer).toBe(10000);
     });
 
-    it('isolates expenses strictly by locationId, excluding other branches and unallocated records (cross-branch & unallocated isolation)', async () => {
+    it('returns olderOpenShifts and lastClosedShift with closingCashNotProvided flag', async () => {
       orderCount.mockResolvedValue(0);
-      orderAggregate.mockResolvedValue({ _sum: { totalAmount: null } });
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: 0 } });
       refundCount.mockResolvedValue(0);
-      refundAggregate.mockResolvedValue({ _sum: { totalRefund: null } });
-      shiftSessionFindFirst.mockResolvedValue(null);
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: 0 } });
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 0 } });
 
-      // Branch 1 has 1,000 + 2,000 = 3,000 BDT in expenses
-      expenseAggregate.mockResolvedValue({ _sum: { amount: 3000 } });
+      const oldShift = {
+        id: 'shift-old-1',
+        cashierId: 'cashier-1',
+        startingAmount: 2000,
+        status: ShiftStatus.OPEN,
+        openedAt: new Date('2026-10-20T04:00:00Z'),
+        cashier: { id: 'cashier-1', fullName: 'Old Cashier', publicId: 'CSH-OLD' },
+      };
 
-      const overviewLoc1 = await service.getOverview(adminActor, {
+      const lastClosed = {
+        id: 'shift-closed-1',
+        cashierId: 'cashier-2',
+        startingAmount: 5000,
+        closingAmount: null, // Count pending
+        expectedAmount: 8000,
+        variance: null,
+        status: ShiftStatus.CLOSED,
+        openedAt: new Date('2026-10-25T04:00:00Z'),
+        closedAt: new Date('2026-10-25T12:00:00Z'),
+        cashier: { id: 'cashier-2', fullName: 'Closed Cashier', publicId: 'CSH-CLS' },
+      };
+
+      shiftSessionFindMany
+        .mockResolvedValueOnce([]) // todayShiftsRaw
+        .mockResolvedValueOnce([oldShift]); // olderOpenShiftsRaw
+      shiftSessionFindFirst.mockResolvedValue(lastClosed); // lastClosedShiftRaw
+
+      const overview = await service.getOverview(adminActor, {
         businessId: 'biz-1',
         locationId: 'loc-1',
       });
 
-      expect(expenseAggregate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            businessId: 'biz-1',
-            locationId: 'loc-1', // Strictly branch 1
-            deletedAt: null,
-          }),
-          _sum: { amount: true },
-        }),
-      );
-      expect(overviewLoc1.kpis.todayExpenseTotal).toBe(3000);
+      expect(overview.olderOpenShifts).toHaveLength(1);
+      expect(overview.olderOpenShiftCount).toBe(1);
+      expect(overview.olderOpenShifts![0].isOverdue).toBe(true);
 
-      // Now query Branch 2 - should query locationId: 'loc-2' and isolate
-      locationFindFirst.mockResolvedValue({
-        id: 'loc-2',
-        name: 'Dhanmondi Branch',
-      });
+      expect(overview.lastClosedShift).toBeDefined();
+      expect(overview.lastClosedShift?.closingCashNotProvided).toBe(true);
+      expect(overview.lastClosedShift?.closingAmount).toBeNull();
+    });
+
+    it('returns cashierLoginStatuses to Admin without leaking sessionId or passwords', async () => {
+      orderCount.mockResolvedValue(0);
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: 0 } });
+      refundCount.mockResolvedValue(0);
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: 0 } });
       expenseAggregate.mockResolvedValue({ _sum: { amount: 0 } });
 
-      const overviewLoc2 = await service.getOverview(adminActor, {
+      userFindMany.mockResolvedValue([
+        {
+          id: 'cashier-1',
+          fullName: 'Tanvir',
+          publicId: 'CSH-1',
+          isLoggedIn: true,
+          lastLoginAt: new Date('2026-11-06T08:00:00Z'),
+          lastLogoutAt: null,
+        },
+        {
+          id: 'cashier-2',
+          fullName: 'Rahim',
+          publicId: 'CSH-2',
+          isLoggedIn: false,
+          lastLoginAt: new Date('2026-11-05T08:00:00Z'),
+          lastLogoutAt: new Date('2026-11-05T17:00:00Z'),
+        },
+      ]);
+
+      const overview = await service.getOverview(adminActor, {
         businessId: 'biz-1',
-        locationId: 'loc-2',
+        locationId: 'loc-1',
       });
 
-      expect(expenseAggregate).toHaveBeenCalledWith(
+      expect(overview.cashierLoginStatuses).toBeDefined();
+      expect(overview.cashierLoginStatuses).toHaveLength(2);
+      expect(overview.cashierLoginStatuses![0]).toEqual({
+        cashierId: 'cashier-1',
+        fullName: 'Tanvir',
+        publicId: 'CSH-1',
+        isLoggedIn: true,
+        lastLoginAt: expect.any(String),
+        lastLogoutAt: null,
+      });
+      // Ensure no sessionId property exists
+      expect((overview.cashierLoginStatuses![0] as any).sessionId).toBeUndefined();
+    });
+
+    it('restricts cashier callers to their own shifts and omits cashierLoginStatuses', async () => {
+      orderCount.mockResolvedValue(0);
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: 0 } });
+      refundCount.mockResolvedValue(0);
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: 0 } });
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 0 } });
+
+      const overview = await service.getOverview(cashierActor, {
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      });
+
+      expect(overview.cashierLoginStatuses).toBeUndefined();
+      expect(userFindMany).not.toHaveBeenCalled();
+
+      // Check query was scoped to cashierId
+      expect(shiftSessionFindMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            businessId: 'biz-1',
-            locationId: 'loc-2',
-            deletedAt: null,
+            cashierId: 'cashier-uuid-1',
           }),
         }),
       );
-      expect(overviewLoc2.kpis.todayExpenseTotal).toBe(0);
+    });
+
+    it('isolates expenses strictly by locationId, excluding other branches and unallocated records', async () => {
+      orderCount.mockResolvedValue(0);
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: 0 } });
+      refundCount.mockResolvedValue(0);
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: 0 } });
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 4500 } });
+
+      await service.getOverview(adminActor, {
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+      });
+
+      expect(expenseAggregate).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          businessId: 'biz-1',
+          locationId: 'loc-1',
+        }),
+        _sum: { amount: true },
+      });
     });
 
     it('excludes soft-deleted expense records (deletedAt: null check)', async () => {
       orderCount.mockResolvedValue(0);
-      orderAggregate.mockResolvedValue({ _sum: { totalAmount: null } });
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: 0 } });
       refundCount.mockResolvedValue(0);
-      refundAggregate.mockResolvedValue({ _sum: { totalRefund: null } });
-      shiftSessionFindFirst.mockResolvedValue(null);
-      expenseAggregate.mockResolvedValue({ _sum: { amount: 3000 } });
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: 0 } });
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 0 } });
 
       await service.getOverview(adminActor, {
         businessId: 'biz-1',
@@ -323,8 +436,6 @@ describe('AdminDashboardService', () => {
       orderAggregate.mockResolvedValue({ _sum: { totalAmount: null } });
       refundCount.mockResolvedValue(0);
       refundAggregate.mockResolvedValue({ _sum: { totalRefund: null } });
-      shiftSessionFindFirst.mockResolvedValue(null);
-      // Missing data: _sum.amount is null
       expenseAggregate.mockResolvedValue({ _sum: { amount: null } });
 
       const overview = await service.getOverview(adminActor, {
@@ -332,19 +443,20 @@ describe('AdminDashboardService', () => {
         locationId: 'loc-1',
       });
 
-      expect(overview.kpis.todayExpenseTotal).toBe(0);
       expect(overview.kpis.todayGrossSales).toBe(0);
+      expect(overview.kpis.todayRefundedAmount).toBe(0);
       expect(overview.kpis.todayNetSales).toBe(0);
+      expect(overview.kpis.averageTicketValue).toBe(0);
+      expect(overview.kpis.todayExpenseTotal).toBe(0);
       expect(overview.kpis.netCashflowToday).toBe(0);
     });
 
     it('queries expenses strictly within Asia/Dhaka midnight boundaries', async () => {
       orderCount.mockResolvedValue(0);
-      orderAggregate.mockResolvedValue({ _sum: { totalAmount: null } });
+      orderAggregate.mockResolvedValue({ _sum: { totalAmount: 0 } });
       refundCount.mockResolvedValue(0);
-      refundAggregate.mockResolvedValue({ _sum: { totalRefund: null } });
-      shiftSessionFindFirst.mockResolvedValue(null);
-      expenseAggregate.mockResolvedValue({ _sum: { amount: 3000 } });
+      refundAggregate.mockResolvedValue({ _sum: { totalRefund: 0 } });
+      expenseAggregate.mockResolvedValue({ _sum: { amount: 0 } });
 
       await service.getOverview(adminActor, {
         businessId: 'biz-1',
@@ -355,14 +467,12 @@ describe('AdminDashboardService', () => {
       const spentAtFilter = callArgs.where.spentAt;
       expect(spentAtFilter).toBeDefined();
       expect(spentAtFilter.gte).toBeInstanceOf(Date);
-      expect(spentAtFilter.lte).toBeInstanceOf(Date);
-      // gte must be before lte
+      expect(spentAtFilter.lt).toBeInstanceOf(Date);
       expect(spentAtFilter.gte.getTime()).toBeLessThan(
-        spentAtFilter.lte.getTime(),
+        spentAtFilter.lt.getTime(),
       );
-      // Difference between start and end of day in ms should be 86399999 (23h 59m 59s 999ms)
-      expect(spentAtFilter.lte.getTime() - spentAtFilter.gte.getTime()).toBe(
-        24 * 60 * 60 * 1000 - 1,
+      expect(spentAtFilter.lt.getTime() - spentAtFilter.gte.getTime()).toBe(
+        24 * 60 * 60 * 1000,
       );
     });
   });

@@ -90,6 +90,29 @@ describe('ExportService', () => {
     expect(csv).toContain('"Rafi, Jr.",30000,5000,25000');
   });
 
+  it('filters payroll export by search term matching cashier name', async () => {
+    payrollFindMany.mockResolvedValue([]);
+    await new ExportService(prisma, new PdfService()).export(
+      { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+      {
+        type: ReportType.PAYROLL,
+        format: ReportFormat.CSV,
+        month: 10,
+        year: 2026,
+        search: 'Tanvir',
+      },
+    );
+
+    expect(payrollFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          businessId: 'biz-1',
+          cashier: { fullName: { contains: 'Tanvir', mode: 'insensitive' } },
+        }),
+      }),
+    );
+  });
+
   it('exports sales report with locationId and search filter in csv', async () => {
     orderFindMany.mockResolvedValue([
       {

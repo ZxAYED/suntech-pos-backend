@@ -15,6 +15,7 @@ import {
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import {
   getDhakaDateParts,
+  getDhakaDayRange,
   getDhakaEndOfDay,
   getDhakaStartOfDay,
 } from '../common/utils/timezone.util';
@@ -46,6 +47,57 @@ export interface DashboardOverviewDrawer {
   currency: string;
 }
 
+export interface DashboardTodayShiftItem {
+  id: string;
+  cashierId: string;
+  cashierName: string;
+  cashierPublicId: string | null;
+  status: ShiftStatus;
+  openedAt: string;
+  closedAt: string | null;
+  startingAmount: number;
+  closingAmount: number | null;
+  expectedAmount: number | null;
+  variance: number | null;
+  cashSales: number;
+  advancesOut: number;
+  closingCashNotProvided: boolean;
+  isOverdue: boolean;
+}
+
+export interface DashboardOlderOpenShiftItem {
+  id: string;
+  cashierId: string;
+  cashierName: string;
+  cashierPublicId: string | null;
+  openedAt: string;
+  startingAmount: number;
+  isOverdue: boolean;
+}
+
+export interface DashboardLastClosedShift {
+  id: string;
+  cashierId: string;
+  cashierName: string;
+  cashierPublicId: string | null;
+  openedAt: string;
+  closedAt: string | null;
+  startingAmount: number;
+  closingAmount: number | null;
+  expectedAmount: number | null;
+  variance: number | null;
+  closingCashNotProvided: boolean;
+}
+
+export interface DashboardCashierLoginStatus {
+  cashierId: string;
+  fullName: string;
+  publicId: string | null;
+  isLoggedIn: boolean;
+  lastLoginAt: string | null;
+  lastLogoutAt: string | null;
+}
+
 export interface DashboardOverviewResponse {
   date: string;
   businessId: string;
@@ -53,6 +105,16 @@ export interface DashboardOverviewResponse {
   locationName: string;
   kpis: DashboardOverviewKpis;
   drawer: DashboardOverviewDrawer;
+  todayShifts?: DashboardTodayShiftItem[];
+  todayShiftCounts?: {
+    total: number;
+    open: number;
+    closed: number;
+  };
+  olderOpenShifts?: DashboardOlderOpenShiftItem[];
+  olderOpenShiftCount?: number;
+  lastClosedShift?: DashboardLastClosedShift | null;
+  cashierLoginStatuses?: DashboardCashierLoginStatus[];
 }
 
 export interface CriticalStockItem {
@@ -192,14 +254,14 @@ export class AdminDashboardService {
       await this.resolveAndValidateScope(actor, query);
 
     const now = new Date();
-    const startOfToday = getDhakaStartOfDay(now);
-    const endOfToday = getDhakaEndOfDay(now);
+    const { start: startOfToday, nextStart: nextDayStart } =
+      getDhakaDayRange(now);
     const { year, month, day } = getDhakaDateParts(now);
     const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 
     const orderWhere: Prisma.OrderWhereInput = {
       locationId,
-      occurredAt: { gte: startOfToday, lte: endOfToday },
+      occurredAt: { gte: startOfToday, lt: nextDayStart },
       status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
     };
 
@@ -207,13 +269,13 @@ export class AdminDashboardService {
       order: {
         locationId,
       },
-      createdAt: { gte: startOfToday, lte: endOfToday },
+      createdAt: { gte: startOfToday, lt: nextDayStart },
     };
 
     const expenseWhere: Prisma.ExpenseWhereInput = {
       businessId,
       locationId,
-      spentAt: { gte: startOfToday, lte: endOfToday },
+      spentAt: { gte: startOfToday, lt: nextDayStart },
       deletedAt: null,
       sourceType: {
         in: [ExpenseSourceType.MANUAL, ExpenseSourceType.PAYROLL_NET],
@@ -226,7 +288,10 @@ export class AdminDashboardService {
       refundCount,
       refundsAgg,
       expensesAgg,
-      activeShift,
+      todayShiftsRaw,
+      olderOpenShiftsRaw,
+      lastClosedShiftRaw,
+      branchCashiers,
     ] = await Promise.all([
       this.prisma.order.count({ where: orderWhere }),
       this.prisma.order.aggregate({
@@ -242,11 +307,12 @@ export class AdminDashboardService {
         where: expenseWhere,
         _sum: { amount: true },
       }),
-      this.prisma.shiftSession.findFirst({
+      this.prisma.shiftSession.findMany({
         where: {
           businessId,
           locationId,
-          status: ShiftStatus.OPEN,
+          openedAt: { gte: startOfToday, lt: nextDayStart },
+          ...(actor.role === Role.CASHIER ? { cashierId: actor.sub } : {}),
         },
         include: {
           cashier: {
@@ -259,6 +325,62 @@ export class AdminDashboardService {
         },
         orderBy: { openedAt: 'desc' },
       }),
+      this.prisma.shiftSession.findMany({
+        where: {
+          businessId,
+          locationId,
+          status: ShiftStatus.OPEN,
+          openedAt: { lt: startOfToday },
+          ...(actor.role === Role.CASHIER ? { cashierId: actor.sub } : {}),
+        },
+        include: {
+          cashier: {
+            select: {
+              id: true,
+              fullName: true,
+              publicId: true,
+            },
+          },
+        },
+        orderBy: { openedAt: 'desc' },
+      }),
+      this.prisma.shiftSession.findFirst({
+        where: {
+          businessId,
+          locationId,
+          status: ShiftStatus.CLOSED,
+          ...(actor.role === Role.CASHIER ? { cashierId: actor.sub } : {}),
+        },
+        include: {
+          cashier: {
+            select: {
+              id: true,
+              fullName: true,
+              publicId: true,
+            },
+          },
+        },
+        orderBy: { closedAt: 'desc' },
+      }),
+      actor.role === Role.ADMIN || actor.role === Role.SUPER_ADMIN
+        ? this.prisma.user.findMany({
+            where: {
+              businessId,
+              locationId,
+              role: Role.CASHIER,
+              deletedAt: null,
+            },
+            select: {
+              id: true,
+              fullName: true,
+              publicId: true,
+              isLoggedIn: true,
+              lastLoginAt: true,
+              lastLogoutAt: true,
+            },
+            orderBy: { fullName: 'asc' },
+          })
+        : Promise.resolve([]),
     ]);
 
     const todayOrderCount = orderCount ?? 0;
@@ -270,6 +392,117 @@ export class AdminDashboardService {
       todayOrderCount > 0 ? Math.round(todayNetSales / todayOrderCount) : 0;
     const todayExpenseTotal = expensesAgg?._sum?.amount ?? 0;
     const netCashflowToday = todayNetSales - todayExpenseTotal;
+
+    const openShiftIds = (todayShiftsRaw ?? [])
+      .filter((s) => s.status === ShiftStatus.OPEN)
+      .map((s) => s.id);
+
+    const advancesMap = new Map<string, number>();
+    if (openShiftIds.length > 0 && (this.prisma.employeeAdvance as any)?.groupBy) {
+      const openShiftAdvances = await (this.prisma.employeeAdvance as any).groupBy({
+        by: ['shiftId'],
+        where: {
+          shiftId: { in: openShiftIds },
+          businessId,
+          deletedAt: null,
+        },
+        _sum: { amount: true },
+      });
+      for (const a of openShiftAdvances) {
+        if (a.shiftId) {
+          advancesMap.set(a.shiftId, a._sum?.amount ?? 0);
+        }
+      }
+    }
+
+    const todayShifts: DashboardTodayShiftItem[] = (todayShiftsRaw ?? []).map(
+      (s) => {
+        const isOpen = s.status === ShiftStatus.OPEN;
+        const liveCashSales = isOpen
+          ? (s.cashCollected ?? s.cashSales ?? 0)
+          : s.cashSales;
+        const liveAdvancesOut = isOpen
+          ? (advancesMap.get(s.id) ?? s.advancesOut ?? 0)
+          : s.advancesOut;
+        const liveExpectedAmount = isOpen
+          ? (s.startingAmount ?? 0) + liveCashSales - liveAdvancesOut
+          : s.expectedAmount;
+
+        return {
+          id: s.id,
+          cashierId: s.cashierId,
+          cashierName: s.cashier?.fullName ?? 'Store Cashier',
+          cashierPublicId: s.cashier?.publicId ?? null,
+          status: s.status,
+          openedAt: s.openedAt.toISOString(),
+          closedAt: s.closedAt ? s.closedAt.toISOString() : null,
+          startingAmount: s.startingAmount,
+          closingAmount: s.closingAmount,
+          expectedAmount: liveExpectedAmount,
+          variance: s.variance,
+          cashSales: liveCashSales,
+          advancesOut: liveAdvancesOut,
+          closingCashNotProvided:
+            s.status === ShiftStatus.CLOSED && s.closingAmount === null,
+          isOverdue: false,
+        };
+      },
+    );
+
+    const todayShiftCounts = {
+      total: todayShifts.length,
+      open: todayShifts.filter((s) => s.status === ShiftStatus.OPEN).length,
+      closed: todayShifts.filter((s) => s.status === ShiftStatus.CLOSED).length,
+    };
+
+    const olderOpenShifts: DashboardOlderOpenShiftItem[] = (
+      olderOpenShiftsRaw ?? []
+    ).map((s) => ({
+      id: s.id,
+      cashierId: s.cashierId,
+      cashierName: s.cashier?.fullName ?? 'Store Cashier',
+      cashierPublicId: s.cashier?.publicId ?? null,
+      openedAt: s.openedAt.toISOString(),
+      startingAmount: s.startingAmount,
+      isOverdue: true,
+    }));
+    const olderOpenShiftCount = olderOpenShifts.length;
+
+    const lastClosedShift: DashboardLastClosedShift | null = lastClosedShiftRaw
+      ? {
+          id: lastClosedShiftRaw.id,
+          cashierId: lastClosedShiftRaw.cashierId,
+          cashierName:
+            lastClosedShiftRaw.cashier?.fullName ?? 'Store Cashier',
+          cashierPublicId: lastClosedShiftRaw.cashier?.publicId ?? null,
+          openedAt: lastClosedShiftRaw.openedAt.toISOString(),
+          closedAt: lastClosedShiftRaw.closedAt
+            ? lastClosedShiftRaw.closedAt.toISOString()
+            : null,
+          startingAmount: lastClosedShiftRaw.startingAmount,
+          closingAmount: lastClosedShiftRaw.closingAmount,
+          expectedAmount: lastClosedShiftRaw.expectedAmount,
+          variance: lastClosedShiftRaw.variance,
+          closingCashNotProvided: lastClosedShiftRaw.closingAmount === null,
+        }
+      : null;
+
+    let cashierLoginStatuses: DashboardCashierLoginStatus[] | undefined =
+      undefined;
+    if (actor.role === Role.ADMIN || actor.role === Role.SUPER_ADMIN) {
+      cashierLoginStatuses = (branchCashiers ?? []).map((c) => ({
+        cashierId: c.id,
+        fullName: c.fullName,
+        publicId: c.publicId,
+        isLoggedIn: c.isLoggedIn,
+        lastLoginAt: c.lastLoginAt ? c.lastLoginAt.toISOString() : null,
+        lastLogoutAt: c.lastLogoutAt ? c.lastLogoutAt.toISOString() : null,
+      }));
+    }
+
+    const activeShift = (todayShiftsRaw ?? []).find(
+      (s) => s.status === ShiftStatus.OPEN,
+    );
 
     let drawer: DashboardOverviewDrawer;
     if (!activeShift) {
@@ -353,6 +586,12 @@ export class AdminDashboardService {
         netCashflowToday,
       },
       drawer,
+      todayShifts,
+      todayShiftCounts,
+      olderOpenShifts,
+      olderOpenShiftCount,
+      lastClosedShift,
+      ...(cashierLoginStatuses ? { cashierLoginStatuses } : {}),
     };
   }
 

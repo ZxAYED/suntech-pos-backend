@@ -1,4 +1,4 @@
-import { PaymentMethod, Role } from '@prisma/client';
+import { OrderStatus, PaymentMethod, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminDashboard, ReportService } from './report.service';
 
@@ -73,6 +73,7 @@ describe('ReportService', () => {
         location: { businessId: 'biz-1' },
         locationId: 'loc-1',
         occurredAt: expect.any(Object) as object,
+        status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
       },
       _sum: { totalAmount: true },
     });
@@ -406,7 +407,7 @@ describe('ReportService', () => {
           location: { businessId: 'biz-1' },
           occurredAt: expect.objectContaining({
             gte: expect.any(Date),
-            lte: expect.any(Date),
+            lt: expect.any(Date),
           }),
         }),
       }),

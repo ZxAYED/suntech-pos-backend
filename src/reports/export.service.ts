@@ -4,10 +4,11 @@ import {
   NotFoundException,
   StreamableFile,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { OrderStatus, Prisma } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { requireBusinessId } from '../hr/require-business-id';
 import { payrollPeriod } from '../hr/payroll-period';
+import { formatDhakaDateString } from '../common/utils/timezone.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { toCsv } from './csv';
 import {
@@ -90,6 +91,7 @@ export class ExportService {
     query: ExportReportQueryDto,
     subtitle: string,
   ) {
+    const search = query.search?.trim();
     const records = await this.prisma.payrollRecord.findMany({
       where: {
         businessId,
@@ -97,6 +99,14 @@ export class ExportService {
         year: query.year,
         ...(query.locationId
           ? { cashier: { locationId: query.locationId } }
+          : {}),
+        ...(search
+          ? {
+              cashier: {
+                fullName: { contains: search, mode: 'insensitive' },
+                ...(query.locationId ? { locationId: query.locationId } : {}),
+              },
+            }
           : {}),
       },
       select: {
@@ -129,6 +139,7 @@ export class ExportService {
     const period = payrollPeriod(query.year, query.month);
     const where: Prisma.OrderWhereInput = {
       location: { businessId },
+      status: { in: [OrderStatus.PAID, OrderStatus.REFUNDED] },
       occurredAt: { gte: period.start, lt: period.end },
       ...(query.locationId ? { locationId: query.locationId } : {}),
     };
@@ -172,7 +183,7 @@ export class ExportService {
 
         return [
           order.invoiceNumber ?? order.receiptNumber ?? '',
-          order.occurredAt.toISOString().slice(0, 10),
+          formatDhakaDateString(order.occurredAt),
           order.cashier.fullName,
           order.customerName ??
             order.customerPhone ??
