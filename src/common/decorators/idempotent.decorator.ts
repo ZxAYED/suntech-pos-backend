@@ -1,11 +1,13 @@
 import { applyDecorators, SetMetadata } from '@nestjs/common';
+import { ATOMIC_IDEMPOTENCY_KEY } from '../interceptors/atomic-idempotency';
 import { ApiHeader } from '@nestjs/swagger';
 
 export const IDEMPOTENT_KEY = 'idempotent';
 
-export const Idempotent = () =>
+export const Idempotent = (options: { atomic?: boolean } = {}) =>
   applyDecorators(
     SetMetadata(IDEMPOTENT_KEY, true),
+    SetMetadata(ATOMIC_IDEMPOTENCY_KEY, options.atomic === true),
     ApiHeader({
       name: 'Idempotency-Key',
       description:

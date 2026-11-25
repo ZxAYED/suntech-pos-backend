@@ -4,18 +4,23 @@ import {
   ConflictException,
   ExecutionContext,
   HttpStatus,
+  HttpException,
   Injectable,
+  InternalServerErrorException,
+  Logger,
   NestInterceptor,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
 import { createHash } from 'crypto';
-import { Observable, catchError, from, mergeMap, of, throwError } from 'rxjs';
+import { Observable, catchError, from, map, mergeMap, of, throwError } from 'rxjs';
 import { IDEMPOTENT_KEY } from '../decorators/idempotent.decorator';
 import { isUniqueConstraintError } from '../prisma/is-unique-constraint.error';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AccessTokenPayload } from '../types/access-token-payload';
+import { ATOMIC_IDEMPOTENCY_KEY, attachAtomicReceipt, type AtomicReceiptContext } from './atomic-idempotency';
+import { RESPONSE_MESSAGE_KEY } from '../decorators/response-message.decorator';
 import { toStoredJson } from './to-stored-json';
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
@@ -31,6 +36,8 @@ type StoredResponse = {
 
 @Injectable()
 export class IdempotencyInterceptor implements NestInterceptor {
+  private readonly logger = new Logger(IdempotencyInterceptor.name);
+
   constructor(
     private readonly reflector: Reflector,
     private readonly prisma: PrismaService,
@@ -71,6 +78,22 @@ export class IdempotencyInterceptor implements NestInterceptor {
     const scopeId = this.resolveScopeId(request);
     const path = request.path;
     const requestHash = this.requestHash(request);
+    if (this.reflector.get<boolean>(ATOMIC_IDEMPOTENCY_KEY, context.getHandler()) === true) {
+      const receipt: AtomicReceiptContext = {
+        scopeId, key, path, requestHash,
+        statusCode: this.reflector.get<number>('__httpCode__', context.getHandler()) ?? (method === 'POST' ? HttpStatus.CREATED : HttpStatus.OK),
+        message: this.reflector.get<string>(RESPONSE_MESSAGE_KEY, context.getHandler()) ?? 'Request successful',
+      };
+      attachAtomicReceipt(request, receipt);
+      // No out-of-transaction reservation or completion for this handler. It must
+      // co-commit the exact HTTP envelope with its domain writes.
+      return next.handle().pipe(map(() => {
+        if (!receipt.response) throw new InternalServerErrorException('Atomic financial receipt missing');
+        response.status(receipt.response.statusCode);
+        return receipt.response.responseBody;
+      }));
+    }
+    await this.reserveSaleProtocol(request, key);
     const replay = await this.resolveReplay(scopeId, key, path, requestHash);
 
     if (replay) {
@@ -87,17 +110,84 @@ export class IdempotencyInterceptor implements NestInterceptor {
       (method === 'POST' ? HttpStatus.CREATED : HttpStatus.OK);
 
     return next.handle().pipe(
+      catchError((error: unknown) => {
+        // A server/transport error may arrive after the financial transaction committed.
+        // Release only definitive input/permission failures; keep uncertain effects for review.
+        const definitelyRejected =
+          error instanceof HttpException &&
+          [400, 401, 403, 404, 422].includes(error.getStatus());
+        return definitelyRejected
+          ? from(this.releaseLock(scopeId, key)).pipe(
+              mergeMap(() => throwError(() => error)),
+            )
+          : throwError(() => error);
+      }),
       mergeMap((body: unknown) =>
-        from(this.storeSuccess(scopeId, key, statusCode, body)).pipe(
-          mergeMap(() => of(body)),
-        ),
-      ),
-      catchError((error: unknown) =>
-        from(this.releaseLock(scopeId, key)).pipe(
-          mergeMap(() => throwError(() => error)),
-        ),
+        from(
+          this.storeSuccess(scopeId, key, statusCode, body).catch((err) => {
+            this.logger.warn(
+              `Failed to record idempotency success for key ${key}: ${err?.message}`,
+            );
+          }),
+        ).pipe(mergeMap(() => of(body))),
       ),
     );
+  }
+
+  private async reserveSaleProtocol(
+    request: RequestWithUser,
+    key: string,
+  ): Promise<void> {
+    if (
+      !/\/orders(?:\/(?:catalog|custom))?$/.test(request.path) ||
+      !request.user?.sub ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        key,
+      )
+    )
+      return;
+    const context = {
+      userId: request.user.sub,
+      businessId: request.user.businessId ?? null,
+      locationId: request.user.locationId ?? null,
+      protocol: 'LEGACY_HTTP',
+      legacyPath: request.path,
+    };
+    try {
+      await this.prisma.financialSaleIdentity.create({
+        data: { id: key, ...context },
+      });
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) throw error;
+      const owner = await this.prisma.financialSaleIdentity.findUnique({
+        where: { id: key },
+      });
+      if (
+        !owner ||
+        owner.protocol !== context.protocol ||
+        owner.userId !== context.userId ||
+        owner.businessId !== context.businessId ||
+        owner.locationId !== context.locationId ||
+        owner.legacyPath !== context.legacyPath
+      ) {
+        throw new ConflictException({
+          code: 'SALE_PROTOCOL_CONFLICT',
+          message:
+            'This purchase identity belongs to another checkout protocol or scope. Recover it using the original route.',
+        });
+      }
+    }
+    // Existing v1/v2 accepted sync orders predate or may not yet have this registry row.
+    const synced = await this.prisma.order.findUnique({
+      where: { clientOrderId: key },
+      select: { id: true },
+    });
+    if (synced)
+      throw new ConflictException({
+        code: 'SALE_PROTOCOL_CONFLICT',
+        message:
+          'This purchase was already sent through order synchronization. Reuse its saved sync event.',
+      });
   }
 
   private resolveScopeId(request: RequestWithUser): string {
@@ -192,15 +282,9 @@ export class IdempotencyInterceptor implements NestInterceptor {
       return null;
     }
 
-    if (existing.expiresAt.getTime() <= Date.now()) {
-      if (existing.statusCode === PENDING_STATUS) {
-        await this.prisma.idempotencyRecord.deleteMany({
-          where: { id: existing.id, statusCode: PENDING_STATUS },
-        });
-        return null;
-      }
-      // Completed financial/stock operation records are permanently retained for replay protection (O07)
-    }
+    // An expired PENDING lock is not proof that no sale happened. A process can
+    // crash after domain commit and before storeSuccess. Retain both pending
+    // and completed identities until an authoritative recovery resolves them.
 
     if (existing.path !== path) {
       throw new ConflictException(
