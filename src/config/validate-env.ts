@@ -44,6 +44,20 @@ export function validateEnv(
   }
 
   if (
+    config.OFFLINE_MAX_FUTURE_SKEW_SECONDS !== undefined &&
+    config.OFFLINE_MAX_FUTURE_SKEW_SECONDS !== ''
+  ) {
+    const skew = Number(config.OFFLINE_MAX_FUTURE_SKEW_SECONDS);
+    if (!Number.isInteger(skew) || skew < 0) {
+      throw new Error(
+        'OFFLINE_MAX_FUTURE_SKEW_SECONDS must be a non-negative integer',
+      );
+    }
+  } else {
+    config.OFFLINE_MAX_FUTURE_SKEW_SECONDS = 300;
+  }
+
+  if (
     config.NODE_ENV === 'production' &&
     /localhost|127\.0\.0\.1/.test(String(config.FRONTEND_URL))
   ) {

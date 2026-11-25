@@ -23,7 +23,10 @@ describe('validateEnv', () => {
 
   it('validates a complete, valid environment configuration', () => {
     const validated = validateEnv({ ...validConfig });
-    expect(validated).toEqual(validConfig);
+    expect(validated).toEqual({
+      ...validConfig,
+      OFFLINE_MAX_FUTURE_SKEW_SECONDS: 300,
+    });
   });
 
   it('throws an error if a required environment variable is missing', () => {
@@ -84,6 +87,34 @@ describe('validateEnv', () => {
       NODE_ENV: 'production',
       FRONTEND_URL: 'https://pos.suntech.com',
     };
-    expect(validateEnv(prodConfig)).toEqual(prodConfig);
+    expect(validateEnv(prodConfig)).toEqual({
+      ...prodConfig,
+      OFFLINE_MAX_FUTURE_SKEW_SECONDS: 300,
+    });
+  });
+
+  it('validates OFFLINE_MAX_FUTURE_SKEW_SECONDS or defaults to 300', () => {
+    const configWithDefault = validateEnv({ ...validConfig });
+    expect(configWithDefault.OFFLINE_MAX_FUTURE_SKEW_SECONDS).toBe(300);
+
+    const configWithCustom = validateEnv({
+      ...validConfig,
+      OFFLINE_MAX_FUTURE_SKEW_SECONDS: '600',
+    });
+    expect(configWithCustom.OFFLINE_MAX_FUTURE_SKEW_SECONDS).toBe('600');
+
+    expect(() =>
+      validateEnv({
+        ...validConfig,
+        OFFLINE_MAX_FUTURE_SKEW_SECONDS: '-10',
+      }),
+    ).toThrow('OFFLINE_MAX_FUTURE_SKEW_SECONDS must be a non-negative integer');
+
+    expect(() =>
+      validateEnv({
+        ...validConfig,
+        OFFLINE_MAX_FUTURE_SKEW_SECONDS: 'abc',
+      }),
+    ).toThrow('OFFLINE_MAX_FUTURE_SKEW_SECONDS must be a non-negative integer');
   });
 });
