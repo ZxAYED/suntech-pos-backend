@@ -383,7 +383,7 @@ export class PayrollService {
     }
 
     let totalPayroll = 0;
-    const employees = staffList.map((emp) => {
+    const activeEmployees = staffList.map((emp) => {
       const record = recordsByCashier.get(emp.id);
       const isPaid = !!record;
       const baseSalary = record?.baseSalary ?? emp.monthlySalary ?? 0;
@@ -422,6 +422,31 @@ export class PayrollService {
         paidAt: record?.createdAt ?? null,
       };
     });
+
+    const activeStaffIds = new Set(staffList.map((s) => s.id));
+    const extraPaidRecords = existingRecords.filter(
+      (r) => !activeStaffIds.has(r.cashierId),
+    );
+
+    const extraEmployees = extraPaidRecords.map((record) => {
+      totalPayroll += record.netPaid;
+      return {
+        id: record.cashierId,
+        employeeName: record.cashier?.fullName ?? 'Former Staff',
+        employeeCode:
+          record.cashier?.publicId ?? `EMP-${record.cashierId.slice(-4)}`,
+        role: Role.CASHIER,
+        baseSalary: record.baseSalary,
+        allowances: 0,
+        overtime: 0,
+        advancesDeducted: record.totalAdvancesDeducted,
+        netPay: record.netPaid,
+        status: 'PAID' as const,
+        paidAt: record.createdAt ?? null,
+      };
+    });
+
+    const employees = [...activeEmployees, ...extraEmployees];
 
     const paidCount = employees.filter((e) => e.status === 'PAID').length;
     let disbursementStatus: 'DISBURSED' | 'PARTIAL' | 'PENDING' = 'PENDING';

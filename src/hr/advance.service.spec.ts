@@ -84,6 +84,7 @@ describe('AdvanceService', () => {
       select: {
         id: true,
         cashierId: true,
+        shiftId: true,
         amount: true,
         deductedAmount: true,
         reason: true,
@@ -131,6 +132,7 @@ describe('AdvanceService', () => {
       select: {
         id: true,
         cashierId: true,
+        shiftId: true,
         amount: true,
         deductedAmount: true,
         reason: true,

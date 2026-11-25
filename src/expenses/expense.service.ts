@@ -6,7 +6,11 @@ import {
 import { ExpenseCategory, ExpenseSourceType, Prisma } from '@prisma/client';
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { payrollPeriod } from '../hr/payroll-period';
-import { getDhakaDateParts } from '../common/utils/timezone.util';
+import {
+  getDhakaDateParts,
+  parseDhakaDateString,
+  parseStrictEventInstant,
+} from '../common/utils/timezone.util';
 import { requireBusinessId } from '../hr/require-business-id';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
@@ -131,7 +135,25 @@ export class ExpenseService {
       await this.assertLocation(businessId, dto.locationId);
     }
 
-    const spentAt = dto.spentAt ? new Date(dto.spentAt) : new Date();
+    let spentAt: Date;
+    if (dto.spentAt) {
+      const parsed = parseStrictEventInstant(dto.spentAt);
+      if (parsed.isValid && parsed.date) {
+        spentAt = parsed.date;
+      } else {
+        const dateOnly = parseDhakaDateString(dto.spentAt);
+        if (dateOnly) {
+          spentAt = dateOnly;
+        } else {
+          throw new BadRequestException(
+            parsed.error ||
+              'Invalid spentAt timestamp: must be an ISO 8601 instant with timezone or YYYY-MM-DD date',
+          );
+        }
+      }
+    } else {
+      spentAt = new Date();
+    }
 
     const created = await this.prisma.expense.create({
       data: {
@@ -194,7 +216,20 @@ export class ExpenseService {
       data.note = dto.note.trim() || null;
     }
     if (dto.spentAt !== undefined) {
-      data.spentAt = new Date(dto.spentAt);
+      const parsed = parseStrictEventInstant(dto.spentAt);
+      if (parsed.isValid && parsed.date) {
+        data.spentAt = parsed.date;
+      } else {
+        const dateOnly = parseDhakaDateString(dto.spentAt);
+        if (dateOnly) {
+          data.spentAt = dateOnly;
+        } else {
+          throw new BadRequestException(
+            parsed.error ||
+              'Invalid spentAt timestamp: must be an ISO 8601 instant with timezone or YYYY-MM-DD date',
+          );
+        }
+      }
     }
     if (dto.locationId !== undefined) {
       data.location = dto.locationId

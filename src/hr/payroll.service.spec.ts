@@ -311,6 +311,45 @@ describe('PayrollService', () => {
     expect(res.totalPaidPayroll).toBe(24000);
   });
 
+  it('preserves historical payroll record in summary even if cashier was later deleted or salary cleared', async () => {
+    userFindMany.mockResolvedValue([
+      {
+        id: 'cashier-1',
+        fullName: 'Alex Rivera',
+        publicId: 'ST-EMP-101',
+        role: Role.CASHIER,
+        monthlySalary: 35000,
+      },
+    ]);
+    payrollRecordFindMany.mockResolvedValue([
+      {
+        cashierId: 'cashier-deleted',
+        baseSalary: 20000,
+        totalAdvancesDeducted: 2000,
+        netPaid: 18000,
+        createdAt: new Date('2026-10-31'),
+        cashier: {
+          id: 'cashier-deleted',
+          fullName: 'Deleted Employee',
+          publicId: 'EMP-DEL',
+        },
+      },
+    ]);
+
+    const res = await service.summary(
+      { sub: 'admin-1', role: Role.ADMIN, businessId: 'biz-1' },
+      { month: 10, year: 2026 },
+    );
+
+    expect(res.employees).toHaveLength(2);
+    const former = res.employees.find((e) => e.id === 'cashier-deleted');
+    expect(former).toBeDefined();
+    expect(former?.employeeName).toBe('Deleted Employee');
+    expect(former?.status).toBe('PAID');
+    expect(former?.netPay).toBe(18000);
+    expect(res.totalPaidPayroll).toBe(18000);
+  });
+
   it('bulk disburses payroll for pending employees deducting advances', async () => {
     userFindMany.mockResolvedValue([
       {

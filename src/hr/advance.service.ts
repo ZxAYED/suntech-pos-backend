@@ -22,11 +22,13 @@ import { AdvanceSummaryQueryDto } from './dto/advance-summary.query';
 import { CreateAdvanceDto } from './dto/create-advance.dto';
 import { ListAdvancesQueryDto } from './dto/list-advances.query';
 import { payrollPeriod } from './payroll-period';
+import { getDhakaDayRange } from '../common/utils/timezone.util';
 import { requireBusinessId } from './require-business-id';
 
 const advanceSelect = {
   id: true,
   cashierId: true,
+  shiftId: true,
   amount: true,
   deductedAmount: true,
   reason: true,
@@ -74,11 +76,15 @@ export class AdvanceService {
       let shiftLocationId: string | null = cashier.locationId ?? null;
 
       if (tx.shiftSession?.findFirst) {
+        const { start: startOfToday, nextStart: nextDayStart } =
+          getDhakaDayRange();
         const activeShift = await tx.shiftSession.findFirst({
           where: {
             cashierId: actor.sub,
             businessId,
+            ...(cashier.locationId ? { locationId: cashier.locationId } : {}),
             status: ShiftStatus.OPEN,
+            openedAt: { gte: startOfToday, lt: nextDayStart },
           },
           select: { id: true, locationId: true },
         });
