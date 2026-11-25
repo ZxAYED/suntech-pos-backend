@@ -4,7 +4,6 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
-  IsDateString,
   IsEnum,
   IsInt,
   IsNotEmpty,
@@ -13,6 +12,7 @@ import {
   IsUUID,
   MaxLength,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { OrderType, PaymentMethod } from '@prisma/client';
@@ -67,17 +67,22 @@ export class SyncOrderItemDto {
   clientReceiptNumber?: string;
 
   @ApiProperty({ description: 'Actual customer checkout timestamp' })
-  @IsDateString()
+  @IsString()
   occurredAt: string;
 
   @ApiProperty({ enum: OrderType })
   @IsEnum(OrderType)
   orderType: OrderType;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({
+    description:
+      'Optional shift register ID. Pass null explicitly to prevent auto-attachment.',
+    nullable: true,
+  })
   @IsOptional()
+  @ValidateIf((dto: SyncOrderItemDto) => dto.shiftId !== null)
   @IsEntityId()
-  shiftId?: string;
+  shiftId?: string | null;
 
   @ApiPropertyOptional({ enum: PaymentMethod, default: PaymentMethod.COD })
   @IsOptional()
@@ -139,5 +144,6 @@ export class SyncOrdersDto {
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(100)
+  @Type(() => SyncOrderItemDto)
   orders: SyncOrderItemDto[];
 }

@@ -2,6 +2,14 @@ import { BadRequestException } from '@nestjs/common';
 
 export const INT_MAX = 2_147_483_647;
 
+export function assertTender(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0 || value > INT_MAX) {
+    throw new BadRequestException(
+      'Tendered amount must be whole BDT between 0 and 2147483647',
+    );
+  }
+}
+
 export function lineTotal(price: number, quantity: number): number {
   if (
     !Number.isSafeInteger(price) ||

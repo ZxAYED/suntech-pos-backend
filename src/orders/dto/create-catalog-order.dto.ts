@@ -42,10 +42,15 @@ export class CreateCatalogOrderDto {
   @IsOptional()
   @IsEntityId()
   businessId?: string;
-  @ApiPropertyOptional({ description: 'Optional shift register ID' })
+  @ApiPropertyOptional({
+    description:
+      'Optional shift register ID. Pass null explicitly to prevent auto-attachment.',
+    nullable: true,
+  })
   @IsOptional()
+  @ValidateIf((dto: CreateCatalogOrderDto) => dto.shiftId !== null)
   @IsEntityId()
-  shiftId?: string;
+  shiftId?: string | null;
 
   @ApiPropertyOptional({
     description:

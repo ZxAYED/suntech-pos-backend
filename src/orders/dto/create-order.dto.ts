@@ -84,6 +84,17 @@ export class CreateOrderDto {
   @MaxLength(40)
   customerNumber?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Shift session ID. Omit to auto-attach current open shift; pass null explicitly to detach.',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+    nullable: true,
+  })
+  @IsOptional()
+  @ValidateIf((dto: CreateOrderDto) => dto.shiftId !== null)
+  @IsString()
+  shiftId?: string | null;
+
   @ApiProperty({
     type: [OrderLineDto],
     description: 'List of order line items',
