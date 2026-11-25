@@ -13,6 +13,7 @@ import {
   ShiftStatus,
   StockTransactionType,
 } from '@prisma/client';
+import { computeSyncPayloadHash } from './sync-payload-hash';
 import { OrdersService } from './order.service';
 
 describe('OrdersService', () => {
@@ -30,6 +31,7 @@ describe('OrdersService', () => {
   const orderFindMany = jest.fn();
   const orderFindUnique = jest.fn();
   const auditCreate = jest.fn();
+  const auditFindFirst = jest.fn();
   const locationStockFindUnique = jest.fn();
   const locationStockUpdate = jest.fn();
   const locationStockUpdateMany = jest.fn();
@@ -53,7 +55,7 @@ describe('OrdersService', () => {
       findMany: orderFindMany,
       findUnique: orderFindUnique,
     },
-    auditLog: { create: auditCreate },
+    auditLog: { create: auditCreate, findFirst: auditFindFirst },
     locationStock: {
       findUnique: locationStockFindUnique,
       update: locationStockUpdate,
@@ -71,6 +73,7 @@ describe('OrdersService', () => {
       findMany: orderFindMany,
       findUnique: orderFindUnique,
     },
+    auditLog: { create: auditCreate, findFirst: auditFindFirst },
   };
 
   const service = new OrdersService(prisma as never);
@@ -424,6 +427,58 @@ describe('OrdersService', () => {
       );
     });
 
+    it('keeps shiftId: null and does not increment shift cash when shiftId is explicitly null', async () => {
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
+
+      await service.createCatalogOrder('user-cashier-1', {
+        locationId: 'loc-1',
+        shiftId: null,
+        paymentMethod: PaymentMethod.COD,
+        tenderedAmount: 1500,
+        lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+      });
+
+      expect(shiftUpdate).not.toHaveBeenCalled();
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            shiftId: null,
+          }),
+        }),
+      );
+    });
+
+    it('does not auto-attach an unclosed shift from a previous day when shiftId is omitted', async () => {
+      shiftFindFirst.mockResolvedValue(null);
+      variantFindMany.mockResolvedValue([mockCatalogVariant]);
+
+      await service.createCatalogOrder('user-cashier-1', {
+        locationId: 'loc-1',
+        paymentMethod: PaymentMethod.COD,
+        tenderedAmount: 1500,
+        lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
+      });
+
+      expect(shiftFindFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            openedAt: expect.objectContaining({
+              gte: expect.any(Date),
+              lt: expect.any(Date),
+            }),
+          }),
+        }),
+      );
+      expect(shiftUpdate).not.toHaveBeenCalled();
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            shiftId: null,
+          }),
+        }),
+      );
+    });
+
     it('allows Admin to sell without shiftId', async () => {
       userFindFirst.mockResolvedValue(adminUser);
       shiftFindFirst.mockResolvedValue(null);
@@ -693,6 +748,31 @@ describe('OrdersService', () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
+
+    it('keeps shiftId: null and does not increment shift cash when shiftId is explicitly null', async () => {
+      await service.createCustomOrder('user-cashier-1', {
+        locationId: 'loc-1',
+        shiftId: null,
+        paymentMethod: PaymentMethod.COD,
+        tenderedAmount: 500,
+        lines: [
+          {
+            productName: 'Custom repair',
+            quantity: 1,
+            unitPrice: 500,
+          },
+        ],
+      });
+
+      expect(shiftUpdate).not.toHaveBeenCalled();
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            shiftId: null,
+          }),
+        }),
+      );
+    });
   });
 
   describe('syncOrders', () => {
@@ -705,9 +785,27 @@ describe('OrdersService', () => {
 
     it('returns independent accepted, duplicate, and rejected results', async () => {
       shiftFindFirst.mockResolvedValue(null);
+      const secondItemHash = computeSyncPayloadHash({
+        clientOrderId: '22222222-2222-4222-8222-222222222222',
+        deviceId: 'counter-01',
+        businessId: 'biz-1',
+        locationId: 'loc-1',
+        cashierId: 'user-cashier-1',
+        occurredAt: '2026-10-24T13:31:00+06:00',
+        orderType: OrderType.CUSTOM,
+        paymentMethod: PaymentMethod.COD,
+        tenderedAmount: 200,
+        shiftId: null,
+        lines: [{ productName: 'Cable', quantity: 1, unitPrice: 200 }],
+      });
       orderFindUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
         id: 'order-existing',
         invoiceNumber: 'INV-OLD',
+        syncPayloadHash: secondItemHash,
+        occurredAt: new Date('2026-10-24T13:31:00+06:00'),
+        createdAt: new Date('2026-10-24T13:35:00+06:00'),
+        location: { businessId: 'biz-1' },
+        cashierId: 'user-cashier-1',
       });
 
       const result = await service.syncOrders(actor, {
@@ -864,6 +962,9 @@ describe('OrdersService', () => {
         id: 'order-123',
         invoiceNumber: 'INV-123',
         totalAmount: 1000,
+        syncPayloadHash: 'v1:original-hash-differs',
+        location: { businessId: 'biz-1' },
+        cashierId: 'user-cashier-1',
         lines: [{ quantity: 1, unitPrice: 1000 }],
       });
 
@@ -886,6 +987,211 @@ describe('OrdersService', () => {
       expect(result.results[0].error).toContain(
         'clientOrderId replay mismatch',
       );
+    });
+
+    it('keeps shiftId: null and suppresses SHIFT_NOT_ATTACHED warning when shiftId is explicitly null', async () => {
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '66666666-6666-4666-8666-666666666666',
+            occurredAt: '2026-10-24T13:30:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            shiftId: null,
+            lines: [{ productName: 'Repair', quantity: 1, unitPrice: 500 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('ACCEPTED');
+      expect(result.results[0].warnings).toEqual([]);
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            shiftId: null,
+          }),
+        }),
+      );
+    });
+
+    it('rejects order with TIMESTAMP_TIMEZONE_REQUIRED when occurredAt lacks timezone offset', async () => {
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '11111111-2222-4333-8444-555555555555',
+            occurredAt: '2026-10-24T13:30:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            lines: [{ productName: 'Repair', quantity: 1, unitPrice: 500 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('REJECTED');
+      expect(result.results[0].errorCode).toBe('TIMESTAMP_TIMEZONE_REQUIRED');
+      expect(result.serverTime).toBeDefined();
+    });
+
+    it('rejects order with TIMESTAMP_INVALID when occurredAt is an impossible calendar date', async () => {
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '11111111-2222-4333-8444-555555555555',
+            occurredAt: '2026-02-30T13:30:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            lines: [{ productName: 'Repair', quantity: 1, unitPrice: 500 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('REJECTED');
+      expect(result.results[0].errorCode).toBe('TIMESTAMP_INVALID');
+    });
+
+    it('accepts future timestamp within 300s skew with CLOCK_SKEW_TOLERATED warning', async () => {
+      const nearFuture = new Date(Date.now() + 60 * 1000).toISOString();
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '22222222-3333-4444-8555-666666666666',
+            occurredAt: nearFuture,
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            shiftId: null,
+            lines: [{ productName: 'Repair', quantity: 1, unitPrice: 500 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('ACCEPTED');
+      expect(result.results[0].warnings).toContain('CLOCK_SKEW_TOLERATED');
+    });
+
+    it('rejects future timestamp beyond skew with TIMESTAMP_FUTURE_REVIEW_REQUIRED', async () => {
+      const farFuture = new Date(Date.now() + 3600 * 1000).toISOString();
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '33333333-4444-4555-8666-777777777777',
+            occurredAt: farFuture,
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            lines: [{ productName: 'Repair', quantity: 1, unitPrice: 500 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('REJECTED');
+      expect(result.results[0].errorCode).toBe('TIMESTAMP_FUTURE_REVIEW_REQUIRED');
+    });
+
+    it('accepts valid 10-day-old offline order without past-age rejection', async () => {
+      const past10Days = new Date(Date.now() - 10 * 86400 * 1000).toISOString();
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '44444444-5555-4666-8777-888888888888',
+            occurredAt: past10Days,
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            shiftId: null,
+            lines: [{ productName: 'Old offline sale', quantity: 1, unitPrice: 500 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('ACCEPTED');
+      expect(result.results[0].warnings).not.toContain('CLOCK_SKEW_TOLERATED');
+    });
+
+    it('rejects clientOrderId replay when tenant or cashier context differs', async () => {
+      orderFindUnique.mockResolvedValueOnce({
+        id: 'order-diff-tenant',
+        invoiceNumber: 'INV-DIFF',
+        syncPayloadHash: 'v1:any-hash',
+        location: { businessId: 'different-biz' },
+        cashierId: 'user-cashier-1',
+      });
+
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '55555555-6666-4777-8888-999999999999',
+            occurredAt: '2026-10-24T13:30:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            lines: [{ productName: 'Item', quantity: 1, unitPrice: 500 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('REJECTED');
+      expect(result.results[0].errorCode).toBe('SYNC_IDENTITY_CONFLICT');
+    });
+
+    it('rejects replay of legacy unhashed order when not admin confirmed', async () => {
+      orderFindUnique.mockResolvedValueOnce({
+        id: 'order-legacy-1',
+        invoiceNumber: 'INV-LEGACY',
+        syncPayloadHash: null,
+        location: { businessId: 'biz-1' },
+        cashierId: 'user-cashier-1',
+      });
+      auditFindFirst.mockResolvedValueOnce(null);
+
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '66666666-7777-4888-8999-000000000000',
+            occurredAt: '2026-10-24T13:30:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            lines: [{ productName: 'Legacy Item', quantity: 1, unitPrice: 500 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('REJECTED');
+      expect(result.results[0].errorCode).toBe('LEGACY_SYNC_REPLAY_REVIEW_REQUIRED');
+    });
+
+    it('accepts replay of legacy unhashed order as DUPLICATE when admin confirmed', async () => {
+      orderFindUnique.mockResolvedValueOnce({
+        id: 'order-legacy-2',
+        invoiceNumber: 'INV-LEGACY-2',
+        syncPayloadHash: null,
+        occurredAt: new Date('2026-10-24T13:30:00+06:00'),
+        createdAt: new Date('2026-10-24T13:35:00+06:00'),
+        location: { businessId: 'biz-1' },
+        cashierId: 'user-cashier-1',
+      });
+      auditFindFirst.mockResolvedValueOnce({ id: 'audit-legacy-confirmed' });
+
+      const result = await service.syncOrders(actor, {
+        deviceId: 'counter-01',
+        orders: [
+          {
+            clientOrderId: '77777777-8888-4999-8000-111111111111',
+            occurredAt: '2026-10-24T13:30:00+06:00',
+            orderType: OrderType.CUSTOM,
+            tenderedAmount: 500,
+            lines: [{ productName: 'Legacy Item', quantity: 1, unitPrice: 500 }],
+          },
+        ],
+      });
+
+      expect(result.results[0].status).toBe('DUPLICATE');
+      expect(result.results[0].orderId).toBe('order-legacy-2');
+      expect(result.results[0].warnings).toContain('LEGACY_REPLAY_ADMIN_CONFIRMED');
     });
   });
 
@@ -974,7 +1280,7 @@ describe('OrdersService', () => {
           status: OrderStatus.PAID,
           occurredAt: expect.objectContaining({
             gte: expect.any(Date),
-            lte: expect.any(Date),
+            lt: expect.any(Date),
           }),
           OR: expect.arrayContaining([
             { invoiceNumber: { contains: 'INV-1234', mode: 'insensitive' } },
@@ -1079,7 +1385,7 @@ describe('OrdersService', () => {
           location: { businessId: 'biz-1' },
           occurredAt: expect.objectContaining({
             gte: expect.any(Date),
-            lte: expect.any(Date),
+            lt: expect.any(Date),
           }),
         }),
       });
@@ -1154,6 +1460,132 @@ describe('OrdersService', () => {
 
       expect(result).toBeDefined();
       expect(result.status).toBe('PAID');
+    });
+
+    it('keeps shiftId: null when shiftId is explicitly null in legacy checkout', async () => {
+      variantFindFirst.mockResolvedValue({
+        id: 'variant-1',
+        name: 'Catalog item',
+        stock: 10,
+        sellingPrice: 500,
+        costPrice: 300,
+        isActive: true,
+        product: {
+          name: 'Catalog item',
+          isActive: true,
+          deletedAt: null,
+          category: { name: 'General' },
+        },
+        locationStocks: [],
+      });
+      locationStockFindUnique.mockResolvedValue({ id: 'ls-1', stock: 10 });
+
+      await service.checkoutWithin(
+        tx as unknown as Prisma.TransactionClient,
+        {
+          sub: 'cashier-1',
+          role: Role.CASHIER,
+          businessId: 'biz-1',
+          locationId: 'loc-1',
+        },
+        'biz-1',
+        {
+          shiftId: null,
+          items: [{ variantId: 'variant-1', quantity: 1 }],
+        },
+        'RCPT-TEST-NULL',
+      );
+
+      expect(shiftUpdate).not.toHaveBeenCalled();
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ shiftId: null }),
+        }),
+      );
+    });
+
+    it('throws BadRequestException when an invalid or closed shiftId is provided to legacy checkout', async () => {
+      shiftFindFirst.mockResolvedValue({
+        id: 'shift-closed',
+        businessId: 'biz-1',
+        status: ShiftStatus.CLOSED,
+        locationId: 'loc-1',
+        cashierId: 'cashier-1',
+      });
+
+      await expect(
+        service.checkoutWithin(
+          tx as unknown as Prisma.TransactionClient,
+          {
+            sub: 'cashier-1',
+            role: Role.CASHIER,
+            businessId: 'biz-1',
+            locationId: 'loc-1',
+          },
+          'biz-1',
+          {
+            shiftId: 'shift-closed',
+            items: [{ variantId: 'variant-1', quantity: 1 }],
+          },
+          'RCPT-TEST-INVALID',
+        ),
+      ).rejects.toThrow(
+        new BadRequestException(
+          'Provided shiftId is invalid, closed, or not accessible',
+        ),
+      );
+    });
+
+    it('does not attach an older prior-day open shift when shiftId is omitted in legacy checkout', async () => {
+      shiftFindFirst.mockResolvedValue(null);
+      variantFindFirst.mockResolvedValue({
+        id: 'variant-1',
+        name: 'Catalog item',
+        stock: 10,
+        sellingPrice: 500,
+        costPrice: 300,
+        isActive: true,
+        product: {
+          name: 'Catalog item',
+          isActive: true,
+          deletedAt: null,
+          category: { name: 'General' },
+        },
+        locationStocks: [],
+      });
+      locationStockFindUnique.mockResolvedValue({ id: 'ls-1', stock: 10 });
+
+      await service.checkoutWithin(
+        tx as unknown as Prisma.TransactionClient,
+        {
+          sub: 'cashier-1',
+          role: Role.CASHIER,
+          businessId: 'biz-1',
+          locationId: 'loc-1',
+        },
+        'biz-1',
+        {
+          items: [{ variantId: 'variant-1', quantity: 1 }],
+        },
+        'RCPT-TEST-NO-TODAY-SHIFT',
+      );
+
+      expect(shiftFindFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            openedAt: expect.objectContaining({
+              gte: expect.any(Date),
+              lt: expect.any(Date),
+            }),
+          }),
+        }),
+      );
+      expect(shiftUpdate).not.toHaveBeenCalled();
+      expect(orderCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ shiftId: null }),
+        }),
+      );
     });
   });
 
@@ -1340,6 +1772,127 @@ describe('OrdersService', () => {
           lines: [{ variantId: 'variant-1', quantity: 1, unitPrice: 1500 }],
         } as any),
       ).rejects.toThrow('Location does not belong to the specified business');
+    });
+  });
+
+  describe('confirmLegacySync', () => {
+    const adminActor = {
+      sub: 'admin-1',
+      role: Role.ADMIN,
+      businessId: 'biz-1',
+      businessIds: ['biz-1'],
+    };
+
+    const validOrderDto = {
+      clientOrderId: 'some-client-order-id',
+      occurredAt: '2026-10-24T13:30:00+06:00',
+      orderType: OrderType.CUSTOM,
+      paymentMethod: PaymentMethod.COD,
+      tenderedAmount: 500,
+      lines: [{ productName: 'Item', quantity: 1, unitPrice: 500 }],
+    };
+
+    it('successfully confirms legacy unhashed order', async () => {
+      orderFindUnique.mockResolvedValueOnce({
+        id: 'order-legacy-confirm',
+        clientOrderId: 'some-client-order-id',
+        invoiceNumber: 'INV-LEGACY-CONFIRM',
+        syncPayloadHash: null,
+        totalAmount: 500,
+        paymentMethod: PaymentMethod.COD,
+        occurredAt: new Date('2026-10-24T13:30:00+06:00'),
+        createdAt: new Date('2026-10-24T13:35:00+06:00'),
+        lines: [{ quantity: 1, unitPrice: 500 }],
+        location: { businessId: 'biz-1' },
+      });
+      auditCreate.mockResolvedValueOnce({ id: 'audit-legacy-1' });
+      auditFindFirst.mockResolvedValueOnce(null);
+      userFindFirst.mockResolvedValueOnce({
+        id: 'admin-1',
+        role: Role.ADMIN,
+        ownedBusinesses: [{ id: 'biz-1' }],
+      });
+
+      const res = await service.confirmLegacySync(
+        adminActor,
+        'order-legacy-confirm',
+        {
+          deviceId: 'counter-01',
+          reason: 'Verified with physical paper receipt',
+          order: validOrderDto,
+        },
+      );
+
+      expect(res.orderId).toBe('order-legacy-confirm');
+      expect(res.status).toBe('DUPLICATE');
+      expect(res.warnings).toContain('LEGACY_REPLAY_ADMIN_CONFIRMED');
+      expect(auditCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'LEGACY_SYNC_REPLAY_CONFIRMED',
+          }),
+        }),
+      );
+    });
+
+    it('rejects confirmation if order already has syncPayloadHash', async () => {
+      orderFindUnique.mockResolvedValueOnce({
+        id: 'order-already-hashed',
+        clientOrderId: 'some-client-order-id',
+        syncPayloadHash: 'v1:already-hashed',
+        totalAmount: 500,
+        paymentMethod: PaymentMethod.COD,
+        lines: [{ quantity: 1, unitPrice: 500 }],
+        location: { businessId: 'biz-1' },
+      });
+      userFindFirst.mockResolvedValueOnce({
+        id: 'admin-1',
+        role: Role.ADMIN,
+        ownedBusinesses: [{ id: 'biz-1' }],
+      });
+
+      await expect(
+        service.confirmLegacySync(adminActor, 'order-already-hashed', {
+          deviceId: 'counter-01',
+          reason: 'Any reason',
+          order: validOrderDto,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects confirmation if reason is blank', async () => {
+      await expect(
+        service.confirmLegacySync(adminActor, 'order-legacy-unhashed', {
+          deviceId: 'counter-01',
+          reason: '   ',
+          order: validOrderDto,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('throws ForbiddenException when admin does not own the business', async () => {
+      orderFindUnique.mockResolvedValueOnce({
+        id: 'order-other-biz',
+        clientOrderId: 'some-client-order-id',
+        syncPayloadHash: null,
+        totalAmount: 500,
+        paymentMethod: PaymentMethod.COD,
+        lines: [{ quantity: 1, unitPrice: 500 }],
+        location: { businessId: 'other-biz' },
+      });
+      userFindFirst.mockResolvedValueOnce({
+        id: 'admin-1',
+        role: Role.ADMIN,
+        ownedBusinesses: [{ id: 'biz-1' }],
+      });
+
+      await expect(
+        service.confirmLegacySync(adminActor, 'order-other-biz', {
+          deviceId: 'counter-01',
+          reason: 'Valid rationale',
+          order: validOrderDto,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 });

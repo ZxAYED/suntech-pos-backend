@@ -5,7 +5,9 @@ import {
   HttpException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import type { ConfigService } from '@nestjs/config';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import {
@@ -20,7 +22,11 @@ import {
 import { AccessTokenPayload } from '../common/types/access-token-payload';
 import { isUniqueConstraintError } from '../common/prisma/is-unique-constraint.error';
 import { requireBusinessId } from '../hr/require-business-id';
-import { resolveDhakaDateRange } from '../common/utils/timezone.util';
+import {
+  getDhakaDayRange,
+  parseStrictEventInstant,
+  resolveDhakaDateRange,
+} from '../common/utils/timezone.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCatalogOrderDto } from './dto/create-catalog-order.dto';
 import { CreateCustomOrderDto } from './dto/create-custom-order.dto';
@@ -28,8 +34,11 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { GetOrdersQueryDto } from './dto/get-orders.query';
 import { ListOrdersQueryDto } from './dto/list-orders.query';
 import { SyncOrderItemDto, SyncOrdersDto } from './dto/sync-orders.dto';
+import { ConfirmLegacySyncDto } from './dto/confirm-legacy-sync.dto';
 import { createInvoiceNumber } from './invoice-number';
-import { lineTotal, sumMoney } from './money';
+import { assertTender, lineTotal, sumMoney } from './money';
+import { toStoredJson } from '../common/interceptors/to-stored-json';
+import { computeSyncPayloadHash } from './sync-payload-hash';
 import { createReceiptNumber } from './receipt-number';
 import { RefundStatus, refundStatus } from './refund-status';
 
@@ -216,12 +225,19 @@ export interface ListedOrder {
 const INVOICE_ATTEMPTS = 3;
 const LOW_STOCK_THRESHOLD = 5;
 
-type OfflineOrderOptions = {
+export type OfflineOrderOptions = {
+  executionMode?: 'LEGACY_SYNC' | 'LOCAL_FIRST';
+  pricePolicy?: 'CURRENT_PRICE' | 'CAPTURED_PRICE';
+  closedShiftPolicy?: 'REVIEW' | 'DETACH_WITH_WARNING';
+  syncProtocol?: 2;
   clientOrderId: string;
   clientReceiptNumber?: string;
   deviceId: string;
   occurredAt: Date;
+  rawOccurredAt?: string;
+  syncPayloadHash?: string;
   warnings: string[];
+  syncAuditMetadata?: Record<string, unknown>;
 };
 
 type CatalogOrderInput = Omit<CreateCatalogOrderDto, 'lines'> & {
@@ -239,24 +255,34 @@ export type SyncOrderResult = {
   status: 'ACCEPTED' | 'DUPLICATE' | 'REJECTED';
   orderId?: string;
   invoiceNumber?: string;
-  warnings: string[];
+  occurredAt?: string;
+  createdAt?: string;
+  errorCode?: string;
   error?: string;
+  warnings: string[];
+  reconciliationId?: string;
 };
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly configService?: ConfigService,
+  ) {}
 
   async createCatalogOrder(
     actor: AccessTokenPayload | string,
     dto: CatalogOrderInput,
     options?: OfflineOrderOptions,
   ): Promise<PresentedOrder> {
+    assertTender(dto.tenderedAmount);
     if (!dto.lines?.length) {
       throw new BadRequestException(
         'Order must contain at least one line item',
       );
     }
+
+    const operationTime = options?.occurredAt ?? new Date();
 
     for (let attempt = 1; attempt <= INVOICE_ATTEMPTS; attempt += 1) {
       try {
@@ -269,6 +295,7 @@ export class OrdersService {
               dto,
               invoiceNumber,
               options,
+              operationTime,
             );
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -304,8 +331,10 @@ export class OrdersService {
   private async resolveOrderExecutionContext(
     tx: Prisma.TransactionClient,
     actor: AccessTokenPayload | string,
-    dto: { businessId?: string; locationId?: string; shiftId?: string },
+    dto: { businessId?: string; locationId?: string; shiftId?: string | null },
     warnings?: string[],
+    isOfflineSync = false,
+    operationTime = new Date(),
   ): Promise<{
     userId: string;
     businessId: string;
@@ -409,9 +438,11 @@ export class OrdersService {
     const businessId = effectiveBusinessId;
 
     let shiftId: string | null = null;
-    if (dto.shiftId) {
+    if (dto.shiftId === null) {
+      shiftId = null;
+    } else if (typeof dto.shiftId === 'string' && dto.shiftId.trim() !== '') {
       const shift = await tx.shiftSession.findFirst({
-        where: { id: dto.shiftId, businessId },
+        where: { id: dto.shiftId.trim(), businessId },
         select: { id: true, status: true, locationId: true, cashierId: true },
       });
 
@@ -424,24 +455,41 @@ export class OrdersService {
       if (canAttach) {
         shiftId = shift.id;
       } else {
+        if (!isOfflineSync) {
+          throw new BadRequestException(
+            'Provided shiftId is invalid, closed, or not accessible',
+          );
+        }
+        shiftId = null;
         this.addWarning(warnings, 'SHIFT_NOT_ATTACHED');
       }
     } else {
-      const activeShift = await tx.shiftSession.findFirst({
-        where: {
-          businessId,
-          cashierId: userId,
-          locationId,
-          status: ShiftStatus.OPEN,
-        },
-        orderBy: { openedAt: 'desc' },
-        select: { id: true },
-      });
-
-      if (activeShift) {
-        shiftId = activeShift.id;
-      } else {
+      if (isOfflineSync) {
+        shiftId = null;
         this.addWarning(warnings, 'SHIFT_NOT_ATTACHED');
+      } else {
+        const { start: startOfToday, nextStart: nextDayStart } =
+          getDhakaDayRange(operationTime);
+        const activeShift = await tx.shiftSession.findFirst({
+          where: {
+            businessId,
+            cashierId: userId,
+            locationId,
+            status: ShiftStatus.OPEN,
+            openedAt: {
+              gte: startOfToday,
+              lt: nextDayStart,
+            },
+          },
+          orderBy: { openedAt: 'desc' },
+          select: { id: true },
+        });
+
+        if (activeShift) {
+          shiftId = activeShift.id;
+        } else {
+          this.addWarning(warnings, 'SHIFT_NOT_ATTACHED');
+        }
       }
     }
 
@@ -459,14 +507,33 @@ export class OrdersService {
     dto: CatalogOrderInput,
     invoiceNumber: string,
     options?: OfflineOrderOptions,
+    operationTime = new Date(),
   ): Promise<PresentedOrder> {
-    const { userId, businessId, locationId, shiftId } =
-      await this.resolveOrderExecutionContext(
-        tx,
-        actor,
-        dto,
-        options?.warnings,
-      );
+    const isOfflineSync =
+      options?.executionMode === 'LOCAL_FIRST'
+        ? options.closedShiftPolicy === 'DETACH_WITH_WARNING'
+        : Boolean(options?.clientOrderId);
+    const resolvedContext = await this.resolveOrderExecutionContext(
+      tx,
+      actor,
+      dto,
+      options?.warnings,
+      isOfflineSync,
+      operationTime,
+    );
+    const { userId, businessId, locationId } = resolvedContext;
+    let shiftId = resolvedContext.shiftId;
+    if (options?.syncProtocol === 2)
+      await this.reserveLocalIdentity(tx, options, {
+        userId,
+        businessId,
+        locationId,
+      });
+
+    const allowCapturedPrices =
+      options?.executionMode === 'LOCAL_FIRST'
+        ? options.pricePolicy === 'CAPTURED_PRICE'
+        : Boolean(options);
 
     // 1. Validate Variants & Inventory
     const variantIds = [
@@ -506,15 +573,22 @@ export class OrdersService {
     for (const line of dto.lines) {
       const variant = variantMap.get(line.variantId);
       if (!variant) {
-        if (!options) {
+        if (options?.syncProtocol === 2) {
+          throw new ConflictException({
+            code: 'ITEM_UNAVAILABLE_REVIEW_REQUIRED',
+            message:
+              'The original catalog variant is unavailable. Keep the saved sale and payment evidence for review.',
+          });
+        }
+        if (!allowCapturedPrices) {
           throw new NotFoundException(`Variant not found: ${line.variantId}`);
         }
         unavailableLines.push(line);
-        this.addWarning(options.warnings, 'VARIANT_UNAVAILABLE');
+        this.addWarning(options?.warnings, 'VARIANT_UNAVAILABLE');
         continue;
       }
 
-      if (!options) {
+      if (!allowCapturedPrices) {
         if (!variant.isActive || variant.deletedAt) {
           throw new BadRequestException(
             `Variant "${variant.name}" is inactive or unavailable for online sale`,
@@ -531,7 +605,7 @@ export class OrdersService {
       requiredStock.set(line.variantId, current + line.quantity);
     }
 
-    if (!options) {
+    if (!allowCapturedPrices) {
       for (const line of dto.lines) {
         const variant = variantMap.get(line.variantId);
         if (
@@ -554,10 +628,17 @@ export class OrdersService {
     // 2. Compute Totals
     const preparedLines = dto.lines.map((line) => {
       const variant = variantMap.get(line.variantId);
-      const unitPrice = options ? line.unitPrice : variant!.sellingPrice;
+      const unitPrice = allowCapturedPrices
+        ? line.unitPrice
+        : variant!.sellingPrice;
       const subtotal = lineTotal(unitPrice, line.quantity);
 
-      if (options && variant && unitPrice !== variant.sellingPrice) {
+      if (
+        allowCapturedPrices &&
+        options &&
+        variant &&
+        unitPrice !== variant.sellingPrice
+      ) {
         this.addWarning(options.warnings, 'OFFLINE_PRICE_MISMATCH');
       }
 
@@ -589,8 +670,7 @@ export class OrdersService {
     const changeDue = dto.tenderedAmount - totalAmount;
 
     // 3. Database Transaction: stock decrement & transactions.
-    // Online checkout validates sufficient stock atomically; offline sync allows
-    // stock to go below zero because delayed offline sales must be reconciled.
+    // Existing business policy permits negative stock in both online and deferred sales.
     const stockResults: Array<{
       variantId: string;
       previousStock: number;
@@ -661,13 +741,18 @@ export class OrdersService {
       );
     }
     const paymentMethod = dto.paymentMethod ?? dto.paymentType;
-    if (!paymentMethod || !Object.values(PaymentMethod).includes(paymentMethod)) {
+    if (
+      !paymentMethod ||
+      !Object.values(PaymentMethod).includes(paymentMethod)
+    ) {
       throw new BadRequestException(
         'Explicit payment method is required: COD, BKASH, NAGAD, BANK',
       );
     }
 
     // Only COD orders increment physical drawer cash
+    const isExplicitShift =
+      typeof dto.shiftId === 'string' && dto.shiftId.trim() !== '';
     if (shiftId && paymentMethod === PaymentMethod.COD) {
       if (tx.shiftSession?.updateMany) {
         const res = await tx.shiftSession.updateMany({
@@ -676,10 +761,16 @@ export class OrdersService {
             cashCollected: { increment: totalAmount },
           },
         });
-        if (res.count === 0 && !options) {
-          throw new ConflictException(
-            'Register shift is closed or inactive. Cash sale requires an open shift.',
-          );
+        if (res.count === 0) {
+          if (isExplicitShift) {
+            throw new ConflictException(
+              'Register shift is closed or inactive. Cash sale requires an open shift.',
+            );
+          }
+          shiftId = null;
+          if (options) {
+            this.addWarning(options.warnings, 'SHIFT_NOT_ATTACHED');
+          }
         }
       } else if (tx.shiftSession?.update) {
         await tx.shiftSession.update({
@@ -698,7 +789,9 @@ export class OrdersService {
         clientOrderId: options?.clientOrderId,
         clientReceiptNumber: options?.clientReceiptNumber,
         deviceId: options?.deviceId,
-        occurredAt: options?.occurredAt ?? new Date(),
+        occurredAt: options?.occurredAt ?? operationTime,
+        syncPayloadHash: options?.syncPayloadHash ?? null,
+        ...(options?.syncProtocol === 2 ? { syncProtocol: 2 } : {}),
         orderType: OrderType.CATALOG,
         status: OrderStatus.PAID,
         locationId,
@@ -719,6 +812,30 @@ export class OrdersService {
       },
       select: unifiedOrderSelect,
     });
+
+    // Freeze every acceptance warning before saving the replay audit.
+    for (const stock of stockResults) {
+      if (stock.resultingStock <= LOW_STOCK_THRESHOLD)
+        this.addWarning(options?.warnings, 'LOW_STOCK_AFTER_SALE');
+    }
+
+    if (options?.syncAuditMetadata && tx.auditLog?.create) {
+      await tx.auditLog.create({
+        data: {
+          action: 'OFFLINE_ORDER_ACCEPTED',
+          entityType: 'Order',
+          entityId: order.id,
+          businessId,
+          locationId,
+          actorId: userId,
+          metadata: {
+            ...options.syncAuditMetadata,
+            orderId: order.id,
+            orderCreatedAt: order.createdAt,
+          },
+        },
+      });
+    }
 
     for (const stock of stockResults) {
       if (stock.resultingStock <= LOW_STOCK_THRESHOLD) {
@@ -801,7 +918,10 @@ export class OrdersService {
       }
     }
 
-    return presentOrder(order);
+    const receipt = presentOrder(order);
+    if (options?.syncProtocol === 2)
+      await this.storeLocalReceipt(tx, order.id, receipt, options.warnings);
+    return receipt;
   }
 
   async createCustomOrder(
@@ -809,11 +929,14 @@ export class OrdersService {
     dto: CreateCustomOrderDto,
     options?: OfflineOrderOptions,
   ): Promise<PresentedOrder> {
+    assertTender(dto.tenderedAmount);
     if (!dto.lines?.length) {
       throw new BadRequestException(
         'Order must contain at least one line item',
       );
     }
+
+    const operationTime = options?.occurredAt ?? new Date();
 
     for (let attempt = 1; attempt <= INVOICE_ATTEMPTS; attempt += 1) {
       try {
@@ -826,6 +949,7 @@ export class OrdersService {
               dto,
               invoiceNumber,
               options,
+              operationTime,
             );
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -864,14 +988,28 @@ export class OrdersService {
     dto: CreateCustomOrderDto,
     invoiceNumber: string,
     options?: OfflineOrderOptions,
+    operationTime = new Date(),
   ): Promise<PresentedOrder> {
-    const { userId, locationId, shiftId } =
-      await this.resolveOrderExecutionContext(
-        tx,
-        actor,
-        dto,
-        options?.warnings,
-      );
+    const isOfflineSync =
+      options?.executionMode === 'LOCAL_FIRST'
+        ? options.closedShiftPolicy === 'DETACH_WITH_WARNING'
+        : Boolean(options?.clientOrderId);
+    const resolvedContext = await this.resolveOrderExecutionContext(
+      tx,
+      actor,
+      dto,
+      options?.warnings,
+      isOfflineSync,
+      operationTime,
+    );
+    const { userId, businessId, locationId } = resolvedContext;
+    let shiftId = resolvedContext.shiftId;
+    if (options?.syncProtocol === 2)
+      await this.reserveLocalIdentity(tx, options, {
+        userId,
+        businessId,
+        locationId,
+      });
 
     // 1. Bypass Catalog Lookup & Inventory:
     // Do NOT perform any database variant lookup.
@@ -916,7 +1054,10 @@ export class OrdersService {
       );
     }
     const paymentMethod = dto.paymentMethod ?? dto.paymentType;
-    if (!paymentMethod || !Object.values(PaymentMethod).includes(paymentMethod)) {
+    if (
+      !paymentMethod ||
+      !Object.values(PaymentMethod).includes(paymentMethod)
+    ) {
       throw new BadRequestException(
         'Explicit payment method is required: COD, BKASH, NAGAD, BANK',
       );
@@ -924,6 +1065,8 @@ export class OrdersService {
 
     // 3. Database Transaction
     // Only COD orders increment physical drawer cash
+    const isExplicitShift =
+      typeof dto.shiftId === 'string' && dto.shiftId.trim() !== '';
     if (shiftId && paymentMethod === PaymentMethod.COD) {
       if (tx.shiftSession?.updateMany) {
         const res = await tx.shiftSession.updateMany({
@@ -932,10 +1075,16 @@ export class OrdersService {
             cashCollected: { increment: totalAmount },
           },
         });
-        if (res.count === 0 && !options) {
-          throw new ConflictException(
-            'Register shift is closed or inactive. Cash sale requires an open shift.',
-          );
+        if (res.count === 0) {
+          if (isExplicitShift) {
+            throw new ConflictException(
+              'Register shift is closed or inactive. Cash sale requires an open shift.',
+            );
+          }
+          shiftId = null;
+          if (options) {
+            this.addWarning(options.warnings, 'SHIFT_NOT_ATTACHED');
+          }
         }
       } else if (tx.shiftSession?.update) {
         await tx.shiftSession.update({
@@ -954,7 +1103,9 @@ export class OrdersService {
         clientOrderId: options?.clientOrderId,
         clientReceiptNumber: options?.clientReceiptNumber,
         deviceId: options?.deviceId,
-        occurredAt: options?.occurredAt ?? new Date(),
+        occurredAt: options?.occurredAt ?? operationTime,
+        syncPayloadHash: options?.syncPayloadHash ?? null,
+        ...(options?.syncProtocol === 2 ? { syncProtocol: 2 } : {}),
         orderType: OrderType.CUSTOM,
         status: OrderStatus.PAID,
         locationId,
@@ -976,13 +1127,60 @@ export class OrdersService {
       select: unifiedOrderSelect,
     });
 
-    return presentOrder(order);
+    if (options?.syncAuditMetadata && tx.auditLog?.create) {
+      await tx.auditLog.create({
+        data: {
+          action: 'OFFLINE_ORDER_ACCEPTED',
+          entityType: 'Order',
+          entityId: order.id,
+          businessId,
+          locationId,
+          actorId: userId,
+          metadata: {
+            ...options.syncAuditMetadata,
+            orderId: order.id,
+            orderCreatedAt: order.createdAt,
+          },
+        },
+      });
+    }
+
+    const receipt = presentOrder(order);
+    if (options?.syncProtocol === 2)
+      await this.storeLocalReceipt(tx, order.id, receipt, options.warnings);
+    return receipt;
+  }
+
+  private async reserveLocalIdentity(
+    tx: Prisma.TransactionClient,
+    options: OfflineOrderOptions,
+    scope: { userId: string; businessId: string; locationId: string },
+  ) {
+    await tx.financialSaleIdentity.create({
+      data: { id: options.clientOrderId, ...scope, protocol: 'LOCAL_FIRST_V2' },
+    });
+  }
+
+  private async storeLocalReceipt(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+    receipt: PresentedOrder,
+    warnings: string[],
+  ) {
+    // In the SAME database transaction: a commit always has its original receipt and warnings.
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        syncReceipt: toStoredJson(receipt),
+        syncWarnings: toStoredJson(warnings),
+      },
+    });
   }
 
   async syncOrders(
     actor: AccessTokenPayload,
     dto: SyncOrdersDto,
-  ): Promise<{ results: SyncOrderResult[] }> {
+  ): Promise<{ serverTime: string; results: SyncOrderResult[] }> {
     const syncActor =
       actor.role === Role.CASHIER
         ? actor
@@ -1002,6 +1200,18 @@ export class OrdersService {
       );
     }
 
+    const serverTime = new Date();
+    const envSkew = process.env.OFFLINE_MAX_FUTURE_SKEW_SECONDS;
+    const rawSkew =
+      this.configService?.get('OFFLINE_MAX_FUTURE_SKEW_SECONDS') ?? envSkew;
+    const parsedSkew =
+      rawSkew === undefined || rawSkew === '' ? 300 : Number(rawSkew);
+    const maxFutureSkewSeconds =
+      Number.isFinite(parsedSkew) && parsedSkew >= 0
+        ? Math.floor(parsedSkew)
+        : 300;
+    const maxSkewMs = maxFutureSkewSeconds * 1000;
+
     const results: SyncOrderResult[] = [];
     for (const rawOrder of dto.orders) {
       const clientOrderId =
@@ -1018,8 +1228,33 @@ export class OrdersService {
         results.push({
           clientOrderId,
           status: 'REJECTED',
+          errorCode: 'VALIDATION_ERROR',
           warnings: [],
           error: this.validationMessage(validationErrors),
+        });
+        continue;
+      }
+
+      // 1. Strict Timestamp Validation
+      const parsedInstant = parseStrictEventInstant(item.occurredAt);
+      if (!parsedInstant.isValid) {
+        if (parsedInstant.errorType === 'TIMEZONE_REQUIRED') {
+          results.push({
+            clientOrderId: item.clientOrderId,
+            status: 'REJECTED',
+            errorCode: 'TIMESTAMP_TIMEZONE_REQUIRED',
+            warnings: [],
+            error:
+              'Timestamp must include an explicit UTC offset or Z timezone',
+          });
+          continue;
+        }
+        results.push({
+          clientOrderId: item.clientOrderId,
+          status: 'REJECTED',
+          errorCode: 'TIMESTAMP_INVALID',
+          warnings: [],
+          error: parsedInstant.error || 'Invalid timestamp format',
         });
         continue;
       }
@@ -1029,93 +1264,126 @@ export class OrdersService {
         results.push({
           clientOrderId: item.clientOrderId,
           status: 'REJECTED',
+          errorCode: 'VALIDATION_ERROR',
           warnings: [],
           error: shapeError,
         });
         continue;
       }
 
-      const duplicate = this.prisma.order.findFirst
-        ? await this.prisma.order.findFirst({
-            where: {
-              clientOrderId: item.clientOrderId,
-              locationId: syncActor.locationId,
-              cashier: { businessId: syncActor.businessId },
-            },
-            select: {
-              id: true,
-              invoiceNumber: true,
-              totalAmount: true,
-              lines: { select: { quantity: true, unitPrice: true } },
-            },
-          })
-        : await this.prisma.order.findUnique({
-            where: { clientOrderId: item.clientOrderId },
-            select: {
-              id: true,
-              invoiceNumber: true,
-              totalAmount: true,
-              lines: { select: { quantity: true, unitPrice: true } },
-            },
-          });
-      if (duplicate) {
-        const payloadTotal = item.lines.reduce(
-          (sum, line) => sum + (line.unitPrice ?? 0) * line.quantity,
-          0,
-        );
-        const isPayloadConsistent =
-          (duplicate as any).totalAmount === undefined ||
-          (duplicate as any).totalAmount === payloadTotal;
-
-        if (!isPayloadConsistent) {
-          results.push({
-            clientOrderId: item.clientOrderId,
-            status: 'REJECTED',
-            warnings: [],
-            error:
-              'clientOrderId replay mismatch: payload does not match existing order',
-          });
-          continue;
-        }
-
+      // 2. Canonical Payload Hash
+      let computedPayloadHash: string;
+      try {
+        computedPayloadHash = computeSyncPayloadHash({
+          clientOrderId: item.clientOrderId,
+          deviceId: dto.deviceId,
+          businessId: syncActor.businessId,
+          locationId: syncActor.locationId,
+          cashierId: syncActor.sub,
+          occurredAt: parsedInstant.date!,
+          orderType: item.orderType,
+          paymentMethod: item.paymentMethod,
+          tenderedAmount: item.tenderedAmount,
+          shiftId: item.shiftId,
+          clientReceiptNumber: item.clientReceiptNumber,
+          customerName: item.customerName,
+          customerPhone: item.customerPhone,
+          notes: item.notes,
+          lines: item.lines,
+        });
+      } catch (err: any) {
         results.push({
           clientOrderId: item.clientOrderId,
-          status: 'DUPLICATE',
-          orderId: duplicate.id,
-          invoiceNumber: duplicate.invoiceNumber,
+          status: 'REJECTED',
+          errorCode: 'INVALID_FINANCIAL_VALUE',
           warnings: [],
+          error: err?.message || 'Invalid financial value in payload',
         });
         continue;
       }
 
-      const foreignDuplicate = (this.prisma.order as any).findFirst
+      // 3. Check for existing order (duplicate fast path before new-order clock-skew check)
+      const existingOrder = this.prisma.order.findUnique
         ? await this.prisma.order.findUnique({
             where: { clientOrderId: item.clientOrderId },
-            select: { id: true },
+            select: {
+              id: true,
+              invoiceNumber: true,
+              totalAmount: true,
+              occurredAt: true,
+              createdAt: true,
+              locationId: true,
+              cashierId: true,
+              deviceId: true,
+              syncPayloadHash: true,
+              location: { select: { businessId: true } },
+              lines: { select: { quantity: true, unitPrice: true } },
+            },
           })
         : null;
-      if (foreignDuplicate) {
+
+      if (existingOrder) {
+        const replayResult = await this.verifySyncReplay(
+          existingOrder,
+          computedPayloadHash,
+          syncActor,
+          dto.deviceId,
+          item,
+        );
+        results.push(replayResult);
+        continue;
+      }
+
+      // 4. Clock Skew Validation for new orders
+      const eventTimeMs = parsedInstant.date!.getTime();
+      const skewMs = eventTimeMs - serverTime.getTime();
+
+      if (skewMs > maxSkewMs) {
         results.push({
           clientOrderId: item.clientOrderId,
           status: 'REJECTED',
+          errorCode: 'TIMESTAMP_FUTURE_REVIEW_REQUIRED',
           warnings: [],
           error:
-            'clientOrderId is already used in another business or location',
+            'Event time exceeds the allowed future clock difference; retain this sale for review.',
         });
         continue;
       }
 
       const warnings: string[] = [];
+      if (skewMs > 0 && skewMs <= maxSkewMs) {
+        warnings.push('CLOCK_SKEW_TOLERATED');
+      }
+
       const options: OfflineOrderOptions = {
+        executionMode: 'LEGACY_SYNC',
         clientOrderId: item.clientOrderId,
         clientReceiptNumber: item.clientReceiptNumber,
         deviceId: dto.deviceId,
-        occurredAt: new Date(item.occurredAt),
+        occurredAt: parsedInstant.date!,
+        rawOccurredAt: item.occurredAt,
+        syncPayloadHash: computedPayloadHash,
         warnings,
+        syncAuditMetadata: {
+          actorId: syncActor.sub,
+          businessId: syncActor.businessId,
+          locationId: syncActor.locationId,
+          deviceId: dto.deviceId,
+          clientOrderId: item.clientOrderId,
+          rawOccurredAt: item.occurredAt,
+          normalizedOccurredAt: parsedInstant.date!.toISOString(),
+          serverReferenceTime: serverTime.toISOString(),
+          policyVersion: 'v1',
+          maxFutureSkewSeconds,
+          warnings,
+          eventTimeSource: 'DEVICE_REPORTED',
+        },
       };
 
       try {
         const common = {
+          businessId: syncActor.businessId,
+          locationId: syncActor.locationId,
           shiftId: item.shiftId,
           tenderedAmount: item.tenderedAmount,
           paymentMethod: item.paymentMethod ?? PaymentMethod.COD,
@@ -1159,31 +1427,42 @@ export class OrdersService {
           status: 'ACCEPTED',
           orderId: order.id,
           invoiceNumber: order.invoiceNumber,
+          occurredAt:
+            order.occurredAt?.toISOString?.() ??
+            parsedInstant.date!.toISOString(),
+          createdAt:
+            order.createdAt?.toISOString?.() ?? serverTime.toISOString(),
           warnings,
         });
       } catch (error) {
         if (isUniqueConstraintError(error)) {
-          const existing = (this.prisma.order as any).findFirst
-            ? await this.prisma.order.findFirst({
-                where: {
-                  clientOrderId: item.clientOrderId,
-                  locationId: syncActor.locationId,
-                  cashier: { businessId: syncActor.businessId },
-                },
-                select: { id: true, invoiceNumber: true },
-              })
-            : await this.prisma.order.findUnique({
+          const raceWinner = this.prisma.order.findUnique
+            ? await this.prisma.order.findUnique({
                 where: { clientOrderId: item.clientOrderId },
-                select: { id: true, invoiceNumber: true },
-              });
-          if (existing) {
-            results.push({
-              clientOrderId: item.clientOrderId,
-              status: 'DUPLICATE',
-              orderId: existing.id,
-              invoiceNumber: existing.invoiceNumber,
-              warnings: [],
-            });
+                select: {
+                  id: true,
+                  invoiceNumber: true,
+                  totalAmount: true,
+                  occurredAt: true,
+                  createdAt: true,
+                  locationId: true,
+                  cashierId: true,
+                  deviceId: true,
+                  syncPayloadHash: true,
+                  location: { select: { businessId: true } },
+                  lines: { select: { quantity: true, unitPrice: true } },
+                },
+              })
+            : null;
+          if (raceWinner) {
+            const replayResult = await this.verifySyncReplay(
+              raceWinner,
+              computedPayloadHash,
+              syncActor,
+              dto.deviceId,
+              item,
+            );
+            results.push(replayResult);
             continue;
           }
         }
@@ -1197,13 +1476,350 @@ export class OrdersService {
       }
     }
 
-    return { results };
+    return {
+      serverTime: serverTime.toISOString(),
+      results,
+    };
+  }
+
+  private async verifySyncReplay(
+    existing: any,
+    computedPayloadHash: string,
+    syncActor: {
+      businessId?: string | null;
+      locationId?: string | null;
+      sub: string;
+    },
+    deviceId: string,
+    item: SyncOrderItemDto,
+  ): Promise<SyncOrderResult> {
+    const existingBusinessId =
+      existing.location?.businessId ?? existing.businessId;
+    const isContextMatch =
+      existingBusinessId === syncActor.businessId &&
+      (!existing.locationId || existing.locationId === syncActor.locationId) &&
+      (!existing.cashierId || existing.cashierId === syncActor.sub) &&
+      (!existing.deviceId || existing.deviceId === deviceId);
+
+    if (!isContextMatch) {
+      return {
+        clientOrderId: item.clientOrderId,
+        status: 'REJECTED',
+        errorCode: 'SYNC_IDENTITY_CONFLICT',
+        error: 'clientOrderId is already used in another context',
+        warnings: [],
+      };
+    }
+
+    if (existing.syncPayloadHash) {
+      if (existing.syncPayloadHash !== computedPayloadHash) {
+        return {
+          clientOrderId: item.clientOrderId,
+          status: 'REJECTED',
+          errorCode: 'SYNC_PAYLOAD_MISMATCH',
+          error:
+            'clientOrderId replay mismatch: payload does not match existing order',
+          warnings: [],
+        };
+      }
+
+      let originalWarnings: string[] = [];
+      if (this.prisma.auditLog?.findFirst) {
+        const audit = await this.prisma.auditLog.findFirst({
+          where: {
+            action: 'OFFLINE_ORDER_ACCEPTED',
+            entityType: 'Order',
+            entityId: existing.id,
+          },
+          select: { metadata: true },
+        });
+        originalWarnings = (audit?.metadata as any)?.warnings || [];
+      }
+
+      return {
+        clientOrderId: item.clientOrderId,
+        status: 'DUPLICATE',
+        orderId: existing.id,
+        invoiceNumber: existing.invoiceNumber,
+        occurredAt:
+          existing.occurredAt?.toISOString?.() ??
+          (typeof existing.occurredAt === 'string' ? existing.occurredAt : ''),
+        createdAt:
+          existing.createdAt?.toISOString?.() ??
+          (typeof existing.createdAt === 'string' ? existing.createdAt : ''),
+        warnings: originalWarnings,
+      };
+    }
+
+    // Legacy unhashed order: check if confirmed
+    let confirmedAudit: any = null;
+    if (this.prisma.auditLog?.findFirst) {
+      confirmedAudit = await this.prisma.auditLog.findFirst({
+        where: {
+          action: 'LEGACY_SYNC_REPLAY_CONFIRMED',
+          entityType: 'Order',
+          entityId: existing.id,
+        },
+      });
+    }
+
+    if (confirmedAudit) {
+      const meta = confirmedAudit.metadata as Record<string, unknown> | null;
+      if (
+        meta?.payloadFingerprint &&
+        meta.payloadFingerprint !== computedPayloadHash
+      ) {
+        return {
+          clientOrderId: item.clientOrderId,
+          status: 'REJECTED',
+          errorCode: 'SYNC_PAYLOAD_MISMATCH',
+          error:
+            'clientOrderId replay mismatch: payload does not match admin-confirmed fingerprint',
+          warnings: [],
+        };
+      }
+
+      return {
+        clientOrderId: item.clientOrderId,
+        status: 'DUPLICATE',
+        orderId: existing.id,
+        invoiceNumber: existing.invoiceNumber,
+        occurredAt:
+          existing.occurredAt?.toISOString?.() ??
+          (typeof existing.occurredAt === 'string' ? existing.occurredAt : ''),
+        createdAt:
+          existing.createdAt?.toISOString?.() ??
+          (typeof existing.createdAt === 'string' ? existing.createdAt : ''),
+        warnings: ['LEGACY_REPLAY_ADMIN_CONFIRMED'],
+        reconciliationId: confirmedAudit.id,
+      };
+    }
+
+    // In legacy orders, if payload was modified (different total), check totals as well
+    const payloadTotal = item.lines.reduce(
+      (sum, line) => sum + (line.unitPrice ?? 0) * line.quantity,
+      0,
+    );
+    if (
+      existing.totalAmount !== undefined &&
+      existing.totalAmount !== payloadTotal
+    ) {
+      return {
+        clientOrderId: item.clientOrderId,
+        status: 'REJECTED',
+        errorCode: 'SYNC_PAYLOAD_MISMATCH',
+        error:
+          'clientOrderId replay mismatch: payload does not match existing order',
+        warnings: [],
+      };
+    }
+
+    return {
+      clientOrderId: item.clientOrderId,
+      status: 'REJECTED',
+      errorCode: 'LEGACY_SYNC_REPLAY_REVIEW_REQUIRED',
+      error:
+        'Legacy sync order requires admin review and confirmation before replay acknowledgment',
+      warnings: [],
+    };
+  }
+
+  async confirmLegacySync(
+    actor: AccessTokenPayload,
+    orderId: string,
+    dto: ConfirmLegacySyncDto,
+  ): Promise<{
+    status: 'DUPLICATE';
+    warnings: string[];
+    clientOrderId: string;
+    orderId: string;
+    invoiceNumber: string;
+    occurredAt: string;
+    createdAt: string;
+    reconciliationId: string;
+  }> {
+    if (actor.role !== Role.ADMIN && actor.role !== Role.SUPER_ADMIN) {
+      throw new ForbiddenException(
+        'Only administrators can confirm legacy sync replays',
+      );
+    }
+
+    if (!dto.reason || !dto.reason.trim()) {
+      throw new BadRequestException('Confirmation reason is required');
+    }
+
+    if (!dto.order || !dto.order.clientOrderId) {
+      throw new BadRequestException('Sync order payload is required');
+    }
+
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        location: true,
+        lines: true,
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    // Verify tenant authorization
+    if (actor.role === Role.ADMIN) {
+      const allowedBusinessIds = new Set(
+        [actor.businessId, ...(actor.businessIds || [])].filter(Boolean),
+      );
+      if (!allowedBusinessIds.has(order.location.businessId)) {
+        throw new ForbiddenException('You do not have access to this business');
+      }
+    }
+
+    if (!order.clientOrderId) {
+      throw new BadRequestException('Order does not have a clientOrderId');
+    }
+
+    if (order.clientOrderId !== dto.order.clientOrderId) {
+      throw new BadRequestException(
+        'clientOrderId mismatch between target order and submitted payload',
+      );
+    }
+
+    if (order.syncPayloadHash) {
+      throw new BadRequestException(
+        'Order already has an immutable syncPayloadHash and does not require legacy confirmation',
+      );
+    }
+
+    const payloadTotal = dto.order.lines.reduce(
+      (sum, l) => sum + (l.unitPrice ?? 0) * l.quantity,
+      0,
+    );
+    if (order.totalAmount !== payloadTotal) {
+      throw new BadRequestException(
+        'Material mismatch: submitted payload total amount differs from stored legacy order',
+      );
+    }
+
+    const expectedPaymentMethod = dto.order.paymentMethod ?? PaymentMethod.COD;
+    if (order.paymentMethod !== expectedPaymentMethod) {
+      throw new BadRequestException(
+        'Material mismatch: submitted payment method differs from stored legacy order',
+      );
+    }
+
+    if (order.lines.length !== dto.order.lines.length) {
+      throw new BadRequestException(
+        'Material mismatch: line item count differs from stored legacy order',
+      );
+    }
+
+    // Reconcile line item details (quantity, price, variant) between stored legacy order and submitted payload
+    for (const storedLine of order.lines) {
+      const match = dto.order.lines.find(
+        (l) =>
+          (l.variantId ? l.variantId === storedLine.variantId : true) &&
+          l.quantity === storedLine.quantity &&
+          l.unitPrice === storedLine.unitPrice,
+      );
+      if (!match) {
+        throw new BadRequestException(
+          'Material mismatch: line item details differ from stored legacy order',
+        );
+      }
+    }
+
+    // Compute reviewed payload fingerprint using original cashier context
+    const reviewedFingerprint = computeSyncPayloadHash({
+      clientOrderId: order.clientOrderId,
+      deviceId: dto.deviceId,
+      businessId: order.location.businessId,
+      locationId: order.locationId,
+      cashierId: order.cashierId,
+      occurredAt: dto.order.occurredAt,
+      orderType: dto.order.orderType,
+      paymentMethod: dto.order.paymentMethod,
+      tenderedAmount: dto.order.tenderedAmount,
+      shiftId: dto.order.shiftId,
+      clientReceiptNumber: dto.order.clientReceiptNumber,
+      customerName: dto.order.customerName,
+      customerPhone: dto.order.customerPhone,
+      notes: dto.order.notes,
+      lines: dto.order.lines,
+    });
+
+    const executeConfirmation = async (tx: Prisma.TransactionClient) => {
+      const existingAudit = await tx.auditLog.findFirst({
+        where: {
+          action: 'LEGACY_SYNC_REPLAY_CONFIRMED',
+          entityType: 'Order',
+          entityId: order.id,
+        },
+      });
+
+      if (existingAudit) {
+        const meta = existingAudit.metadata as Record<string, unknown> | null;
+        if (meta?.payloadFingerprint === reviewedFingerprint) {
+          return {
+            status: 'DUPLICATE' as const,
+            warnings: ['LEGACY_REPLAY_ADMIN_CONFIRMED'],
+            clientOrderId: order.clientOrderId!,
+            orderId: order.id,
+            invoiceNumber: order.invoiceNumber,
+            occurredAt: order.occurredAt.toISOString(),
+            createdAt: order.createdAt.toISOString(),
+            reconciliationId: existingAudit.id,
+          };
+        }
+        throw new ConflictException(
+          'A conflicting confirmation already exists for this legacy order',
+        );
+      }
+
+      const confirmedAt = new Date().toISOString();
+      const audit = await tx.auditLog.create({
+        data: {
+          action: 'LEGACY_SYNC_REPLAY_CONFIRMED',
+          entityType: 'Order',
+          entityId: order.id,
+          businessId: order.location.businessId,
+          locationId: order.locationId,
+          actorId: actor.sub,
+          metadata: {
+            reviewerId: actor.sub,
+            originalCashierId: order.cashierId,
+            businessId: order.location.businessId,
+            locationId: order.locationId,
+            deviceId: dto.deviceId,
+            clientOrderId: order.clientOrderId,
+            orderId: order.id,
+            payloadFingerprint: reviewedFingerprint,
+            reason: dto.reason.trim(),
+            confirmedAt,
+          },
+        },
+      });
+
+      return {
+        status: 'DUPLICATE' as const,
+        warnings: ['LEGACY_REPLAY_ADMIN_CONFIRMED'],
+        clientOrderId: order.clientOrderId!,
+        orderId: order.id,
+        invoiceNumber: order.invoiceNumber,
+        occurredAt: order.occurredAt.toISOString(),
+        createdAt: order.createdAt.toISOString(),
+        reconciliationId: audit.id,
+      };
+    };
+
+    if (this.prisma.$transaction) {
+      return this.prisma.$transaction(executeConfirmation);
+    }
+    return executeConfirmation(
+      this.prisma as unknown as Prisma.TransactionClient,
+    );
   }
 
   private validateSyncOrderShape(item: SyncOrderItemDto): string | null {
-    if (new Date(item.occurredAt).getTime() > Date.now()) {
-      return 'occurredAt must not be in the future';
-    }
     if (item.orderType === OrderType.CATALOG) {
       return item.lines.some((line) => !line.variantId)
         ? 'Every catalog line requires variantId'
@@ -1399,7 +2015,7 @@ export class OrdersService {
       if (dateRange) {
         where.occurredAt = {
           gte: dateRange.gte,
-          ...(dateRange.lte ? { lte: dateRange.lte } : {}),
+          lt: dateRange.lt,
         };
       }
     }
@@ -1579,6 +2195,8 @@ export class OrdersService {
       throw new NotFoundException('Location not found for business');
     }
 
+    const operationTime = new Date();
+
     for (let attempt = 1; attempt <= INVOICE_ATTEMPTS; attempt += 1) {
       try {
         return await this.prisma.$transaction(
@@ -1590,6 +2208,7 @@ export class OrdersService {
               dto,
               createReceiptNumber(),
               location.id,
+              operationTime,
             ),
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
         );
@@ -1628,23 +2247,53 @@ export class OrdersService {
     dto: CreateOrderDto,
     receiptNumber: string,
     fallbackLocationId?: string,
+    operationTime = new Date(),
   ): Promise<PresentedOrder> {
     const locationId = actor.locationId ?? fallbackLocationId;
     if (!locationId) {
       throw new BadRequestException('Location ID is required');
     }
 
-    const shift = await tx.shiftSession.findFirst({
-      where: {
-        businessId,
-        cashierId: actor.sub,
-        status: ShiftStatus.OPEN,
-        locationId,
-      },
-      orderBy: { openedAt: 'desc' },
-      select: { id: true },
-    });
-    const shiftId = shift?.id ?? null;
+    let shiftId: string | null = null;
+    if (dto.shiftId === null) {
+      shiftId = null;
+    } else if (typeof dto.shiftId === 'string' && dto.shiftId.trim() !== '') {
+      const shift = await tx.shiftSession.findFirst({
+        where: { id: dto.shiftId.trim(), businessId },
+        select: { id: true, status: true, locationId: true, cashierId: true },
+      });
+      const canAttach =
+        shift?.status === ShiftStatus.OPEN &&
+        (!shift.locationId || shift.locationId === locationId) &&
+        (actor.role !== Role.CASHIER ||
+          !shift.cashierId ||
+          shift.cashierId === actor.sub);
+
+      if (!canAttach) {
+        throw new BadRequestException(
+          'Provided shiftId is invalid, closed, or not accessible',
+        );
+      }
+      shiftId = shift.id;
+    } else {
+      const { start: startOfToday, nextStart: nextDayStart } =
+        getDhakaDayRange(operationTime);
+      const shift = await tx.shiftSession.findFirst({
+        where: {
+          businessId,
+          cashierId: actor.sub,
+          status: ShiftStatus.OPEN,
+          locationId,
+          openedAt: {
+            gte: startOfToday,
+            lt: nextDayStart,
+          },
+        },
+        orderBy: { openedAt: 'desc' },
+        select: { id: true },
+      });
+      shiftId = shift?.id ?? null;
+    }
 
     const variantStockMap = new Map<string, number>();
     for (const item of dto.items) {
@@ -1838,6 +2487,8 @@ export class OrdersService {
 
     const totalAmount = sumMoney(lines.map((line) => line.subtotal));
 
+    const isExplicitShift =
+      typeof dto.shiftId === 'string' && dto.shiftId.trim() !== '';
     if (shiftId) {
       if (tx.shiftSession?.updateMany) {
         const res = await tx.shiftSession.updateMany({
@@ -1847,9 +2498,12 @@ export class OrdersService {
           },
         });
         if (res.count === 0) {
-          throw new ConflictException(
-            'Register shift is closed or inactive. Cash sale requires an open shift.',
-          );
+          if (isExplicitShift) {
+            throw new ConflictException(
+              'Register shift is closed or inactive. Cash sale requires an open shift.',
+            );
+          }
+          shiftId = null;
         }
       } else if (tx.shiftSession?.update) {
         await tx.shiftSession.update({
@@ -1865,6 +2519,7 @@ export class OrdersService {
       data: {
         invoiceNumber: receiptNumber,
         receiptNumber,
+        occurredAt: operationTime,
         orderType: lines.some((l) => l.variantId)
           ? OrderType.CATALOG
           : OrderType.CUSTOM,

@@ -25,6 +25,7 @@ import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { OrderStatus, OrderType, PaymentMethod } from '@prisma/client';
+import { ConfirmLegacySyncDto } from './dto/confirm-legacy-sync.dto';
 import { CreateCatalogOrderDto } from './dto/create-catalog-order.dto';
 import { CreateCustomOrderDto } from './dto/create-custom-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
@@ -115,11 +116,11 @@ export class OrdersController {
   @ApiOperation({
     summary: '[ADMIN, CASHIER] Synchronize queued offline orders',
     description:
-      'Processes up to 100 locally committed orders independently. Durable deduplication uses each clientOrderId; no Idempotency-Key header is required.',
+      'Processes up to 100 locally committed orders independently. Requires strict ISO 8601 with timezone/offset for occurredAt, verifies clock skew against OFFLINE_MAX_FUTURE_SKEW_SECONDS, uses canonical SHA-256 payload hash fingerprinting for tamper-proof deduplication, and returns serverTime.',
   })
   @ApiResponse({
     status: 200,
-    description: 'Per-order synchronization results',
+    description: 'Per-order synchronization results with serverTime',
   })
   syncOrders(
     @CurrentUser() actor: AccessTokenPayload,
@@ -301,6 +302,37 @@ export class OrdersController {
     @Param('id') id: string,
   ) {
     return this.ordersService.getOrderById(actor, id);
+  }
+
+  @Post(':id/confirm-legacy-sync')
+  @Roles('ADMIN', 'SUPER_ADMIN')
+  @HttpCode(HttpStatus.OK)
+  @ResponseMessage('Legacy sync order confirmed')
+  @ApiOperation({
+    summary: '[ADMIN, SUPER_ADMIN] Confirm legacy unhashed sync order',
+    description:
+      'Records administrative audit confirmation for legacy offline orders created prior to sync payload hashing, unblocking subsequent replay handling.',
+  })
+  @ApiParam({ name: 'id', description: 'Order UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Legacy sync order confirmed successfully',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Order already hashed or rationale invalid',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'Forbidden - requires ADMIN or SUPER_ADMIN role',
+  })
+  @ApiResponse({ status: 404, description: 'Order not found' })
+  async confirmLegacySync(
+    @CurrentUser() actor: AccessTokenPayload,
+    @Param('id') id: string,
+    @Body() dto: ConfirmLegacySyncDto,
+  ) {
+    return this.ordersService.confirmLegacySync(actor, id, dto);
   }
 
   // Legacy route support
