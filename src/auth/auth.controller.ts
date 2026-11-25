@@ -7,18 +7,27 @@ import {
   Req,
   Res,
   UnauthorizedException,
+  UseGuards,
 } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import { Role } from '@prisma/client';
 import type { Request, Response } from 'express';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResponseMessage } from '../common/decorators/response-message.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import type { AccessTokenPayload } from '../common/types/access-token-payload';
 import { AuthService } from './auth.service';
+import { ForceLogoutDto } from './dto/force-logout.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RolesGuard } from './guards/roles.guard';
+import { extractCleanJwt } from './strategies/jwt.strategy';
 
 const sensitiveThrottle = { default: { limit: 5, ttl: 60_000 } };
 
@@ -110,13 +119,20 @@ export class AuthController {
   @Post('logout')
   @ApiOperation({
     summary: '[PUBLIC] Logout user',
-    description: 'Clears authentication cookies (refreshToken, accessToken).',
+    description:
+      'Clears authentication cookies (refreshToken, accessToken) and invalidates active cashier session on server.',
   })
   @ApiResponse({ status: 200, description: 'Logged out successfully' })
   @HttpCode(HttpStatus.OK)
   @ResponseMessage('Logged out successfully')
-  logout(@Res({ passthrough: true }) response: Response) {
+  async logout(
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
     const isProduction = process.env.NODE_ENV === 'production';
+    const accessToken = extractCleanJwt(request);
+    const refreshToken = request.cookies?.refreshToken;
+
     response.clearCookie('refreshToken', {
       httpOnly: true,
       secure: isProduction,
@@ -129,7 +145,35 @@ export class AuthController {
       sameSite: isProduction ? 'strict' : 'lax',
       path: '/',
     });
-    return { loggedOut: true };
+
+    return this.authService.logout({
+      accessToken: accessToken || undefined,
+      refreshToken: refreshToken || undefined,
+    });
+  }
+
+  @Post('force-logout')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @ApiOperation({
+    summary: '[ADMIN] Force logout an active cashier',
+    description:
+      'Terminates an active cashier session immediately within the store admin business.',
+  })
+  @ApiResponse({ status: 200, description: 'Cashier session terminated' })
+  @ApiResponse({
+    status: 403,
+    description: 'Cashier does not belong to admin business',
+  })
+  @ApiResponse({ status: 404, description: 'Cashier account not found' })
+  @HttpCode(HttpStatus.OK)
+  @ResponseMessage('Cashier force-logged out')
+  forceLogout(
+    @CurrentUser() admin: AccessTokenPayload,
+    @Body() dto: ForceLogoutDto,
+  ) {
+    return this.authService.forceLogout(admin, dto);
   }
 
   private setRefreshTokenCookie(response: Response, token: string): void {

@@ -10,7 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { AccountStatus, Role, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { randomInt } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
 import {
   AccessTokenPayload,
   PasswordResetTokenPayload,
@@ -30,6 +30,7 @@ import { EmailTemplateService } from '../identity/email-template.service';
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ForceLogoutDto } from './dto/force-logout.dto';
 import { LoginDto } from './dto/login.dto';
 import { LoginType } from './dto/login-type.enum';
 import { RegisterDto } from './dto/register.dto';
@@ -101,6 +102,46 @@ export class AuthService {
 
     if (user.role === Role.CASHIER) {
       await this.assertCashierAssignment(user);
+
+      const sessionId = randomUUID();
+      const updated = await this.prisma.user.updateMany({
+        where: {
+          id: user.id,
+          isLoggedIn: false,
+          deletedAt: null,
+        },
+        data: {
+          isLoggedIn: true,
+          sessionId,
+          lastLoginAt: new Date(),
+        },
+      });
+
+      if (updated.count === 0) {
+        throw new ConflictException('Already logged in');
+      }
+
+      let accessToken: string;
+      let refreshToken: string;
+      try {
+        accessToken = await this.signAccessToken(user, sessionId);
+        refreshToken = await this.signRefreshToken(user.id, sessionId);
+      } catch (error) {
+        await this.prisma.user.updateMany({
+          where: { id: user.id, sessionId },
+          data: {
+            isLoggedIn: false,
+            sessionId: null,
+          },
+        });
+        throw error;
+      }
+
+      return {
+        accessToken,
+        refreshToken,
+        user: this.toPublicUser(user),
+      };
     }
 
     const accessToken = await this.signAccessToken(user);
@@ -127,14 +168,33 @@ export class AuthService {
     const sessionUser = await this.attachOwnedBusiness(user);
 
     if (sessionUser.role === Role.CASHIER) {
+      if (
+        !payload.sessionId ||
+        !user.isLoggedIn ||
+        !user.sessionId ||
+        payload.sessionId !== user.sessionId
+      ) {
+        throw new UnauthorizedException(
+          'Refresh token is invalid or session has ended',
+        );
+      }
       await this.assertCashierAssignment(sessionUser);
+      return {
+        accessToken: await this.signAccessToken(
+          sessionUser,
+          payload.sessionId,
+        ),
+      };
     }
 
     return { accessToken: await this.signAccessToken(sessionUser) };
   }
 
-  async signAccessToken(user: User): Promise<string> {
-    const payload = await this.buildAccessPayload(user);
+  async signAccessToken(
+    user: User,
+    sessionId?: string | null,
+  ): Promise<string> {
+    const payload = await this.buildAccessPayload(user, sessionId);
     return this.jwtService.signAsync(payload);
   }
 
@@ -254,6 +314,7 @@ export class AuthService {
     }
 
     const password = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
+    const isCashier = user.role === Role.CASHIER;
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -261,6 +322,13 @@ export class AuthService {
         password,
         resetOtpHash: null,
         otpExpiry: null,
+        ...(isCashier
+          ? {
+              isLoggedIn: false,
+              sessionId: null,
+              lastLogoutAt: new Date(),
+            }
+          : {}),
       },
     });
 
@@ -366,7 +434,10 @@ export class AuthService {
     throw new ForbiddenException('Account is not active');
   }
 
-  private async buildAccessPayload(user: User): Promise<AccessTokenPayload> {
+  private async buildAccessPayload(
+    user: User,
+    sessionId?: string | null,
+  ): Promise<AccessTokenPayload> {
     let businessIds: string[] = [];
     let locationIds: string[] = [];
 
@@ -398,6 +469,7 @@ export class AuthService {
       locationId: user.locationId,
       businessIds,
       locationIds,
+      ...(sessionId ? { sessionId } : {}),
     };
   }
 
@@ -462,16 +534,163 @@ export class AuthService {
     }
   }
 
-  private async signRefreshToken(userId: string): Promise<string> {
+  private async signRefreshToken(
+    userId: string,
+    sessionId?: string | null,
+  ): Promise<string> {
     const expiresIn = this.configService.getOrThrow<string>('JWT_REFRESH_TTL');
 
     return this.jwtService.signAsync(
-      { sub: userId, purpose: 'refresh' } satisfies RefreshTokenPayload,
+      {
+        sub: userId,
+        purpose: 'refresh',
+        ...(sessionId ? { sessionId } : {}),
+      } satisfies RefreshTokenPayload,
       {
         secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
         expiresIn: expiresIn as JwtSignOptions['expiresIn'],
       },
     );
+  }
+
+  async logout(tokens?: {
+    accessToken?: string;
+    refreshToken?: string;
+  }): Promise<{ loggedOut: true }> {
+    let targetUserId: string | null = null;
+    let targetSessionId: string | null = null;
+
+    if (tokens?.accessToken) {
+      try {
+        const accessSecret =
+          this.configService.getOrThrow<string>('JWT_ACCESS_SECRET');
+        const payload = await this.jwtService.verifyAsync<AccessTokenPayload>(
+          tokens.accessToken,
+          { secret: accessSecret, ignoreExpiration: true },
+        );
+        if (payload?.sub && payload?.sessionId) {
+          targetUserId = payload.sub;
+          targetSessionId = payload.sessionId;
+        }
+      } catch {
+        // Ignore token verification errors during logout
+      }
+    }
+
+    if (!targetSessionId && tokens?.refreshToken) {
+      try {
+        const refreshSecret =
+          this.configService.getOrThrow<string>('JWT_REFRESH_SECRET');
+        const payload = await this.jwtService.verifyAsync<RefreshTokenPayload>(
+          tokens.refreshToken,
+          { secret: refreshSecret, ignoreExpiration: true },
+        );
+        if (payload?.sub && payload?.sessionId) {
+          targetUserId = payload.sub;
+          targetSessionId = payload.sessionId;
+        }
+      } catch {
+        // Ignore token verification errors during logout
+      }
+    }
+
+    if (targetUserId && targetSessionId) {
+      await this.prisma.user.updateMany({
+        where: {
+          id: targetUserId,
+          sessionId: targetSessionId,
+        },
+        data: {
+          isLoggedIn: false,
+          sessionId: null,
+          lastLogoutAt: new Date(),
+        },
+      });
+    }
+
+    return { loggedOut: true };
+  }
+
+  async forceLogout(
+    admin: AccessTokenPayload,
+    dto: ForceLogoutDto,
+  ): Promise<{ loggedOut: true; cashierId: string }> {
+    const cashier = await this.prisma.user.findFirst({
+      where: {
+        id: dto.cashierId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        role: true,
+        businessId: true,
+        locationId: true,
+      },
+    });
+
+    if (!cashier || cashier.role !== Role.CASHIER) {
+      throw new NotFoundException('Cashier account not found');
+    }
+
+    let ownedBusinessIds = admin.businessIds ?? [];
+    if (admin.businessId && !ownedBusinessIds.includes(admin.businessId)) {
+      ownedBusinessIds = [...ownedBusinessIds, admin.businessId];
+    }
+
+    if (!cashier.businessId || !ownedBusinessIds.includes(cashier.businessId)) {
+      const isOwner = cashier.businessId
+        ? await this.prisma.business.findFirst({
+            where: {
+              id: cashier.businessId,
+              ownerId: admin.sub,
+              deletedAt: null,
+            },
+            select: { id: true },
+          })
+        : null;
+
+      if (!isOwner) {
+        throw new ForbiddenException(
+          'Cashier does not belong to your business',
+        );
+      }
+    }
+
+    const forcedAt = new Date();
+    await this.prisma.user.updateMany({
+      where: {
+        id: cashier.id,
+        role: Role.CASHIER,
+      },
+      data: {
+        isLoggedIn: false,
+        sessionId: null,
+        lastLogoutAt: forcedAt,
+      },
+    });
+
+    if (this.prisma.auditLog?.create) {
+      await this.prisma.auditLog
+        .create({
+          data: {
+            action: 'FORCE_LOGOUT_CASHIER',
+            entityType: 'User',
+            entityId: cashier.id,
+            businessId: cashier.businessId,
+            locationId: cashier.locationId,
+            actorId: admin.sub,
+            metadata: {
+              adminId: admin.sub,
+              cashierId: cashier.id,
+              reason: 'Admin requested force logout',
+              forcedAt: forcedAt.toISOString(),
+            },
+          },
+        })
+        .catch(() => undefined);
+    }
+
+    return { loggedOut: true, cashierId: cashier.id };
   }
 
   private async readRefreshToken(token: string): Promise<RefreshTokenPayload> {

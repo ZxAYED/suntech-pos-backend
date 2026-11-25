@@ -41,22 +41,30 @@ describe('JwtStrategy', () => {
       publicId: 'CSH-1',
       role: Role.CASHIER,
       status: AccountStatus.SUSPENDED,
+      isLoggedIn: true,
+      sessionId: 'sess-1',
       businessId: 'biz-1',
       locationId: 'loc-1',
       ownedBusinesses: [],
     });
 
     await expect(
-      strategy.validate({ sub: 'cashier-1', role: Role.CASHIER }),
+      strategy.validate({
+        sub: 'cashier-1',
+        role: Role.CASHIER,
+        sessionId: 'sess-1',
+      }),
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('rebuilds cashier scope from current database assignments', async () => {
+  it('rebuilds cashier scope from current database assignments when session matches', async () => {
     userFindFirst.mockResolvedValue({
       id: 'cashier-1',
       publicId: 'CSH-1',
       role: Role.CASHIER,
       status: AccountStatus.ACTIVE,
+      isLoggedIn: true,
+      sessionId: 'sess-1',
       businessId: 'biz-current',
       locationId: 'loc-current',
       ownedBusinesses: [],
@@ -67,6 +75,7 @@ describe('JwtStrategy', () => {
       strategy.validate({
         sub: 'cashier-1',
         role: Role.CASHIER,
+        sessionId: 'sess-1',
         businessId: 'biz-stale',
         locationId: 'loc-stale',
       }),
@@ -76,11 +85,77 @@ describe('JwtStrategy', () => {
         locationId: 'loc-current',
         businessIds: ['biz-current'],
         locationIds: ['loc-current'],
+        sessionId: 'sess-1',
       }),
     );
   });
 
-  it('rebuilds admin ownership arrays from active businesses', async () => {
+  it('rejects cashier token when token lacks sessionId', async () => {
+    userFindFirst.mockResolvedValue({
+      id: 'cashier-1',
+      publicId: 'CSH-1',
+      role: Role.CASHIER,
+      status: AccountStatus.ACTIVE,
+      isLoggedIn: true,
+      sessionId: 'sess-1',
+      businessId: 'biz-1',
+      locationId: 'loc-1',
+      ownedBusinesses: [],
+    });
+
+    await expect(
+      strategy.validate({
+        sub: 'cashier-1',
+        role: Role.CASHIER,
+      }),
+    ).rejects.toThrow('Session is invalid or has expired');
+  });
+
+  it('rejects cashier token when sessionId does not match active DB session', async () => {
+    userFindFirst.mockResolvedValue({
+      id: 'cashier-1',
+      publicId: 'CSH-1',
+      role: Role.CASHIER,
+      status: AccountStatus.ACTIVE,
+      isLoggedIn: true,
+      sessionId: 'sess-current',
+      businessId: 'biz-1',
+      locationId: 'loc-1',
+      ownedBusinesses: [],
+    });
+
+    await expect(
+      strategy.validate({
+        sub: 'cashier-1',
+        role: Role.CASHIER,
+        sessionId: 'sess-stale',
+      }),
+    ).rejects.toThrow('Session is invalid or has expired');
+  });
+
+  it('rejects cashier token when isLoggedIn is false in DB', async () => {
+    userFindFirst.mockResolvedValue({
+      id: 'cashier-1',
+      publicId: 'CSH-1',
+      role: Role.CASHIER,
+      status: AccountStatus.ACTIVE,
+      isLoggedIn: false,
+      sessionId: 'sess-1',
+      businessId: 'biz-1',
+      locationId: 'loc-1',
+      ownedBusinesses: [],
+    });
+
+    await expect(
+      strategy.validate({
+        sub: 'cashier-1',
+        role: Role.CASHIER,
+        sessionId: 'sess-1',
+      }),
+    ).rejects.toThrow('Session is invalid or has expired');
+  });
+
+  it('rebuilds admin ownership arrays from active businesses without requiring sessionId', async () => {
     userFindFirst.mockResolvedValue({
       id: 'admin-1',
       publicId: 'ADM-1',

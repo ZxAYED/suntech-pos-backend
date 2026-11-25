@@ -8,6 +8,7 @@ export interface AccessTokenPayload {
   locationId?: string | null;
   businessIds?: string[];
   locationIds?: string[];
+  sessionId?: string | null;
 }
 
 export interface PasswordResetTokenPayload {
@@ -18,4 +19,5 @@ export interface PasswordResetTokenPayload {
 export interface RefreshTokenPayload {
   sub: string;
   purpose: 'refresh';
+  sessionId?: string | null;
 }

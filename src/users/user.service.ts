@@ -273,7 +273,14 @@ export class UserService {
           ...(dto.monthlySalary !== undefined
             ? { monthlySalary: dto.monthlySalary }
             : {}),
-          ...(passwordHash !== undefined ? { password: passwordHash } : {}),
+          ...(passwordHash !== undefined
+            ? {
+                password: passwordHash,
+                isLoggedIn: false,
+                sessionId: null,
+                lastLogoutAt: new Date(),
+              }
+            : {}),
         },
         select: {
           ...userProfileSelect,

@@ -11,9 +11,10 @@ export class EmailTemplateService {
   private readonly logger = new Logger(EmailTemplateService.name);
 
   sendPasswordReset(input: PasswordResetEmailInput): void {
-    const html = this.renderPasswordReset(input);
-
-    this.logger.log(`Password reset email for ${input.email}\n${html}`);
+    // This is only a log hook; MailService handles the actual delivery.
+    // Never expose an active OTP, recipient, or full HTML in application logs.
+    void input;
+    this.logger.log('Password reset email prepared');
   }
 
   renderPasswordReset(input: PasswordResetEmailInput): string {

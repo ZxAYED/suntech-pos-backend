@@ -69,6 +69,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         status: true,
         businessId: true,
         locationId: true,
+        isLoggedIn: true,
+        sessionId: true,
         ownedBusinesses: {
           where: { deletedAt: null },
           select: {
@@ -90,6 +92,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
 
     if (user.role === Role.CASHIER) {
+      if (
+        !payload.sessionId ||
+        !user.isLoggedIn ||
+        !user.sessionId ||
+        payload.sessionId !== user.sessionId
+      ) {
+        throw new UnauthorizedException('Session is invalid or has expired');
+      }
+
       if (!user.businessId || !user.locationId) {
         throw new ForbiddenException(
           'Cashier account must be assigned to an active business and branch location',
@@ -119,6 +130,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         locationId: user.locationId,
         businessIds: [user.businessId],
         locationIds: [user.locationId],
+        sessionId: user.sessionId,
       };
     }
 
